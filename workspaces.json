@@ -1,47 +1,57 @@
 {
-  "react project": {
+  "311": {
     "description": "My main React app",
     "items": [
-      { "type": "vscode", "path": "/Users/you/projects/my-react-app" },
-      { "type": "url",    "path": "http://localhost:3000" },
-      { "type": "url",    "path": "https://react.dev/reference/react" }
+      {
+        "type": "url",
+        "path": "https://www2.hawaii.edu/~berneyk/ics311/sp26/mw/"
+      },
+      {
+        "type": "url",
+        "path": "https://www2.hawaii.edu/~berneyk/ics311/sp26/mw/topics.html"
+      },
+      {
+        "type": "url",
+        "path": "https://lamaku.hawaii.edu/d2l/home/111413"
+      }
     ]
   },
-
-  "work morning": {
-    "description": "Morning work setup",
+  "314": {
+    "description": "Daily work setup",
     "items": [
-      { "type": "url",  "path": "https://gmail.com" },
-      { "type": "url",  "path": "https://calendar.google.com" },
-      { "type": "url",  "path": "https://linear.app" },
-      { "type": "app",  "path": "Slack" }
+      {
+        "type": "url",
+        "path": "https://github.com/cycle5ense"
+      },
+      {
+        "type": "vscode",
+        "path": "C:\\Users\\paten\\OneDrive\\Desktop\\GitHub\\cycle5ense.github.io"
+      },
+      {
+        "type": "vscode",
+        "path": "C:\\Users\\paten\\OneDrive\\Desktop\\GitHub\\cycle5ense"
+      }
     ]
   },
-
-  "design": {
-    "description": "Design workspace",
+  "japanese": {
+    "description": "",
     "items": [
-      { "type": "url", "path": "https://figma.com" },
-      { "type": "url", "path": "https://dribbble.com" },
-      { "type": "app", "path": "Figma" }
-    ]
-  },
-
-  "study": {
-    "description": "Study session",
-    "items": [
-      { "type": "url",    "path": "https://notion.so" },
-      { "type": "url",    "path": "https://chatgpt.com" },
-      { "type": "app",    "path": "Spotify" }
-    ]
-  },
-
-  "python backend": {
-    "description": "Python API project",
-    "items": [
-      { "type": "vscode",   "path": "/Users/you/projects/my-api" },
-      { "type": "url",      "path": "http://localhost:8000/docs" },
-      { "type": "terminal", "path": "", "command": "cd /Users/you/projects/my-api && source venv/bin/activate" }
+      {
+        "type": "url",
+        "path": "https://lamaku.hawaii.edu/content/enforced/108825-MAN.85125.202630-JPN-102/Lesson%20Schedules/L.7%20Schedule%20(Spring%202026).pdf?isCourseFile=true&ou=108825"
+      },
+      {
+        "type": "url",
+        "path": "https://lamaku.hawaii.edu/content/enforced/108825-MAN.85125.202630-JPN-102/Japanese%20101%20textbooks/Jpn%20102%20OC%20Textbook%20(Fall%202025).pdf?isCourseFile=true&ou=108825"
+      },
+      {
+        "type": "url",
+        "path": "https://lamaku.hawaii.edu/content/enforced/108825-MAN.85125.202630-JPN-102/Japanese%20101%20textbooks/Jpn%20102%20RW%20Textbook%20(Fall%202025).pdf?isCourseFile=true&ou=108825"
+      },
+      {
+        "type": "url",
+        "path": "https://translate.google.com/"
+      }
     ]
   }
 }

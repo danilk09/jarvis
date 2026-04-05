@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 JARVIS - Voice-Activated AI Assistant
-Clap twice → speak your command → Claude figures out what to do
+Clap twice -> speak your command -> local AI figures out what to do
 """
 
 import os
@@ -11,26 +11,30 @@ import time
 import subprocess
 import webbrowser
 import platform
-import anthropic
+import requests
 
 try:
     import sounddevice as sd
     import numpy as np
-    import speech_recognition as sr
+    from faster_whisper import WhisperModel
+    import soundfile as sf
 except ImportError:
-    print("Missing dependencies. Run: pip install sounddevice numpy SpeechRecognition anthropic")
+    print("Missing dependencies. Run: pip install sounddevice numpy faster-whisper soundfile")
     sys.exit(1)
 
-# ── Config ──────────────────────────────────────────────────────────────────
+print("  Loading Whisper model (first run may take a moment)...")
+WHISPER_MODEL = WhisperModel("base", device="cpu", compute_type="int8")
+
+# ── Config ────────────────────────────────────────────────────────────────────
 WORKSPACES_FILE = os.path.join(os.path.dirname(__file__), "workspaces.json")
-CLAP_THRESHOLD  = 0.3      # 0.0 to 1.0 — raise if too sensitive, lower if not detecting
-CLAP_GAP_MIN    = 0.15     # min seconds between two claps
-CLAP_GAP_MAX    = 1.2      # max seconds between two claps
+CLAP_THRESHOLD  = 0.3
+CLAP_GAP_MIN    = 0.15
+CLAP_GAP_MAX    = 1.2
 SAMPLE_RATE     = 44100
 CHUNK           = 1024
-OS              = platform.system()  # "Darwin" | "Windows" | "Linux"
+OS              = platform.system()
 
-# ── Workspaces ───────────────────────────────────────────────────────────────
+# ── Workspaces ────────────────────────────────────────────────────────────────
 def load_workspaces():
     if os.path.exists(WORKSPACES_FILE):
         with open(WORKSPACES_FILE) as f:
@@ -85,8 +89,8 @@ def open_workspace(name, workspaces):
 
     return True, f"Opened workspace '{name}': {', '.join(opened)}"
 
-# ── System Actions ────────────────────────────────────────────────────────────
-def execute_action(action: dict, workspaces: dict) -> str:
+# ── System Actions ─────────────────────────────────────────────────────────────
+def execute_action(action, workspaces):
     kind   = action.get("type")
     target = action.get("target", "")
     query  = action.get("query", "")
@@ -148,44 +152,53 @@ def execute_action(action: dict, workspaces: dict) -> str:
 
     return "Unknown action"
 
-# ── Claude Brain ──────────────────────────────────────────────────────────────
-def ask_claude(command: str, workspaces: dict) -> list:
-    workspace_list = json.dumps(list(workspaces.keys()), indent=2)
-    client = anthropic.Anthropic()
+# ── Ollama Brain ───────────────────────────────────────────────────────────────
+def ask_ollama(command, workspaces):
+    workspace_list = json.dumps(list(workspaces.keys()))
 
-    system = f"""You are JARVIS, a voice assistant. Parse the user's voice command and return a JSON array of actions to perform.
-
-Available workspace names: {workspace_list}
-
-Action types:
-- {{"type": "workspace", "target": "<name>"}}
-- {{"type": "url", "target": "<url>"}}
-- {{"type": "search", "engine": "google|youtube|github", "query": "<q>"}}
-- {{"type": "app", "target": "<app name>"}}
-- {{"type": "vscode", "target": "<path>"}}
-- {{"type": "file", "target": "<path>"}}
-- {{"type": "terminal", "command": "<cmd>"}}
-
-Match workspace names fuzzily. Return ONLY a JSON array, no explanation."""
-
-    response = client.messages.create(
-        model="claude-sonnet-4-20250514",
-        max_tokens=512,
-        system=system,
-        messages=[{"role": "user", "content": command}]
+    prompt = (
+        "You are JARVIS, a voice assistant. Parse the user's voice command and return a JSON array of actions.\n\n"
+        f"Available workspaces: {workspace_list}\n\n"
+        "Action types:\n"
+        '- {"type": "workspace", "target": "<name>"}\n'
+        '- {"type": "url", "target": "<url>"}\n'
+        '- {"type": "search", "engine": "google|youtube|github", "query": "<q>"}\n'
+        '- {"type": "app", "target": "<app name>"}\n'
+        '- {"type": "vscode", "target": "<path>"}\n'
+        '- {"type": "file", "target": "<path>"}\n\n'
+        "Match workspace names fuzzily. Return ONLY a valid JSON array. No explanation, no markdown, no code fences.\n\n"
+        f"User command: {command}\n\n"
+        "JSON array:"
     )
 
-    raw = response.content[0].text.strip()
-    if raw.startswith("```"):
+    response = requests.post("http://localhost:11434/api/generate", json={
+        "model": "llama3.2",
+        "prompt": prompt,
+        "stream": False
+    }, timeout=30)
+
+    raw = response.json()["response"].strip()
+
+    # Strip markdown fences if model adds them anyway
+    if "```" in raw:
         raw = raw.split("```")[1]
         if raw.startswith("json"):
             raw = raw[4:]
+        raw = raw.split("```")[0]
+
+    # Extract just the JSON array
+    start = raw.find("[")
+    end   = raw.rfind("]") + 1
+    if start != -1 and end > start:
+        raw = raw[start:end]
+
     return json.loads(raw.strip())
 
-# ── Clap Detection (sounddevice) ──────────────────────────────────────────────
-def detect_claps() -> bool:
+# ── Clap Detection ─────────────────────────────────────────────────────────────
+def detect_claps():
     clap_times = []
-    print("  👂 Listening for claps...")
+    done = [False]
+    print("  Listening for claps...")
 
     def callback(indata, frames, time_info, status):
         volume = float(np.abs(indata).max())
@@ -196,75 +209,117 @@ def detect_claps() -> bool:
             if not clap_times or (now - clap_times[-1]) > CLAP_GAP_MIN:
                 clap_times.append(now)
             if len(clap_times) >= 2:
+                done[0] = True
                 raise sd.CallbackStop()
 
     with sd.InputStream(samplerate=SAMPLE_RATE, channels=1,
                         blocksize=CHUNK, callback=callback):
-        while len(clap_times) < 2:
+        while not done[0]:
             time.sleep(0.05)
 
     return True
 
-def listen_for_command(timeout=6) -> str:
-    r = sr.Recognizer()
-    r.energy_threshold = 300
-    r.dynamic_energy_threshold = True
-    with sr.Microphone() as source:
-        print("  🎤 Listening for command...")
-        r.adjust_for_ambient_noise(source, duration=0.4)
-        try:
-            audio = r.listen(source, timeout=timeout, phrase_time_limit=8)
-        except sr.WaitTimeoutError:
-            return ""
-    try:
-        text = r.recognize_google(audio)
-        print(f'  Heard: "{text}"')
-        return text
-    except sr.UnknownValueError:
-        print("  Could not understand audio.")
-        return ""
-    except sr.RequestError as e:
-        print(f"  Speech recognition error: {e}")
+# ── Voice Recording ────────────────────────────────────────────────────────────
+def listen_for_command(max_duration=10, silence_threshold=0.01, silence_duration=1.2):
+    print("  Speak your command... (stops when you go quiet)")
+    frames = []
+    silent_chunks = 0
+    speaking_started = False
+    silence_chunks_needed = int((SAMPLE_RATE / CHUNK) * silence_duration)
+    max_chunks = int((SAMPLE_RATE / CHUNK) * max_duration)
+    chunk_count = [0]
+    done = [False]
+
+    def callback(indata, frame_count, time_info, status):
+        nonlocal silent_chunks, speaking_started
+        volume = float(np.abs(indata).max())
+        frames.append(indata.copy())
+        chunk_count[0] += 1
+
+        if volume > silence_threshold:
+            speaking_started = True
+            silent_chunks = 0
+        elif speaking_started:
+            silent_chunks += 1
+
+        if chunk_count[0] >= max_chunks:
+            done[0] = True
+            raise sd.CallbackStop()
+        if speaking_started and silent_chunks >= silence_chunks_needed:
+            done[0] = True
+            raise sd.CallbackStop()
+
+    with sd.InputStream(samplerate=SAMPLE_RATE, channels=1,
+                        blocksize=CHUNK, dtype="float32", callback=callback):
+        while not done[0]:
+            time.sleep(0.05)
+
+    if not frames or not speaking_started:
+        print("  No speech detected.")
         return ""
 
-# ── Main ──────────────────────────────────────────────────────────────────────
+    recording = np.concatenate(frames, axis=0)
+    tmp_path = os.path.join(os.path.dirname(__file__), "_jarvis_tmp.wav")
+    sf.write(tmp_path, recording, SAMPLE_RATE)
+
+    print("  Processing speech...")
+    try:
+        segments, _ = WHISPER_MODEL.transcribe(tmp_path, language="en")
+        text = " ".join(s.text for s in segments).strip()
+        if text:
+            print(f'  Heard: "{text}"')
+        else:
+            print("  Could not understand audio.")
+        return text
+    except Exception as e:
+        print(f"  Whisper error: {e}")
+        return ""
+    finally:
+        try:
+            os.remove(tmp_path)
+        except Exception:
+            pass
+
+# ── Main ───────────────────────────────────────────────────────────────────────
 def main():
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        print("ERROR: Set ANTHROPIC_API_KEY environment variable first.")
-        print('  Windows: $env:ANTHROPIC_API_KEY="sk-ant-..."')
+    # Check Ollama is running
+    try:
+        requests.get("http://localhost:11434", timeout=3)
+    except Exception:
+        print("ERROR: Ollama is not running.")
+        print("  Open the Ollama app from your Start menu, then run this script again.")
         sys.exit(1)
 
     workspaces = load_workspaces()
     print(f"\n{'='*50}")
     print("  JARVIS is ready")
     print(f"  Workspaces: {list(workspaces.keys()) or 'none'}")
-    print(f"  Clap threshold: {CLAP_THRESHOLD}  (tune in jarvis.py if needed)")
+    print(f"  AI: Ollama llama3.2 (local)")
     print(f"  OS: {OS}")
     print(f"{'='*50}")
-    print("\n  👏 Clap twice to activate...\n")
+    print("\n  Clap twice to activate...\n")
 
     while True:
         try:
             detect_claps()
-            print("\n  ✅ Activated!")
+            print("\n  Activated!")
             command = listen_for_command()
             if not command:
                 print("  No command heard. Clap again to retry.\n")
                 continue
 
-            print("  🤖 Asking Claude...")
+            print("  Asking local AI...")
             try:
-                actions = ask_claude(command, workspaces)
+                actions = ask_ollama(command, workspaces)
             except Exception as e:
-                print(f"  Claude error: {e}")
+                print(f"  AI error: {e}")
                 continue
 
             for action in actions:
                 result = execute_action(action, workspaces)
-                print(f"  ✓ {result}")
+                print(f"  Done: {result}")
 
-            print("\n  👏 Clap twice to activate...\n")
+            print("\n  Clap twice to activate...\n")
 
         except KeyboardInterrupt:
             print("\n  JARVIS shutting down. Goodbye.")
