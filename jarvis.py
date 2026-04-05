@@ -12,6 +12,8 @@ import subprocess
 import webbrowser
 import platform
 import requests
+import threading
+import pyttsx3
 
 try:
     import sounddevice as sd
@@ -24,6 +26,24 @@ except ImportError:
 
 print("  Loading Whisper model (first run may take a moment)...")
 WHISPER_MODEL = WhisperModel("base", device="cpu", compute_type="int8")
+
+# ── Voice Engine ─────────────────────────────────────────────────────────────
+_tts_engine = pyttsx3.init()
+_tts_engine.setProperty("rate", 175)    # speed (words per minute)
+_tts_engine.setProperty("volume", 1.0)  # 0.0 to 1.0
+# Pick a voice — 0 = first available (usually male), 1 = second (usually female)
+voices = _tts_engine.getProperty("voices")
+if len(voices) > 1:
+    _tts_engine.setProperty("voice", voices[0].id)  # change to voices[0] for male
+_tts_lock = threading.Lock()
+
+def speak(text):
+    """Speak text without blocking the main thread."""
+    def _speak():
+        with _tts_lock:
+            _tts_engine.say(text)
+            _tts_engine.runAndWait()
+    threading.Thread(target=_speak, daemon=True).start()
 
 # ── Config ────────────────────────────────────────────────────────────────────
 WORKSPACES_FILE = os.path.join(os.path.dirname(__file__), "workspaces.json")
@@ -153,40 +173,57 @@ def execute_action(action, workspaces):
     return "Unknown action"
 
 # ── Ollama Brain ───────────────────────────────────────────────────────────────
-def ask_ollama(command, workspaces):
-    workspace_list = json.dumps(list(workspaces.keys()))
+CHAT_HISTORY = []
 
-    prompt = (
-        "You are JARVIS, a voice assistant. Parse the user's voice command and return a JSON array of actions.\n\n"
+def init_ollama(workspaces):
+    global CHAT_HISTORY
+    workspace_list = json.dumps(list(workspaces.keys()))
+    system_msg = (
+        "You are JARVIS, a voice assistant. "
+        "For every message I send, parse it as a voice command and return a JSON array of actions. "
+        "Never explain. Never use markdown. Return ONLY a valid JSON array.\n\n"
         f"Available workspaces: {workspace_list}\n\n"
         "Action types:\n"
-        '- {"type": "workspace", "target": "<name>"}\n'
+        '- {"type": "workspace", "target": "<n>"}\n'
         '- {"type": "url", "target": "<url>"}\n'
         '- {"type": "search", "engine": "google|youtube|github", "query": "<q>"}\n'
         '- {"type": "app", "target": "<app name>"}\n'
         '- {"type": "vscode", "target": "<path>"}\n'
         '- {"type": "file", "target": "<path>"}\n\n'
-        "Match workspace names fuzzily. Return ONLY a valid JSON array. No explanation, no markdown, no code fences.\n\n"
-        f"User command: {command}\n\n"
-        "JSON array:"
+        "Match workspace names fuzzily."
     )
-
-    response = requests.post("http://localhost:11434/api/generate", json={
+    CHAT_HISTORY = [{"role": "system", "content": system_msg}]
+    print("  Warming up AI model...")
+    requests.post("http://localhost:11434/api/chat", json={
         "model": "llama3.2",
-        "prompt": prompt,
+        "messages": CHAT_HISTORY + [{"role": "user", "content": "open google"}],
+        "stream": False
+    }, timeout=60)
+    print("  AI model ready!")
+    speak("JARVIS online. Ready for your command.")
+
+def ask_ollama(command, workspaces):
+    global CHAT_HISTORY
+    CHAT_HISTORY.append({"role": "user", "content": command})
+
+    response = requests.post("http://localhost:11434/api/chat", json={
+        "model": "llama3.2",
+        "messages": CHAT_HISTORY,
         "stream": False
     }, timeout=30)
 
-    raw = response.json()["response"].strip()
+    raw = response.json()["message"]["content"].strip()
 
-    # Strip markdown fences if model adds them anyway
+    CHAT_HISTORY.append({"role": "assistant", "content": raw})
+    if len(CHAT_HISTORY) > 7:
+        CHAT_HISTORY = CHAT_HISTORY[:1] + CHAT_HISTORY[-6:]
+
     if "```" in raw:
         raw = raw.split("```")[1]
         if raw.startswith("json"):
             raw = raw[4:]
         raw = raw.split("```")[0]
 
-    # Extract just the JSON array
     start = raw.find("[")
     end   = raw.rfind("]") + 1
     if start != -1 and end > start:
@@ -291,6 +328,7 @@ def main():
         sys.exit(1)
 
     workspaces = load_workspaces()
+    init_ollama(workspaces)
     print(f"\n{'='*50}")
     print("  JARVIS is ready")
     print(f"  Workspaces: {list(workspaces.keys()) or 'none'}")
@@ -303,25 +341,32 @@ def main():
         try:
             detect_claps()
             print("\n  Activated!")
+            speak("Yes sir?")
             command = listen_for_command()
             if not command:
                 print("  No command heard. Clap again to retry.\n")
+                speak("I didn't catch that. Try again.")
                 continue
 
             print("  Asking local AI...")
+            speak("On it.")
             try:
                 actions = ask_ollama(command, workspaces)
             except Exception as e:
                 print(f"  AI error: {e}")
+                speak("Something went wrong. Please try again.")
                 continue
 
             for action in actions:
                 result = execute_action(action, workspaces)
                 print(f"  Done: {result}")
 
+            speak("Done.")
             print("\n  Clap twice to activate...\n")
 
         except KeyboardInterrupt:
+            speak("Shutting down. Goodbye.")
+            time.sleep(1.5)
             print("\n  JARVIS shutting down. Goodbye.")
             break
 
