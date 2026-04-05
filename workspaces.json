@@ -1,0 +1,47 @@
+{
+  "react project": {
+    "description": "My main React app",
+    "items": [
+      { "type": "vscode", "path": "/Users/you/projects/my-react-app" },
+      { "type": "url",    "path": "http://localhost:3000" },
+      { "type": "url",    "path": "https://react.dev/reference/react" }
+    ]
+  },
+
+  "work morning": {
+    "description": "Morning work setup",
+    "items": [
+      { "type": "url",  "path": "https://gmail.com" },
+      { "type": "url",  "path": "https://calendar.google.com" },
+      { "type": "url",  "path": "https://linear.app" },
+      { "type": "app",  "path": "Slack" }
+    ]
+  },
+
+  "design": {
+    "description": "Design workspace",
+    "items": [
+      { "type": "url", "path": "https://figma.com" },
+      { "type": "url", "path": "https://dribbble.com" },
+      { "type": "app", "path": "Figma" }
+    ]
+  },
+
+  "study": {
+    "description": "Study session",
+    "items": [
+      { "type": "url",    "path": "https://notion.so" },
+      { "type": "url",    "path": "https://chatgpt.com" },
+      { "type": "app",    "path": "Spotify" }
+    ]
+  },
+
+  "python backend": {
+    "description": "Python API project",
+    "items": [
+      { "type": "vscode",   "path": "/Users/you/projects/my-api" },
+      { "type": "url",      "path": "http://localhost:8000/docs" },
+      { "type": "terminal", "path": "", "command": "cd /Users/you/projects/my-api && source venv/bin/activate" }
+    ]
+  }
+}
