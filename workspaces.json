@@ -30,6 +30,10 @@
       {
         "type": "vscode",
         "path": "C:\\Users\\paten\\OneDrive\\Desktop\\GitHub\\cycle5ense"
+      },
+      {
+        "type": "app",
+        "path": "Discord"
       }
     ]
   },
@@ -51,6 +55,32 @@
       {
         "type": "url",
         "path": "https://translate.google.com/"
+      }
+    ]
+  },
+  "discord": {
+    "description": "",
+    "items": [
+      {
+        "type": "app",
+        "path": "Discord"
+      }
+    ]
+  },
+  "coding mode": {
+    "description": "",
+    "items": [
+      {
+        "type": "url",
+        "path": "https://claude.ai/new"
+      },
+      {
+        "type": "vscode",
+        "path": ""
+      },
+      {
+        "type": "app",
+        "path": "Amazon Music"
       }
     ]
   }

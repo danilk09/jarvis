@@ -13,7 +13,11 @@ import webbrowser
 import platform
 import requests
 import threading
-import pyttsx3
+import queue as _queue
+import glob
+import sqlite3
+import shutil
+import tempfile
 
 try:
     import sounddevice as sd
@@ -27,32 +31,200 @@ except ImportError:
 print("  Loading Whisper model (first run may take a moment)...")
 WHISPER_MODEL = WhisperModel("base", device="cpu", compute_type="int8")
 
-# ── Voice Engine ─────────────────────────────────────────────────────────────
-_tts_engine = pyttsx3.init()
-_tts_engine.setProperty("rate", 175)    # speed (words per minute)
-_tts_engine.setProperty("volume", 1.0)  # 0.0 to 1.0
-# Pick a voice — 0 = first available (usually male), 1 = second (usually female)
-voices = _tts_engine.getProperty("voices")
-if len(voices) > 1:
-    _tts_engine.setProperty("voice", voices[0].id)  # change to voices[0] for male
-_tts_lock = threading.Lock()
+# ── Voice Engine ──────────────────────────────────────────────────────────────
+# SPEECH_RATE: -10 (slow) to 10 (fast)
+# VOICE_NAME: "Microsoft Guy" "Microsoft Davis" "Microsoft David" "Microsoft Zira"
+# Install voices: Settings -> Time & Language -> Speech -> Add voices
+VOICE_NAME  = ""
+SPEECH_RATE = 1
+
+_tts_queue = _queue.Queue()
+_tts_ready = threading.Event()
+
+def _tts_worker():
+    _tts_ready.set()
+    while True:
+        text = _tts_queue.get()
+        if text is None:
+            break
+        try:
+            voice_line = f"$s.Voice = $s.GetVoices() | Where-Object {{$_.GetAttribute('Name') -like '*{VOICE_NAME}*'}} | Select-Object -First 1;" if VOICE_NAME else ""
+            ps_cmd = (
+                f"$s = New-Object -ComObject SAPI.SpVoice;"
+                f"{voice_line}"
+                f"$s.Rate = {SPEECH_RATE};"
+                f"$s.Speak([System.String]::Concat('{text}')) | Out-Null"
+            )
+            subprocess.run(
+                ["powershell", "-NoProfile", "-Command", ps_cmd],
+                check=True, capture_output=True
+            )
+        except Exception as e:
+            print(f"  TTS error: {e}")
+        _tts_queue.task_done()
+
+_tts_thread = threading.Thread(target=_tts_worker, daemon=True)
+_tts_thread.start()
+_tts_ready.wait()
 
 def speak(text):
-    """Speak text without blocking the main thread."""
-    def _speak():
-        with _tts_lock:
-            _tts_engine.say(text)
-            _tts_engine.runAndWait()
-    threading.Thread(target=_speak, daemon=True).start()
+    print(f"  JARVIS: {text}")
+    _tts_queue.put(text)
 
 # ── Config ────────────────────────────────────────────────────────────────────
 WORKSPACES_FILE = os.path.join(os.path.dirname(__file__), "workspaces.json")
-CLAP_THRESHOLD  = 0.3
+CLAP_THRESHOLD  = 0.6
 CLAP_GAP_MIN    = 0.15
 CLAP_GAP_MAX    = 1.2
 SAMPLE_RATE     = 44100
 CHUNK           = 1024
 OS              = platform.system()
+
+# ── File Index ────────────────────────────────────────────────────────────────
+FILE_INDEX = []  # list of absolute file paths on the machine
+
+def build_file_index():
+    """Scan common user directories and build a file path index."""
+    global FILE_INDEX
+    print("  Building file index (scanning your directories)...")
+    roots = [
+        os.path.expanduser("~/Desktop"),
+        os.path.expanduser("~/Documents"),
+        os.path.expanduser("~/Downloads"),
+        os.path.expanduser("~/Pictures"),
+        os.path.expanduser("~/Music"),
+        os.path.expanduser("~/Videos"),
+        os.path.expanduser("~/OneDrive"),
+        os.path.expanduser("~/Google Drive"),
+    ]
+    paths = []
+    for root in roots:
+        if os.path.exists(root):
+            for dirpath, dirnames, filenames in os.walk(root):
+                # Skip hidden and system folders
+                dirnames[:] = [d for d in dirnames if not d.startswith('.') and d not in ['node_modules', '__pycache__', '.git']]
+                for f in filenames:
+                    paths.append(os.path.join(dirpath, f))
+    FILE_INDEX = paths
+    print(f"  File index built: {len(FILE_INDEX)} files found.")
+
+def get_chrome_bookmarks():
+    """Extract Chrome bookmark URLs and titles."""
+    bookmarks = []
+    chrome_path = os.path.expanduser(
+        "~/AppData/Local/Google/Chrome/User Data/Default/Bookmarks"
+    )
+    if not os.path.exists(chrome_path):
+        return bookmarks
+    try:
+        with open(chrome_path, encoding="utf-8") as f:
+            data = json.load(f)
+        def extract(node):
+            if node.get("type") == "url":
+                bookmarks.append({"name": node.get("name",""), "url": node.get("url","")})
+            for child in node.get("children", []):
+                extract(child)
+        for root in data.get("roots", {}).values():
+            extract(root)
+    except Exception as e:
+        print(f"  Could not read Chrome bookmarks: {e}")
+    return bookmarks
+
+def get_edge_bookmarks():
+    """Extract Edge bookmark URLs and titles."""
+    bookmarks = []
+    edge_path = os.path.expanduser(
+        "~/AppData/Local/Microsoft/Edge/User Data/Default/Bookmarks"
+    )
+    if not os.path.exists(edge_path):
+        return bookmarks
+    try:
+        with open(edge_path, encoding="utf-8") as f:
+            data = json.load(f)
+        def extract(node):
+            if node.get("type") == "url":
+                bookmarks.append({"name": node.get("name",""), "url": node.get("url","")})
+            for child in node.get("children", []):
+                extract(child)
+        for root in data.get("roots", {}).values():
+            extract(root)
+    except Exception as e:
+        print(f"  Could not read Edge bookmarks: {e}")
+    return bookmarks
+
+BOOKMARKS = []
+
+def build_bookmark_index():
+    global BOOKMARKS
+    BOOKMARKS = get_chrome_bookmarks() + get_edge_bookmarks()
+    print(f"  Bookmark index built: {len(BOOKMARKS)} bookmarks found.")
+
+# ── Browser History ───────────────────────────────────────────────────────────
+HISTORY = []  # list of {"title": str, "url": str, "visited": datetime str}
+
+def read_browser_history(db_path, limit=5000):
+    """Read Chrome/Edge history SQLite DB. Must copy first — browser locks it."""
+    entries = []
+    if not os.path.exists(db_path):
+        return entries
+    tmp = os.path.join(tempfile.gettempdir(), "jarvis_history_tmp.db")
+    try:
+        shutil.copy2(db_path, tmp)
+        conn = sqlite3.connect(tmp)
+        cur  = conn.cursor()
+        # Chrome stores time as microseconds since 1601-01-01
+        cur.execute("""
+            SELECT title, url, last_visit_time
+            FROM urls
+            ORDER BY last_visit_time DESC
+            LIMIT ?
+        """, (limit,))
+        epoch_offset = 11644473600  # seconds between 1601 and 1970
+        for title, url, ts in cur.fetchall():
+            try:
+                secs = ts / 1_000_000 - epoch_offset
+                visited = time.strftime("%Y-%m-%d %H:%M", time.localtime(secs))
+            except Exception:
+                visited = "unknown"
+            entries.append({"title": title or "", "url": url, "visited": visited})
+        conn.close()
+    except Exception as e:
+        print(f"  Could not read history from {db_path}: {e}")
+    finally:
+        try:
+            os.remove(tmp)
+        except Exception:
+            pass
+    return entries
+
+def build_history_index():
+    global HISTORY
+    paths = [
+        os.path.expanduser("~/AppData/Local/Google/Chrome/User Data/Default/History"),
+        os.path.expanduser("~/AppData/Local/Microsoft/Edge/User Data/Default/History"),
+    ]
+    all_entries = []
+    for p in paths:
+        all_entries.extend(read_browser_history(p))
+    # Deduplicate by URL, keep most recent visit
+    seen = {}
+    for e in all_entries:
+        url = e["url"]
+        if url not in seen or e["visited"] > seen[url]["visited"]:
+            seen[url] = e
+    HISTORY = sorted(seen.values(), key=lambda x: x["visited"], reverse=True)
+    print(f"  History index built: {len(HISTORY)} unique pages found.")
+
+def search_history(keyword=None, days_ago=None, limit=5):
+    """Search history by keyword and/or recency."""
+    results = HISTORY
+    if days_ago is not None:
+        cutoff = time.strftime("%Y-%m-%d", time.localtime(time.time() - days_ago * 86400))
+        results = [e for e in results if e["visited"] >= cutoff]
+    if keyword:
+        kw = keyword.lower()
+        results = [e for e in results if kw in e["title"].lower() or kw in e["url"].lower()]
+    return results[:limit]
 
 # ── Workspaces ────────────────────────────────────────────────────────────────
 def load_workspaces():
@@ -76,42 +248,41 @@ def open_workspace(name, workspaces):
     for item in ws.get("items", []):
         kind = item.get("type")
         path = item.get("path", "")
-
         if kind == "url":
             webbrowser.open(path)
             opened.append(f"URL: {path}")
         elif kind == "vscode":
-            if OS == "Windows":
-                subprocess.Popen(["code", path], shell=True)
-            elif OS == "Darwin":
-                subprocess.Popen(["open", "-a", "Visual Studio Code", path])
-            else:
-                subprocess.Popen(["code", path])
+            subprocess.Popen(["code", path], shell=True)
             opened.append(f"VSCode: {path}")
         elif kind == "file":
-            if OS == "Windows":
-                os.startfile(path)
-            elif OS == "Darwin":
-                subprocess.Popen(["open", path])
-            else:
-                subprocess.Popen(["xdg-open", path])
+            os.startfile(path)
             opened.append(f"File: {path}")
         elif kind == "app":
-            if OS == "Windows":
-                subprocess.Popen(["start", path], shell=True)
-            elif OS == "Darwin":
-                subprocess.Popen(["open", "-a", path])
-            else:
-                subprocess.Popen([path])
+            subprocess.Popen(f'start "" "{path}"', shell=True)
             opened.append(f"App: {path}")
-
         time.sleep(0.3)
 
     return True, f"Opened workspace '{name}': {', '.join(opened)}"
 
 # ── System Actions ─────────────────────────────────────────────────────────────
+def open_app(name):
+    """Try multiple strategies to open an app by name on Windows."""
+    # Strategy 1: start command (works for many installed apps)
+    try:
+        subprocess.Popen(f'start "" "{name}"', shell=True)
+        return True
+    except Exception:
+        pass
+    # Strategy 2: try running the name directly as an exe
+    try:
+        subprocess.Popen([name], shell=True)
+        return True
+    except Exception:
+        pass
+    return False
+
 def execute_action(action, workspaces):
-    kind   = action.get("type")
+    kind   = action.get("type", "")
     target = action.get("target", "")
     query  = action.get("query", "")
 
@@ -133,66 +304,147 @@ def execute_action(action, workspaces):
         webbrowser.open(urls.get(engine, urls["google"]))
         return f"Searched {engine} for '{query}'"
 
+    elif kind == "app":
+        open_app(target)
+        return f"Launched {target}"
+
     elif kind == "vscode":
-        if OS == "Windows":
-            subprocess.Popen(["code", target] if target else ["code"], shell=True)
-        elif OS == "Darwin":
-            subprocess.Popen(["open", "-a", "Visual Studio Code", target] if target else ["open", "-a", "Visual Studio Code"])
-        else:
-            subprocess.Popen(["code", target] if target else ["code"])
+        subprocess.Popen(["code", target] if target else ["code"], shell=True)
         return f"Opened VSCode{' at ' + target if target else ''}"
 
-    elif kind == "app":
-        if OS == "Windows":
-            subprocess.Popen(["start", target], shell=True)
-        elif OS == "Darwin":
-            subprocess.Popen(["open", "-a", target])
-        else:
-            subprocess.Popen([target.lower()])
-        return f"Opened {target}"
-
     elif kind == "file":
-        if OS == "Windows":
+        # First try exact path, then search the index
+        if os.path.exists(target):
             os.startfile(target)
-        elif OS == "Darwin":
-            subprocess.Popen(["open", target])
-        else:
-            subprocess.Popen(["xdg-open", target])
-        return f"Opened file {target}"
+            return f"Opened {target}"
+        matches = [p for p in FILE_INDEX if target.lower() in os.path.basename(p).lower()]
+        if matches:
+            os.startfile(matches[0])
+            return f"Opened {matches[0]}"
+        return f"File not found: {target}"
 
-    elif kind == "terminal":
-        cmd = action.get("command", "")
-        if OS == "Windows":
-            subprocess.Popen(["start", "cmd", "/k", cmd], shell=True)
-        elif OS == "Darwin":
-            subprocess.Popen(["osascript", "-e", f'tell app "Terminal" to do script "{cmd}"'])
-        else:
-            subprocess.Popen(["x-terminal-emulator", "-e", cmd])
-        return f"Ran terminal command: {cmd}"
+    elif kind == "find_files":
+        # Return a list of matching files
+        keyword = action.get("keyword", target).lower()
+        ext     = action.get("extension", "").lower()
+        matches = [
+            p for p in FILE_INDEX
+            if keyword in os.path.basename(p).lower()
+            and (not ext or p.lower().endswith(ext))
+        ][:10]
+        if matches:
+            result = "\n".join(matches)
+            print(f"\n  Found files:\n{result}\n")
+            return f"Found {len(matches)} files matching '{keyword}'"
+        return f"No files found matching '{keyword}'"
 
-    return "Unknown action"
+    elif kind == "bookmark":
+        keyword = target.lower()
+        matches = [b for b in BOOKMARKS if keyword in b["name"].lower()]
+        if matches:
+            webbrowser.open(matches[0]["url"])
+            return f"Opened bookmark: {matches[0]['name']}"
+        return f"No bookmark found matching '{target}'"
+
+    elif kind == "history":
+        keyword  = action.get("keyword", target)
+        days_ago = action.get("days_ago", None)
+        results  = search_history(keyword=keyword, days_ago=days_ago)
+        if results:
+            print("\n  ── History matches ──────────────────")
+            for i, e in enumerate(results):
+                print(f"  {i+1}. [{e['visited']}] {e['title']}\n     {e['url']}")
+            print("  ─────────────────────────────────────\n")
+            webbrowser.open(results[0]["url"])
+            reply = f"Found {len(results)} match. Opening: {results[0]['title'] or results[0]['url']}"
+            speak(reply)
+            return reply
+        return f"No history found matching '{keyword}'"
+
+    elif kind == "none":
+        return "No action"
+
+    return f"Unknown action: {kind}"
 
 # ── Ollama Brain ───────────────────────────────────────────────────────────────
-CHAT_HISTORY = []
+CHAT_HISTORY    = []
+IN_CONVERSATION = False
+
+def build_system_prompt(workspaces):
+    workspace_list = json.dumps(list(workspaces.keys()))
+    file_sample    = json.dumps(FILE_INDEX[:200])   # send a sample so AI knows what's there
+    bookmark_sample = json.dumps([b["name"] for b in BOOKMARKS[:100]])
+
+    return f"""You are JARVIS, a voice-activated AI assistant inspired by Iron Man.
+
+For every user message, return a single JSON object. Choose the correct mode:
+
+━━━ MODE 1: action ━━━
+User wants to open, launch, or do something on the computer.
+{{
+  "mode": "action",
+  "actions": [ ...one or more action objects... ]
+}}
+
+Action object types:
+  {{"type": "workspace",  "target": "<workspace name>"}}
+  {{"type": "url",        "target": "<full url>"}}
+  {{"type": "app",        "target": "<app name>"}}      ← use the common name e.g. "Discord", "Spotify", "Steam", "Notepad", "Chrome", "Discord"
+  {{"type": "search",     "engine": "google|youtube|github", "query": "<q>"}}
+  {{"type": "vscode",     "target": "<folder path>"}}
+  {{"type": "file",       "target": "<filename or path>"}}
+  {{"type": "find_files", "keyword": "<search term>", "extension": "<optional e.g. .pdf>"}}
+  {{"type": "bookmark",   "target": "<bookmark name>"}}
+  {{"type": "history",   "keyword": "<search term>", "days_ago": <number or null>}}
+  {{"type": "none"}}
+
+Available workspaces: {workspace_list}
+Match workspace names fuzzily — e.g. "three eleven" or "311" both match a workspace called "311".
+
+Known files (sample): {file_sample}
+Known bookmarks (sample): {bookmark_sample}
+Browser history is indexed and searchable by keyword and date (days_ago).
+
+For apps: always use type "app" with the common name. Windows will find it.
+Examples: "open Discord" → {{"type":"app","target":"Discord"}}
+          "open Spotify" → {{"type":"app","target":"Spotify"}}
+          "open Chrome"  → {{"type":"app","target":"chrome"}}
+
+━━━ MODE 2: conversation ━━━
+User wants to chat, ask a question, get information, or says things like
+"let's talk", "talk to me", "have a conversation", "can I ask you something".
+Also use this if you're ALREADY in conversation mode (in_conversation=true).
+{{
+  "mode": "conversation",
+  "output": "speak|text|both",
+  "reply": "<your response as JARVIS>"
+}}
+output defaults to "speak" unless user says "write", "show me", "text".
+In conversation mode, be helpful and natural. You are not limited to commands.
+You can answer questions about anything — weather (note you lack live data),
+coding, advice, general knowledge, etc.
+
+━━━ MODE 3: end_conversation ━━━
+User says "stop", "exit conversation", "back to commands", "never mind", "end chat",
+or any phrase that signals they want to stop talking and return to command mode.
+{{"mode": "end_conversation"}}
+
+━━━ MODE 4: none ━━━
+Filler words, unclear audio, silence, or nothing actionable ("ok", "thanks", "hmm", "uh").
+{{"mode": "none"}}
+
+━━━ RULES ━━━
+- Return ONLY valid JSON. No markdown, no explanation, no code fences.
+- Never guess an action if the command is unclear — use mode "none".
+- Never open a workspace unless the user clearly names it.
+- Current conversation state will be noted as in_conversation=true/false in the user message.
+"""
 
 def init_ollama(workspaces):
     global CHAT_HISTORY
-    workspace_list = json.dumps(list(workspaces.keys()))
-    system_msg = (
-        "You are JARVIS, a voice assistant. "
-        "For every message I send, parse it as a voice command and return a JSON array of actions. "
-        "Never explain. Never use markdown. Return ONLY a valid JSON array.\n\n"
-        f"Available workspaces: {workspace_list}\n\n"
-        "Action types:\n"
-        '- {"type": "workspace", "target": "<n>"}\n'
-        '- {"type": "url", "target": "<url>"}\n'
-        '- {"type": "search", "engine": "google|youtube|github", "query": "<q>"}\n'
-        '- {"type": "app", "target": "<app name>"}\n'
-        '- {"type": "vscode", "target": "<path>"}\n'
-        '- {"type": "file", "target": "<path>"}\n\n'
-        "Match workspace names fuzzily."
-    )
+    system_msg = build_system_prompt(workspaces)
     CHAT_HISTORY = [{"role": "system", "content": system_msg}]
+    speak("Warming up. Give me a moment.")
     print("  Warming up AI model...")
     requests.post("http://localhost:11434/api/chat", json={
         "model": "llama3.2",
@@ -203,8 +455,10 @@ def init_ollama(workspaces):
     speak("JARVIS online. Ready for your command.")
 
 def ask_ollama(command, workspaces):
-    global CHAT_HISTORY
-    CHAT_HISTORY.append({"role": "user", "content": command})
+    global CHAT_HISTORY, IN_CONVERSATION
+    # Annotate the message with conversation state so the AI knows
+    annotated = f"[in_conversation={IN_CONVERSATION}] {command}"
+    CHAT_HISTORY.append({"role": "user", "content": annotated})
 
     response = requests.post("http://localhost:11434/api/chat", json={
         "model": "llama3.2",
@@ -213,19 +467,22 @@ def ask_ollama(command, workspaces):
     }, timeout=30)
 
     raw = response.json()["message"]["content"].strip()
-
     CHAT_HISTORY.append({"role": "assistant", "content": raw})
-    if len(CHAT_HISTORY) > 7:
-        CHAT_HISTORY = CHAT_HISTORY[:1] + CHAT_HISTORY[-6:]
 
+    # Keep history lean
+    if len(CHAT_HISTORY) > 13:
+        CHAT_HISTORY = CHAT_HISTORY[:1] + CHAT_HISTORY[-12:]
+
+    # Strip markdown fences if model adds them
     if "```" in raw:
         raw = raw.split("```")[1]
         if raw.startswith("json"):
             raw = raw[4:]
         raw = raw.split("```")[0]
 
-    start = raw.find("[")
-    end   = raw.rfind("]") + 1
+    # Extract JSON object
+    start = raw.find("{")
+    end   = raw.rfind("}") + 1
     if start != -1 and end > start:
         raw = raw[start:end]
 
@@ -272,13 +529,11 @@ def listen_for_command(max_duration=10, silence_threshold=0.01, silence_duration
         volume = float(np.abs(indata).max())
         frames.append(indata.copy())
         chunk_count[0] += 1
-
         if volume > silence_threshold:
             speaking_started = True
             silent_chunks = 0
         elif speaking_started:
             silent_chunks += 1
-
         if chunk_count[0] >= max_chunks:
             done[0] = True
             raise sd.CallbackStop()
@@ -317,9 +572,44 @@ def listen_for_command(max_duration=10, silence_threshold=0.01, silence_duration
         except Exception:
             pass
 
+# ── Handle AI Response ─────────────────────────────────────────────────────────
+def handle_response(response, workspaces):
+    global IN_CONVERSATION
+    mode = response.get("mode", "none")
+
+    if mode == "action":
+        actions = response.get("actions", [])
+        if not actions:
+            speak("I'm not sure what to open.")
+            return
+        for action in actions:
+            result = execute_action(action, workspaces)
+            print(f"  Done: {result}")
+        if not all(a.get("type") == "none" for a in actions):
+            speak("Done.")
+
+    elif mode == "conversation":
+        IN_CONVERSATION = True
+        reply  = response.get("reply", "I'm not sure how to respond to that.")
+        output = response.get("output", "speak")
+        if output in ("text", "both"):
+            print(f"\n  ── JARVIS ──────────────────────────\n  {reply}\n  ────────────────────────────────────\n")
+        if output in ("speak", "both"):
+            speak(reply)
+
+    elif mode == "end_conversation":
+        IN_CONVERSATION = False
+        speak("Returning to command mode.")
+        print("  Exited conversation mode.")
+
+    elif mode == "none":
+        print("  No action taken.")
+
+    else:
+        print(f"  Unknown mode: {mode}")
+
 # ── Main ───────────────────────────────────────────────────────────────────────
 def main():
-    # Check Ollama is running
     try:
         requests.get("http://localhost:11434", timeout=3)
     except Exception:
@@ -328,7 +618,14 @@ def main():
         sys.exit(1)
 
     workspaces = load_workspaces()
+
+    # Build indexes in background so startup isn't slow
+    threading.Thread(target=build_file_index,    daemon=True).start()
+    threading.Thread(target=build_bookmark_index, daemon=True).start()
+    threading.Thread(target=build_history_index,  daemon=True).start()
+
     init_ollama(workspaces)
+
     print(f"\n{'='*50}")
     print("  JARVIS is ready")
     print(f"  Workspaces: {list(workspaces.keys()) or 'none'}")
@@ -336,37 +633,45 @@ def main():
     print(f"  OS: {OS}")
     print(f"{'='*50}")
     print("\n  Clap twice to activate...\n")
+    print("  Tip: Say 'let's talk' to enter conversation mode.")
+    print("  Tip: Say 'open Discord' / 'open Spotify' to launch apps.\n")
 
     while True:
         try:
-            detect_claps()
-            print("\n  Activated!")
-            speak("Yes sir?")
+            if not IN_CONVERSATION:
+                detect_claps()
+                print("\n  Activated!")
+                speak("Yes sir.")
+                _tts_queue.join()
+            else:
+                # In conversation mode — listen continuously without clapping
+                print("  [Conversation mode] Speak anytime, or say 'back to commands'...")
+                _tts_queue.join()
+
             command = listen_for_command()
             if not command:
+                if IN_CONVERSATION:
+                    continue
                 print("  No command heard. Clap again to retry.\n")
                 speak("I didn't catch that. Try again.")
                 continue
 
-            print("  Asking local AI...")
-            speak("On it.")
+            print("  Thinking...")
             try:
-                actions = ask_ollama(command, workspaces)
+                response = ask_ollama(command, workspaces)
             except Exception as e:
                 print(f"  AI error: {e}")
                 speak("Something went wrong. Please try again.")
                 continue
 
-            for action in actions:
-                result = execute_action(action, workspaces)
-                print(f"  Done: {result}")
+            handle_response(response, workspaces)
 
-            speak("Done.")
-            print("\n  Clap twice to activate...\n")
+            if not IN_CONVERSATION:
+                print("\n  Clap twice to activate...\n")
 
         except KeyboardInterrupt:
             speak("Shutting down. Goodbye.")
-            time.sleep(1.5)
+            _tts_queue.join()
             print("\n  JARVIS shutting down. Goodbye.")
             break
 
