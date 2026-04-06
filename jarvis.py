@@ -4,6 +4,7 @@ JARVIS - Voice-Activated AI Assistant
 Clap twice -> speak your command -> local AI figures out what to do
 """
 
+import concurrent.futures
 import os
 import sys
 import json
@@ -18,6 +19,10 @@ import glob
 import sqlite3
 import shutil
 import tempfile
+import vosk
+import queue
+import json
+import threading
 
 try:
     import sounddevice as sd
@@ -29,7 +34,7 @@ except ImportError:
     sys.exit(1)
 
 print("  Loading Whisper model (first run may take a moment)...")
-WHISPER_MODEL = WhisperModel("base", device="cpu", compute_type="int8")
+WHISPER_MODEL = WhisperModel("tiny", device="cpu", compute_type="int8")
 
 # ── Voice Engine ──────────────────────────────────────────────────────────────
 # SPEECH_RATE: -10 (slow) to 10 (fast)
@@ -447,7 +452,7 @@ def init_ollama(workspaces):
     speak("Warming up. Give me a moment.")
     print("  Warming up AI model...")
     requests.post("http://localhost:11434/api/chat", json={
-        "model": "llama3.2",
+        "model": "llama2-7b-chat",
         "messages": CHAT_HISTORY + [{"role": "user", "content": "open google"}],
         "stream": False
     }, timeout=60)
@@ -455,38 +460,58 @@ def init_ollama(workspaces):
     speak("JARVIS online. Ready for your command.")
 
 def ask_ollama(command, workspaces):
+    """
+    Sends a command to local Ollama and returns the JSON response.
+    Automatically limits max_tokens depending on mode for speed.
+    """
     global CHAT_HISTORY, IN_CONVERSATION
-    # Annotate the message with conversation state so the AI knows
+
+    # Annotate message with conversation state
     annotated = f"[in_conversation={IN_CONVERSATION}] {command}"
     CHAT_HISTORY.append({"role": "user", "content": annotated})
 
-    response = requests.post("http://localhost:11434/api/chat", json={
-        "model": "llama3.2",
-        "messages": CHAT_HISTORY,
-        "stream": False
-    }, timeout=30)
+    # Decide token limit
+    max_tokens = 150 if not IN_CONVERSATION else 350  # command vs conversation
 
-    raw = response.json()["message"]["content"].strip()
-    CHAT_HISTORY.append({"role": "assistant", "content": raw})
+    try:
+        response = requests.post("http://localhost:11434/api/chat", json={
+            "model": "llama3-mini",  # faster local model
+            "messages": CHAT_HISTORY,
+            "max_tokens": max_tokens,
+            "stream": False
+        }, timeout=20)
 
-    # Keep history lean
-    if len(CHAT_HISTORY) > 13:
-        CHAT_HISTORY = CHAT_HISTORY[:1] + CHAT_HISTORY[-12:]
+        raw = response.json()["message"]["content"].strip()
+        CHAT_HISTORY.append({"role": "assistant", "content": raw})
 
-    # Strip markdown fences if model adds them
-    if "```" in raw:
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-        raw = raw.split("```")[0]
+        # Keep history lean
+        if len(CHAT_HISTORY) > 13:
+            CHAT_HISTORY = CHAT_HISTORY[:1] + CHAT_HISTORY[-12:]
 
-    # Extract JSON object
-    start = raw.find("{")
-    end   = raw.rfind("}") + 1
-    if start != -1 and end > start:
-        raw = raw[start:end]
+        # Strip markdown fences if model adds them
+        if "```" in raw:
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+            raw = raw.split("```")[0]
 
-    return json.loads(raw.strip())
+        # Extract JSON object from command responses
+        start = raw.find("{")
+        end   = raw.rfind("}") + 1
+        if start != -1 and end > start:
+            raw = raw[start:end]
+
+        return json.loads(raw.strip())
+
+    except Exception as e:
+        print(f"  AI error: {e}")
+        return {"mode": "none"}  # fallback
+
+_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+
+def ask_ollama_async(command, workspaces):
+    future = _executor.submit(ask_ollama, command, workspaces)
+    return future
 
 # ── Clap Detection ─────────────────────────────────────────────────────────────
 def detect_claps():
@@ -513,8 +538,33 @@ def detect_claps():
 
     return True
 
+# ── Wake Word Detection ─────────────────────────────────────────────────────────
+
+WAKE_WORD = "jarvis"
+q = queue.Queue()
+
+# Load Vosk model
+model = vosk.Model("models/vosk-model-small-en-us-0.15")
+
+def callback(indata, frames, time, status):
+    q.put(bytes(indata))
+
+def listen_for_wake_word():
+    print("Listening for 'Jarvis'...")
+    with sd.RawInputStream(samplerate=16000, blocksize=8000, dtype='int16',
+                           channels=1, callback=callback):
+        rec = vosk.KaldiRecognizer(model, 16000)
+        while True:
+            data = q.get()
+            if rec.AcceptWaveform(data):
+                result = json.loads(rec.Result())
+                text = result.get("text", "")
+                if WAKE_WORD in text.lower():
+                    print("Wake word detected!")
+                    return
+
 # ── Voice Recording ────────────────────────────────────────────────────────────
-def listen_for_command(max_duration=10, silence_threshold=0.01, silence_duration=1.2):
+def listen_for_command(max_duration=10, silence_threshold=0.01, silence_duration=2.0):
     print("  Speak your command... (stops when you go quiet)")
     frames = []
     silent_chunks = 0
@@ -534,24 +584,21 @@ def listen_for_command(max_duration=10, silence_threshold=0.01, silence_duration
             silent_chunks = 0
         elif speaking_started:
             silent_chunks += 1
-        if chunk_count[0] >= max_chunks:
-            done[0] = True
-            raise sd.CallbackStop()
-        if speaking_started and silent_chunks >= silence_chunks_needed:
+        if chunk_count[0] >= max_chunks or (speaking_started and silent_chunks >= silence_chunks_needed):
             done[0] = True
             raise sd.CallbackStop()
 
     with sd.InputStream(samplerate=SAMPLE_RATE, channels=1,
                         blocksize=CHUNK, dtype="float32", callback=callback):
         while not done[0]:
-            time.sleep(0.05)
+            time.sleep(0.01)
 
     if not frames or not speaking_started:
         print("  No speech detected.")
         return ""
 
     recording = np.concatenate(frames, axis=0)
-    tmp_path = os.path.join(os.path.dirname(__file__), "_jarvis_tmp.wav")
+    tmp_path = os.path.join(tempfile.gettempdir(), "_jarvis_tmp.wav")
     sf.write(tmp_path, recording, SAMPLE_RATE)
 
     print("  Processing speech...")
@@ -609,6 +656,8 @@ def handle_response(response, workspaces):
         print(f"  Unknown mode: {mode}")
 
 # ── Main ───────────────────────────────────────────────────────────────────────
+LISTENING_FOR_ACTIVATION = True
+
 def main():
     try:
         requests.get("http://localhost:11434", timeout=3)
@@ -632,48 +681,80 @@ def main():
     print(f"  AI: Ollama llama3.2 (local)")
     print(f"  OS: {OS}")
     print(f"{'='*50}")
-    print("\n  Clap twice to activate...\n")
+    print("\n  Clap twice or say 'Jarvis' to activate...\n")
     print("  Tip: Say 'let's talk' to enter conversation mode.")
     print("  Tip: Say 'open Discord' / 'open Spotify' to launch apps.\n")
 
+    # Event to signal activation (clap or wake word)
+    activated_event = threading.Event()
+
+    def clap_thread():
+        global LISTENING_FOR_ACTIVATION
+        while True:
+            if LISTENING_FOR_ACTIVATION and detect_claps():
+                print("Clap trigger detected!")
+                activated_event.set()
+
+    def voice_thread():
+        global LISTENING_FOR_ACTIVATION
+        while True:
+            if LISTENING_FOR_ACTIVATION:
+                listen_for_wake_word()  # triggers activated_event inside
+
+    threading.Thread(target=clap_thread, daemon=True).start()
+    threading.Thread(target=voice_thread, daemon=True).start()
+
+    # --- Main loop ---
     while True:
         try:
+            # --- Command mode ---
             if not IN_CONVERSATION:
-                detect_claps()
+                print("Waiting for clap or wake-word...")
+                LISTENING_FOR_ACTIVATION = True
+                activated_event.wait()  # wait until triggered
+                LISTENING_FOR_ACTIVATION = False
+                activated_event.clear()
                 print("\n  Activated!")
                 speak("Yes sir.")
                 _tts_queue.join()
             else:
-                # In conversation mode — listen continuously without clapping
+                # Conversation mode
                 print("  [Conversation mode] Speak anytime, or say 'back to commands'...")
-                _tts_queue.join()
 
+            # --- Listen for user command ---
             command = listen_for_command()
             if not command:
                 if IN_CONVERSATION:
-                    continue
-                print("  No command heard. Clap again to retry.\n")
+                    continue  # keep listening in conversation
+                print("  No command heard. Clap or say 'Jarvis' again.\n")
                 speak("I didn't catch that. Try again.")
                 continue
 
             print("  Thinking...")
+
+            # --- Async AI call ---
+            future = ask_ollama_async(command, workspaces)
             try:
-                response = ask_ollama(command, workspaces)
+                response = future.result(timeout=15)  # wait max 15s
             except Exception as e:
                 print(f"  AI error: {e}")
                 speak("Something went wrong. Please try again.")
                 continue
 
+            # --- Handle AI response ---
             handle_response(response, workspaces)
 
             if not IN_CONVERSATION:
-                print("\n  Clap twice to activate...\n")
+                print("\n  Clap twice or say 'Jarvis' to activate...\n")
 
+            LISTENING_FOR_ACTIVATION = True
+            
         except KeyboardInterrupt:
             speak("Shutting down. Goodbye.")
             _tts_queue.join()
             print("\n  JARVIS shutting down. Goodbye.")
             break
+
 
 if __name__ == "__main__":
     main()
