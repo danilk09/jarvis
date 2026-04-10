@@ -377,8 +377,8 @@ IN_CONVERSATION = False
 
 def build_system_prompt(workspaces):
     workspace_list = json.dumps(list(workspaces.keys()))
-    file_sample    = json.dumps(FILE_INDEX[:200])   # send a sample so AI knows what's there
-    bookmark_sample = json.dumps([b["name"] for b in BOOKMARKS[:100]])
+    file_sample    = json.dumps(FILE_INDEX[:50])   # send a sample so AI knows what's there
+    bookmark_sample = json.dumps([b["name"] for b in BOOKMARKS[:30]])
 
     return f"""You are JARVIS, a voice-activated AI assistant inspired by Iron Man.
 
@@ -404,7 +404,11 @@ Action object types:
   {{"type": "none"}}
 
 Available workspaces: {workspace_list}
-Match workspace names fuzzily — e.g. "three eleven" or "311" both match a workspace called "311".
+CRITICAL: Match workspace names fuzzily. For example, if the user said 
+"three eleven", "3-11", "311", etc. this would match the workspace named "311" 
+and you would respond with the workspace action object type with the fuzzily matched 
+workspace. Always prefer workspace type over other actions when the name 
+matches even partially.
 
 Known files (sample): {file_sample}
 Known bookmarks (sample): {bookmark_sample}
@@ -452,7 +456,7 @@ def init_ollama(workspaces):
     speak("Warming up. Give me a moment.")
     print("  Warming up AI model...")
     requests.post("http://localhost:11434/api/chat", json={
-        "model": "llama2-7b-chat",
+        "model": "llama3.2:1b",
         "messages": CHAT_HISTORY + [{"role": "user", "content": "open google"}],
         "stream": False
     }, timeout=60)
@@ -475,7 +479,7 @@ def ask_ollama(command, workspaces):
 
     try:
         response = requests.post("http://localhost:11434/api/chat", json={
-            "model": "llama3-mini",  # faster local model
+            "model": "llama3.2:1b",  # faster local model
             "messages": CHAT_HISTORY,
             "max_tokens": max_tokens,
             "stream": False
@@ -549,7 +553,7 @@ model = vosk.Model("models/vosk-model-small-en-us-0.15")
 def callback(indata, frames, time, status):
     q.put(bytes(indata))
 
-def listen_for_wake_word():
+def listen_for_wake_word(activated_event):
     print("Listening for 'Jarvis'...")
     with sd.RawInputStream(samplerate=16000, blocksize=8000, dtype='int16',
                            channels=1, callback=callback):
@@ -561,6 +565,7 @@ def listen_for_wake_word():
                 text = result.get("text", "")
                 if WAKE_WORD in text.lower():
                     print("Wake word detected!")
+                    activated_event.set()  # ← this was missing
                     return
 
 # ── Voice Recording ────────────────────────────────────────────────────────────
@@ -626,6 +631,7 @@ def handle_response(response, workspaces):
 
     if mode == "action":
         actions = response.get("actions", [])
+        actions = [a for a in actions if isinstance(a, dict)]
         if not actions:
             speak("I'm not sure what to open.")
             return
@@ -699,7 +705,7 @@ def main():
         global LISTENING_FOR_ACTIVATION
         while True:
             if LISTENING_FOR_ACTIVATION:
-                listen_for_wake_word()  # triggers activated_event inside
+                listen_for_wake_word(activated_event)  # triggers activated_event inside
 
     threading.Thread(target=clap_thread, daemon=True).start()
     threading.Thread(target=voice_thread, daemon=True).start()
