@@ -4,6 +4,8 @@ JARVIS - Voice-Activated AI Assistant
 Clap twice -> speak your command -> local AI figures out what to do
 """
 
+import anthropic
+from dotenv import load_dotenv
 import concurrent.futures
 import os
 import sys
@@ -32,6 +34,9 @@ try:
 except ImportError:
     print("Missing dependencies. Run: pip install sounddevice numpy faster-whisper soundfile")
     sys.exit(1)
+
+load_dotenv()
+client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
 
 print("  Loading Whisper model (first run may take a moment)...")
 WHISPER_MODEL = WhisperModel("tiny", device="cpu", compute_type="int8")
@@ -421,7 +426,7 @@ def execute_action(action, workspaces):
 
     return f"Unknown action: {kind}"
 
-# ── Ollama Brain ───────────────────────────────────────────────────────────────
+# ── Jarvis Brain ───────────────────────────────────────────────────────────────
 CHAT_HISTORY    = []
 IN_CONVERSATION = False
 
@@ -469,21 +474,13 @@ def init_chat_history(workspaces):
     system_msg = build_system_prompt(workspaces)
     CHAT_HISTORY = [{"role": "system", "content": system_msg}]
 
-def init_ollama(workspaces):
+def init_claude(workspaces):
     init_chat_history(workspaces)
-    speak("Warming up. Give me a moment.")
-    print("  Warming up AI model...")
-    requests.post("http://localhost:11434/api/chat", json={
-        "model": "llama3.2:3b",
-        "messages": CHAT_HISTORY + [{"role": "user", "content": "open google"}],
-        "stream": False
-    }, timeout=60)
-    print("  AI model ready!")
     speak("JARVIS online. Ready for your command.")
 
-def ask_ollama(command, workspaces):
+def ask_claude(command, workspaces):
     """
-    Sends a command to local Ollama and returns the JSON response.
+    Sends a command to Claude and returns the JSON response.
     Automatically limits max_tokens depending on mode for speed.
     """
     global CHAT_HISTORY, IN_CONVERSATION
@@ -497,18 +494,21 @@ def ask_ollama(command, workspaces):
     # Decide token limit
     max_tokens = 150 if not IN_CONVERSATION else 350  # command vs conversation
 
-    try:
-        response = requests.post("http://localhost:11434/api/chat", json={
-            "model": "llama3.2:3b",  # faster local model
-            "messages": CHAT_HISTORY,
-            "max_tokens": max_tokens,
-            "stream": False
-        }, timeout=20)
-
-        raw = response.json()["message"]["content"].strip()
+    try:        
+        # Build messages without the system message (Claude takes it separately)
+        messages = [m for m in CHAT_HISTORY if m["role"] != "system"]
+        system_prompt = next((m["content"] for m in CHAT_HISTORY if m["role"] == "system"), "")
+        
+        response = client.messages.create(
+            model="claude-haiku-4-5-20251001",  # fast + cheap, good for commands
+            max_tokens=350,
+            system=system_prompt,
+            messages=messages
+        )
+        
+        raw = response.content[0].text.strip()
         CHAT_HISTORY.append({"role": "assistant", "content": raw})
 
-        # Keep history lean
         if len(CHAT_HISTORY) > 13:
             CHAT_HISTORY = CHAT_HISTORY[:1] + CHAT_HISTORY[-12:]
 
@@ -580,7 +580,7 @@ def ask_ollama(command, workspaces):
         return {"mode": "none"}
     except requests.exceptions.ConnectionError:
         CHAT_HISTORY = history_snapshot
-        print("  Could not reach Ollama. Is it still running?")
+        print("  Could not reach Claude. Is it still running?")
         return {"mode": "none"}
     except Exception as e:
         CHAT_HISTORY = history_snapshot
@@ -589,8 +589,8 @@ def ask_ollama(command, workspaces):
 
 _executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
 
-def ask_ollama_async(command, workspaces):
-    future = _executor.submit(ask_ollama, command, workspaces)
+def ask_claude_async(command, workspaces):
+    future = _executor.submit(ask_claude, command, workspaces)
     return future
 
 # ── Clap Detection ─────────────────────────────────────────────────────────────
@@ -776,13 +776,6 @@ def handle_response(response, workspaces):
 LISTENING_FOR_ACTIVATION = True
 
 def main():
-    try:
-        requests.get("http://localhost:11434", timeout=3)
-    except Exception:
-        print("ERROR: Ollama is not running.")
-        print("  Open the Ollama app from your Start menu, then run this script again.")
-        sys.exit(1)
-
     workspaces = load_workspaces()
 
     # Build indexes in background so startup isn't slow
@@ -790,12 +783,12 @@ def main():
     threading.Thread(target=build_bookmark_index, daemon=True).start()
     threading.Thread(target=build_history_index,  daemon=True).start()
 
-    init_ollama(workspaces)
+    init_claude(workspaces)
 
     print(f"\n{'='*50}")
     print("  JARVIS is ready")
     print(f"  Workspaces: {list(workspaces.keys()) or 'none'}")
-    print(f"  AI: Ollama llama3.2 (local)")
+    print(f"  AI: Claude Haiku (local)")
     print(f"  OS: {OS}")
     print(f"{'='*50}")
     print("\n  Clap twice or say 'Jarvis' to activate...\n")
@@ -850,7 +843,7 @@ def main():
             print("  Thinking...")
 
             # --- Async AI call ---
-            future = ask_ollama_async(command, workspaces)
+            future = ask_claude_async(command, workspaces)
             try:
                 response = future.result(timeout=15)  # wait max 15s
             except Exception as e:
