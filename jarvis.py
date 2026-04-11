@@ -461,10 +461,16 @@ RULES:
 - in_conversation=true → stay in conversation mode unless user exits
 """
 
-def init_ollama(workspaces):
+_ai_error_count = 0
+_AI_ERROR_RESET_THRESHOLD = 3
+
+def init_chat_history(workspaces):
     global CHAT_HISTORY
     system_msg = build_system_prompt(workspaces)
     CHAT_HISTORY = [{"role": "system", "content": system_msg}]
+
+def init_ollama(workspaces):
+    init_chat_history(workspaces)
     speak("Warming up. Give me a moment.")
     print("  Warming up AI model...")
     requests.post("http://localhost:11434/api/chat", json={
@@ -481,6 +487,8 @@ def ask_ollama(command, workspaces):
     Automatically limits max_tokens depending on mode for speed.
     """
     global CHAT_HISTORY, IN_CONVERSATION
+
+    history_snapshot = CHAT_HISTORY.copy()
 
     # Annotate message with conversation state
     annotated = f"[in_conversation={IN_CONVERSATION}] {command}"
@@ -514,6 +522,8 @@ def ask_ollama(command, workspaces):
 
         # Try increasingly aggressive recovery strategies
         def try_parse(text):
+            text = text.replace("\\ ", " ").replace("\\.", ".")  # fix escaped spaces/dots
+
             # Strategy 1: direct parse
             try:
                 return json.loads(text)
@@ -546,22 +556,34 @@ def ask_ollama(command, workspaces):
             return None
 
         result = try_parse(raw.strip())
+        global _ai_error_count
+
         if result:
+            _ai_error_count = 0  # reset error count on success
             CHAT_HISTORY.append({"role": "assistant", "content": raw})  # only append if valid
             return result
 
         # Bad response — remove the user message we just added too so history stays clean
-        CHAT_HISTORY.pop()
+        
+        _ai_error_count += 1
+        CHAT_HISTORY = history_snapshot
+        if _ai_error_count >= _AI_ERROR_RESET_THRESHOLD:
+            print(f"  {_ai_error_count} consecutive AI errors — resetting chat history.")
+            init_chat_history(workspaces)  # full reset
+            _ai_error_count = 0
         print(f"  Could not parse AI response: {raw[:100]}")
         return {"mode": "none"}
 
     except requests.exceptions.Timeout:
+        CHAT_HISTORY = history_snapshot
         print("  AI timed out.")
         return {"mode": "none"}
     except requests.exceptions.ConnectionError:
+        CHAT_HISTORY = history_snapshot
         print("  Could not reach Ollama. Is it still running?")
         return {"mode": "none"}
     except Exception as e:
+        CHAT_HISTORY = history_snapshot
         print(f"  Unexpected AI error: {e}")
         return {"mode": "none"}
 
