@@ -74,7 +74,7 @@ _tts_ready.wait()
 
 def speak(text):
     print(f"  JARVIS: {text}")
-    _tts_queue.put(text)
+    _tts_queue.put(text.replace("'", "''"))
 
 # ── Config ────────────────────────────────────────────────────────────────────
 WORKSPACES_FILE = os.path.join(os.path.dirname(__file__), "workspaces.json")
@@ -286,6 +286,31 @@ def open_app(name):
         pass
     return False
 
+def fuzzy_match_files(keyword, file_index, threshold=60, limit=20):
+    keyword = keyword.lower()
+    kw_words = set(keyword.split())
+    scored = []
+    for p in file_index:
+        name = os.path.basename(p).lower()
+        name_no_ext = os.path.splitext(name)[0]
+        # Exact substring match gets highest score
+        if keyword in name:
+            scored.append((100, p))
+            continue
+        # Word overlap score
+        name_words = set(name_no_ext.replace("_", " ").replace("-", " ").split())
+        overlap = len(kw_words & name_words)
+        if overlap == 0:
+            continue
+        # Character similarity score
+        shorter, longer = sorted([keyword, name_no_ext], key=len)
+        char_score = sum(1 for c in shorter if c in longer) / max(len(longer), 1) * 100
+        score = (overlap / max(len(kw_words), 1) * 60) + (char_score * 0.4)
+        if score >= threshold:
+            scored.append((score, p))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [p for _, p in scored[:limit]]
+
 def execute_action(action, workspaces):
     kind   = action.get("type", "")
     target = action.get("target", "")
@@ -318,30 +343,55 @@ def execute_action(action, workspaces):
         return f"Opened VSCode{' at ' + target if target else ''}"
 
     elif kind == "file":
-        # First try exact path, then search the index
         if os.path.exists(target):
             os.startfile(target)
             return f"Opened {target}"
-        matches = [p for p in FILE_INDEX if target.lower() in os.path.basename(p).lower()]
-        if matches:
+        matches = fuzzy_match_files(target, FILE_INDEX)
+        if not matches:
+            return f"File not found: {target}"
+        if len(matches) == 1:
             os.startfile(matches[0])
             return f"Opened {matches[0]}"
-        return f"File not found: {target}"
+        # Multiple matches — write results file and ask user
+        results_path = os.path.join(os.path.dirname(__file__), "jarvis_matches.txt")
+        with open(results_path, "w") as f:
+            for i, p in enumerate(matches[:20], 1):
+                f.write(f"{i}. {p}\n")
+        os.startfile(results_path)
+        speak(f"I found {min(len(matches), 20)} matches. I've opened a list on your desktop. Say the numbers you want opened.")
+        # Listen for user response
+        nums = listen_for_selection(max_attempts=3)
+        if not nums:
+            return "Selection cancelled."
+        for n in nums:
+            if 1 <= n <= len(matches):
+                os.startfile(matches[n-1])
+                time.sleep(0.3)
+        return f"Opened {len(nums)} file(s): {', '.join(os.path.basename(matches[n-1]) for n in nums)}"
 
     elif kind == "find_files":
-        # Return a list of matching files
         keyword = action.get("keyword", target).lower()
-        ext     = action.get("extension", "").lower()
-        matches = [
-            p for p in FILE_INDEX
-            if keyword in os.path.basename(p).lower()
-            and (not ext or p.lower().endswith(ext))
-        ][:10]
-        if matches:
-            result = "\n".join(matches)
-            print(f"\n  Found files:\n{result}\n")
-            return f"Found {len(matches)} files matching '{keyword}'"
-        return f"No files found matching '{keyword}'"
+        ext     = (action.get("extension") or "").lower()
+        matches = fuzzy_match_files(keyword, FILE_INDEX, threshold=60, limit=20)
+        if not matches:
+            return f"No files found matching '{keyword}'"
+        if len(matches) == 1:
+            os.startfile(matches[0])
+            return f"Opened {matches[0]}"
+        results_path = os.path.join(os.path.dirname(__file__), "jarvis_matches.txt")
+        with open(results_path, "w") as f:
+            for i, p in enumerate(matches, 1):
+                f.write(f"{i}. {p}\n")
+        os.startfile(results_path)
+        speak(f"Found {len(matches)} files. List is on your desktop. Say the numbers you want opened.")
+        nums = listen_for_selection(max_attempts=3)
+        if not nums:
+            return "Selection cancelled."
+        for n in nums:
+            if 1 <= n <= len(matches):
+                os.startfile(matches[n-1])
+                time.sleep(0.3)
+        return f"Opened {len(nums)} file(s): {', '.join(os.path.basename(matches[n-1]) for n in nums)}"
 
     elif kind == "bookmark":
         keyword = target.lower()
@@ -377,76 +427,38 @@ IN_CONVERSATION = False
 
 def build_system_prompt(workspaces):
     workspace_list = json.dumps(list(workspaces.keys()))
-    file_sample    = json.dumps(FILE_INDEX[:50])   # send a sample so AI knows what's there
     bookmark_sample = json.dumps([b["name"] for b in BOOKMARKS[:30]])
 
-    return f"""You are JARVIS, a voice-activated AI assistant inspired by Iron Man.
+    return f"""You are JARVIS. Return ONLY a single JSON object, no explanation.
 
-For every user message, return a single JSON object. Choose the correct mode:
+WORKSPACES (use type "workspace"): {workspace_list}
+BOOKMARKS searchable by keyword (use type "bookmark").
+FILES searchable by keyword (use type "find_files").
+HISTORY searchable by keyword (use type "history").
 
-━━━ MODE 1: action ━━━
-User wants to open, launch, or do something on the computer.
-{{
-  "mode": "action",
-  "actions": [ ...one or more action objects... ]
-}}
+ACTION TYPES (pick one):
+{{"mode":"action","actions":[{{"type":"workspace","target":"<name>"}}]}}
+{{"mode":"action","actions":[{{"type":"url","target":"<full url>"}}]}}
+{{"mode":"action","actions":[{{"type":"app","target":"<app name>"}}]}}
+{{"mode":"action","actions":[{{"type":"search","engine":"google|youtube|github","query":"<q>"}}]}}
+{{"mode":"action","actions":[{{"type":"vscode","target":"<path>"}}]}}
+{{"mode":"action","actions":[{{"type":"find_files","keyword":"<word>","extension":"<or empty>"}}]}}
+{{"mode":"action","actions":[{{"type":"bookmark","target":"<keyword>"}}]}}
+{{"mode":"action","actions":[{{"type":"history","keyword":"<word>","days_ago":null}}]}}
+{{"mode":"conversation","output":"speak","reply":"<response>"}}
+{{"mode":"end_conversation"}}
+{{"mode":"none"}}
 
-Action object types:
-  {{"type": "workspace",  "target": "<workspace name>"}}
-  {{"type": "url",        "target": "<full url>"}}
-  {{"type": "app",        "target": "<app name>"}}      ← use the common name e.g. "Discord", "Spotify", "Steam", "Notepad", "Chrome", "Discord"
-  {{"type": "search",     "engine": "google|youtube|github", "query": "<q>"}}
-  {{"type": "vscode",     "target": "<folder path>"}}
-  {{"type": "file",       "target": "<filename or path>"}}
-  {{"type": "find_files", "keyword": "<search term>", "extension": "<optional e.g. .pdf>"}}
-  {{"type": "bookmark",   "target": "<bookmark name>"}}
-  {{"type": "history",   "keyword": "<search term>", "days_ago": <number or null>}}
-  {{"type": "none"}}
-
-Available workspaces: {workspace_list}
-CRITICAL: Match workspace names fuzzily. For example, if the user said 
-"three eleven", "3-11", "311", etc. this would match the workspace named "311" 
-and you would respond with the workspace action object type with the fuzzily matched 
-workspace. Always prefer workspace type over other actions when the name 
-matches even partially.
-
-Known files (sample): {file_sample}
-Known bookmarks (sample): {bookmark_sample}
-Browser history is indexed and searchable by keyword and date (days_ago).
-
-For apps: always use type "app" with the common name. Windows will find it.
-Examples: "open Discord" → {{"type":"app","target":"Discord"}}
-          "open Spotify" → {{"type":"app","target":"Spotify"}}
-          "open Chrome"  → {{"type":"app","target":"chrome"}}
-
-━━━ MODE 2: conversation ━━━
-User wants to chat, ask a question, get information, or says things like
-"let's talk", "talk to me", "have a conversation", "can I ask you something".
-Also use this if you're ALREADY in conversation mode (in_conversation=true).
-{{
-  "mode": "conversation",
-  "output": "speak|text|both",
-  "reply": "<your response as JARVIS>"
-}}
-output defaults to "speak" unless user says "write", "show me", "text".
-In conversation mode, be helpful and natural. You are not limited to commands.
-You can answer questions about anything — weather (note you lack live data),
-coding, advice, general knowledge, etc.
-
-━━━ MODE 3: end_conversation ━━━
-User says "stop", "exit conversation", "back to commands", "never mind", "end chat",
-or any phrase that signals they want to stop talking and return to command mode.
-{{"mode": "end_conversation"}}
-
-━━━ MODE 4: none ━━━
-Filler words, unclear audio, silence, or nothing actionable ("ok", "thanks", "hmm", "uh").
-{{"mode": "none"}}
-
-━━━ RULES ━━━
-- Return ONLY valid JSON. No markdown, no explanation, no code fences.
-- Never guess an action if the command is unclear — use mode "none".
-- Never open a workspace unless the user clearly names it.
-- Current conversation state will be noted as in_conversation=true/false in the user message.
+RULES:
+- "open [app]" → type "app"
+- "open [bookmark keyword]" → type "bookmark"
+- "find files" or "open file" → type "find_files" with keyword
+- "open [workspace]" → type "workspace". Fuzzy match (Example: "311","three eleven","3-11" all match workspace "311")
+- Words like "open","find","search","launch","show" → ALWAYS mode "action"
+- "let's talk","chat","conversation" → mode "conversation"
+- "back to commands","stop","exit" → mode "end_conversation"
+- Unclear/filler → mode "none"
+- in_conversation=true → stay in conversation mode unless user exits
 """
 
 def init_ollama(workspaces):
@@ -456,7 +468,7 @@ def init_ollama(workspaces):
     speak("Warming up. Give me a moment.")
     print("  Warming up AI model...")
     requests.post("http://localhost:11434/api/chat", json={
-        "model": "llama3.2:1b",
+        "model": "llama3.2:3b",
         "messages": CHAT_HISTORY + [{"role": "user", "content": "open google"}],
         "stream": False
     }, timeout=60)
@@ -479,7 +491,7 @@ def ask_ollama(command, workspaces):
 
     try:
         response = requests.post("http://localhost:11434/api/chat", json={
-            "model": "llama3.2:1b",  # faster local model
+            "model": "llama3.2:3b",  # faster local model
             "messages": CHAT_HISTORY,
             "max_tokens": max_tokens,
             "stream": False
@@ -493,23 +505,65 @@ def ask_ollama(command, workspaces):
             CHAT_HISTORY = CHAT_HISTORY[:1] + CHAT_HISTORY[-12:]
 
         # Strip markdown fences if model adds them
+        # Strip markdown fences if model adds them
         if "```" in raw:
             raw = raw.split("```")[1]
             if raw.startswith("json"):
                 raw = raw[4:]
             raw = raw.split("```")[0]
 
-        # Extract JSON object from command responses
-        start = raw.find("{")
-        end   = raw.rfind("}") + 1
-        if start != -1 and end > start:
-            raw = raw[start:end]
+        # Try increasingly aggressive recovery strategies
+        def try_parse(text):
+            # Strategy 1: direct parse
+            try:
+                return json.loads(text)
+            except Exception:
+                pass
+            # Strategy 2: find first { to matching closing }
+            try:
+                start = text.find("{")
+                if start != -1:
+                    depth = 0
+                    for i, c in enumerate(text[start:], start):
+                        if c == "{": depth += 1
+                        elif c == "}":
+                            depth -= 1
+                            if depth == 0:
+                                return json.loads(text[start:i+1])
+            except Exception:
+                pass
+            # Strategy 3: strip trailing garbage character by character
+            try:
+                start = text.find("{")
+                chunk = text[start:]
+                for end in range(len(chunk), 0, -1):
+                    try:
+                        return json.loads(chunk[:end])
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+            return None
 
-        return json.loads(raw.strip())
+        result = try_parse(raw.strip())
+        if result:
+            CHAT_HISTORY.append({"role": "assistant", "content": raw})  # only append if valid
+            return result
 
+        # Bad response — remove the user message we just added too so history stays clean
+        CHAT_HISTORY.pop()
+        print(f"  Could not parse AI response: {raw[:100]}")
+        return {"mode": "none"}
+
+    except requests.exceptions.Timeout:
+        print("  AI timed out.")
+        return {"mode": "none"}
+    except requests.exceptions.ConnectionError:
+        print("  Could not reach Ollama. Is it still running?")
+        return {"mode": "none"}
     except Exception as e:
-        print(f"  AI error: {e}")
-        return {"mode": "none"}  # fallback
+        print(f"  Unexpected AI error: {e}")
+        return {"mode": "none"}
 
 _executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
 
@@ -554,7 +608,6 @@ def callback(indata, frames, time, status):
     q.put(bytes(indata))
 
 def listen_for_wake_word(activated_event):
-    print("Listening for 'Jarvis'...")
     with sd.RawInputStream(samplerate=16000, blocksize=8000, dtype='int16',
                            channels=1, callback=callback):
         rec = vosk.KaldiRecognizer(model, 16000)
@@ -568,8 +621,33 @@ def listen_for_wake_word(activated_event):
                     activated_event.set()  # ← this was missing
                     return
 
+# ── Voice Recording For File Selection ──────────────────────────────────────────
+
+def listen_for_selection(max_attempts=3):
+    """Keep listening until we hear numbers, up to max_attempts times."""
+    for attempt in range(max_attempts):
+        if attempt > 0:
+            speak("I didn't catch that. Say the numbers you want, or say cancel.")
+        selection = listen_for_command(max_duration=20, silence_duration=3.0)
+        if not selection:
+            continue
+        if "cancel" in selection.lower():
+            return []
+        import re
+        nums = [int(n) for n in re.findall(r'\b(\d+)\b', selection) if 1 <= int(n) <= 20]
+        word_map = {"one":1,"two":2,"three":3,"four":4,"five":5,
+                    "six":6,"seven":7,"eight":8,"nine":9,"ten":10}
+        for word, num in word_map.items():
+            if word in selection.lower():
+                nums.append(num)
+        nums = sorted(set(nums))
+        if nums:
+            return nums
+    speak("No valid selection. Cancelling.")
+    return []
+
 # ── Voice Recording ────────────────────────────────────────────────────────────
-def listen_for_command(max_duration=10, silence_threshold=0.01, silence_duration=2.0):
+def listen_for_command(max_duration=10, silence_threshold=0.04, silence_duration=2.0):
     print("  Speak your command... (stops when you go quiet)")
     frames = []
     silent_chunks = 0
@@ -584,7 +662,7 @@ def listen_for_command(max_duration=10, silence_threshold=0.01, silence_duration
         volume = float(np.abs(indata).max())
         frames.append(indata.copy())
         chunk_count[0] += 1
-        if volume > silence_threshold:
+        if volume > silence_threshold * 2.5:
             speaking_started = True
             silent_chunks = 0
         elif speaking_started:
@@ -608,7 +686,14 @@ def listen_for_command(max_duration=10, silence_threshold=0.01, silence_duration
 
     print("  Processing speech...")
     try:
-        segments, _ = WHISPER_MODEL.transcribe(tmp_path, language="en")
+        segments, _ = WHISPER_MODEL.transcribe(
+            tmp_path, 
+            language="en", 
+            vad_filter=True,           # voice activity detection — filters non-speech
+            vad_parameters=dict(
+                min_silence_duration_ms=500,
+                speech_pad_ms=200,
+            ))
         text = " ".join(s.text for s in segments).strip()
         if text:
             print(f'  Heard: "{text}"')
@@ -627,6 +712,10 @@ def listen_for_command(max_duration=10, silence_threshold=0.01, silence_duration
 # ── Handle AI Response ─────────────────────────────────────────────────────────
 def handle_response(response, workspaces):
     global IN_CONVERSATION
+
+    if response.get("mode") in ("find_files", "file", "bookmark", "history", "url", "app", "search", "workspace", "vscode"):
+        response = {"mode": "action", "actions": [response]}
+
     mode = response.get("mode", "none")
 
     if mode == "action":
