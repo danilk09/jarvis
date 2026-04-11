@@ -1,20 +1,20 @@
-1. C:\Users\paten/OneDrive\Desktop\Danil Desktop\Gaming\ChanceBall_windows\ChanceBall_windows\MonoBleedingEdge\etc\mono\2.0\machine.config
-2. C:\Users\paten/OneDrive\Desktop\Danil Desktop\Gaming\ChanceBall_windows\ChanceBall_windows\MonoBleedingEdge\etc\mono\4.0\machine.config
-3. C:\Users\paten/OneDrive\Desktop\Danil Desktop\Gaming\ChanceBall_windows\ChanceBall_windows\MonoBleedingEdge\etc\mono\4.5\machine.config
-4. C:\Users\paten/OneDrive\Desktop\MBTA Throuh 12th Grade\12th Grade\Semester 1\Literature\Macbeth Act I Study Guide_Sep 14_Danil Knight.docx
-5. C:\Users\paten/OneDrive\Desktop\MBTA Throuh 12th Grade\12th Grade\Semester 1\Literature\Macbeth Act II Study Guide_Sept 18_Danil Knight.docx
-6. C:\Users\paten/OneDrive\Desktop\MBTA Throuh 12th Grade\12th Grade\Semester 1\Literature\Macbeth Act III Study Guide_Sept 19_Danil Knight.docx
-7. C:\Users\paten/OneDrive\Desktop\MBTA Throuh 12th Grade\12th Grade\Semester 1\Literature\Macbeth Act IV Study Guide_Sept 20_Danil Knight.docx
-8. C:\Users\paten/OneDrive\Desktop\MBTA Throuh 12th Grade\12th Grade\Semester 1\Literature\Macbeth Act V Study Guide_Sept 21_Danil Knight.docx
-9. C:\Users\paten/OneDrive\Desktop\MBTA Throuh 12th Grade\12th Grade\Semester 1\Literature\Macbeth Analysis Paper_Sept 28_Danil Knight.docx
-10. C:\Users\paten/OneDrive\Desktop\MBTA Throuh 12th Grade\12th Grade\Semester 1\Literature\Macbeth Paper Reflection_Oct 2_Danil Knight.docx
-11. C:\Users\paten/OneDrive\Desktop\MBTA Throuh 12th Grade\12th Grade\Semester 1\Literature\Macbeth.pdf
-12. C:\Users\paten/OneDrive\Desktop\Minecraft Modding\Forge-HuntingMod\build\_compileJava_2\com\mojang\blaze3d\platform\MacosUtil.class
-13. C:\Users\paten/OneDrive\Desktop\Minecraft Modding\Forge-HuntingMod\build\_compileJava_2\net\minecraft\client\renderer\entity\MagmaCubeRenderer.class
-14. C:\Users\paten/OneDrive\Desktop\Minecraft Modding\Forge-HuntingMod\build\_compileJava_2\net\minecraft\commands\functions\MacroFunction$Entry.class
-15. C:\Users\paten/OneDrive\Desktop\Minecraft Modding\Forge-HuntingMod\build\_compileJava_2\net\minecraft\commands\functions\MacroFunction$MacroEntry.class
-16. C:\Users\paten/OneDrive\Desktop\Minecraft Modding\Forge-HuntingMod\build\_compileJava_2\net\minecraft\commands\functions\MacroFunction$PlainTextEntry.class
-17. C:\Users\paten/OneDrive\Desktop\Minecraft Modding\Forge-HuntingMod\build\_compileJava_2\net\minecraft\commands\functions\MacroFunction.class
-18. C:\Users\paten/OneDrive\Desktop\Minecraft Modding\Forge-HuntingMod\build\_compileJava_2\net\minecraft\world\entity\monster\MagmaCube.class
-19. C:\Users\paten/OneDrive\Desktop\Minecraft Modding\Forge-HuntingMod\build\_compileJava_2\net\minecraft\world\item\MaceItem.class
-20. C:\Users\paten/OneDrive\Desktop\Minecraft Modding\Forge-HuntingMod\build\_compileJava_2\net\minecraft\world\level\levelgen\feature\configurations\UnderwaterMagmaConfiguration.class
+1. C:\Users\paten/Downloads\Danil Knight Resume Aug 2025.docx
+2. C:\Users\paten/Downloads\Danil Knight Resume.pdf
+3. C:\Users\paten/Downloads\Fall 2025 Resume.pdf
+4. C:\Users\paten/OneDrive\Desktop\Danil Knight Resume Current.docx
+5. C:\Users\paten/OneDrive\Desktop\Danil Knight Resume.pdf
+6. C:\Users\paten/OneDrive\Desktop\~$nil Knight Master Resume.docx
+7. C:\Users\paten/OneDrive\Desktop\College App Stuff\Resume and  Drafting Activity Sections For College Applications.docx
+8. C:\Users\paten/OneDrive\Desktop\CS\danilk09.github.io\resume.html
+9. C:\Users\paten/OneDrive\Desktop\Fall Break Work\Danil Resume To be Edited (1).docx
+10. C:\Users\paten/OneDrive\Desktop\GitHub\danilk09.github.io\resume.html
+11. C:\Users\paten/OneDrive\Desktop\Internship Stuffoos 2025\Resume\Danil Knight Everything Resume.docx
+12. C:\Users\paten/OneDrive\Desktop\Internship Stuffoos 2025\Resume\Danil Knight First Resume.pdf
+13. C:\Users\paten/OneDrive\Desktop\Internship Stuffoos 2025\Resume\Danil Knight High School Resume.docx
+14. C:\Users\paten/OneDrive\Desktop\Internship Stuffoos 2025\Resume\Danil Knight Resume.docx
+15. C:\Users\paten/OneDrive\Desktop\Internship Stuffoos 2025\Resume\Danil Knight Resume_Oct 2025.docx
+16. C:\Users\paten/OneDrive\Desktop\Internship Stuffoos 2025\Resume\Danil Knight VICEROY MAVEN Resume.docx
+17. C:\Users\paten/OneDrive\Desktop\Internship Stuffoos 2025\Resume\KNIGHT_DANIL_RESUME.pdf
+18. C:\Users\paten/OneDrive\Desktop\Internship Stuffoos 2025\Resume\NSA Danil Knight Resume.docx
+19. C:\Users\paten/OneDrive\Desktop\Internship Stuffoos 2025\Resume\Resume Brainstorm.docx
+20. C:\Users\paten/OneDrive\Desktop\Internship Stuffoos 2025\Resume\Resume Format.jpg

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 JARVIS - Voice-Activated AI Assistant
-Clap twice -> speak your command -> local AI figures out what to do
+Say Jarvis -> speak your command -> local AI figures out what to do
 """
 
 import anthropic
@@ -39,7 +39,7 @@ load_dotenv()
 client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
 
 print("  Loading Whisper model (first run may take a moment)...")
-WHISPER_MODEL = WhisperModel("tiny", device="cpu", compute_type="int8")
+WHISPER_MODEL = WhisperModel("base", device="cpu", compute_type="int8")
 
 # ── Voice Engine ──────────────────────────────────────────────────────────────
 # SPEECH_RATE: -10 (slow) to 10 (fast)
@@ -83,9 +83,6 @@ def speak(text):
 
 # ── Config ────────────────────────────────────────────────────────────────────
 WORKSPACES_FILE = os.path.join(os.path.dirname(__file__), "workspaces.json")
-CLAP_THRESHOLD  = 0.6
-CLAP_GAP_MIN    = 0.15
-CLAP_GAP_MAX    = 1.2
 SAMPLE_RATE     = 44100
 CHUNK           = 1024
 OS              = platform.system()
@@ -277,13 +274,40 @@ def open_workspace(name, workspaces):
 # ── System Actions ─────────────────────────────────────────────────────────────
 def open_app(name):
     """Try multiple strategies to open an app by name on Windows."""
-    # Strategy 1: start command (works for many installed apps)
+    # Strategy 1: PowerShell — search Start Menu shortcuts (.lnk files)
     try:
-        subprocess.Popen(f'start "" "{name}"', shell=True)
+        ps_cmd = (
+            f"$app = Get-ChildItem -Path "
+            f"'$env:APPDATA\\Microsoft\\Windows\\Start Menu', "
+            f"'$env:ProgramData\\Microsoft\\Windows\\Start Menu' "
+            f"-Recurse -Filter '*.lnk' -ErrorAction SilentlyContinue | "
+            f"Where-Object {{ $_.BaseName -like '*{name}*' }} | "
+            f"Select-Object -First 1; "
+            f"if ($app) {{ Start-Process $app.FullName }}"
+        )
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps_cmd],
+            capture_output=True, timeout=5
+        )
+        if result.returncode == 0:
+            return True
+    except Exception:
+        pass
+    # Strategy 2: Shell :AppsFolder (UWP/Store apps like Xbox, Spotify)
+    try:
+        ps_cmd = (
+            f"$app = Get-StartApps | Where-Object {{ $_.Name -like '*{name}*' }} | "
+            f"Select-Object -First 1; "
+            f"if ($app) {{ Start-Process \"shell:AppsFolder\\$($app.AppID)\" }}"
+        )
+        subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps_cmd],
+            capture_output=True, timeout=5
+        )
         return True
     except Exception:
         pass
-    # Strategy 2: try running the name directly as an exe
+    # Strategy 3: direct exe name as fallback
     try:
         subprocess.Popen([name], shell=True)
         return True
@@ -316,7 +340,7 @@ def fuzzy_match_files(keyword, file_index, threshold=60, limit=20):
     scored.sort(key=lambda x: x[0], reverse=True)
     return [p for _, p in scored[:limit]]
 
-def execute_action(action, workspaces):
+def execute_action(action, workspaces, activated_event=None):
     kind   = action.get("type", "")
     target = action.get("target", "")
     query  = action.get("query", "")
@@ -365,7 +389,7 @@ def execute_action(action, workspaces):
         os.startfile(results_path)
         speak(f"I found {min(len(matches), 20)} matches. I've opened a list on your desktop. Say the numbers you want opened.")
         # Listen for user response
-        nums = listen_for_selection(max_attempts=3)
+        nums = listen_for_selection(activated_event)
         if not nums:
             return "Selection cancelled."
         for n in nums:
@@ -389,7 +413,7 @@ def execute_action(action, workspaces):
                 f.write(f"{i}. {p}\n")
         os.startfile(results_path)
         speak(f"Found {len(matches)} files. List is on your desktop. Say the numbers you want opened.")
-        nums = listen_for_selection(max_attempts=3)
+        nums = listen_for_selection(activated_event)
         if not nums:
             return "Selection cancelled."
         for n in nums:
@@ -476,7 +500,23 @@ def init_chat_history(workspaces):
 
 def init_claude(workspaces):
     init_chat_history(workspaces)
-    speak("JARVIS online. Ready for your command.")
+    speak("Ready for your command.")
+
+# ── Pre-AI Filter ─────────────────────────────────────────────────────────────
+BYPASS_COMMANDS = {
+    # Dismissals — no action needed
+    "never mind", "nevermind", "forget it", "forget that", "cancel", "stop",
+    "nothing", "nope", "no", "abort", "disregard", "ignore that",
+    "never mind that", "scratch that", "skip it",
+    # Filler / false triggers
+    "um", "uh", "hmm", "hm", "okay", "ok", "yeah", "yes", "alright",
+    "thanks", "thank you", "cool", "got it",
+}
+
+def should_bypass_ai(text):
+    """Return True if this is a simple dismissal that doesn't need Claude."""
+    cleaned = text.strip().lower().rstrip(".,!?")
+    return cleaned in BYPASS_COMMANDS
 
 def ask_claude(command, workspaces):
     """
@@ -593,31 +633,6 @@ def ask_claude_async(command, workspaces):
     future = _executor.submit(ask_claude, command, workspaces)
     return future
 
-# ── Clap Detection ─────────────────────────────────────────────────────────────
-def detect_claps():
-    clap_times = []
-    done = [False]
-    print("  Listening for claps...")
-
-    def callback(indata, frames, time_info, status):
-        volume = float(np.abs(indata).max())
-        if volume > CLAP_THRESHOLD:
-            now = time.time()
-            nonlocal clap_times
-            clap_times = [t for t in clap_times if now - t < CLAP_GAP_MAX]
-            if not clap_times or (now - clap_times[-1]) > CLAP_GAP_MIN:
-                clap_times.append(now)
-            if len(clap_times) >= 2:
-                done[0] = True
-                raise sd.CallbackStop()
-
-    with sd.InputStream(samplerate=SAMPLE_RATE, channels=1,
-                        blocksize=CHUNK, callback=callback):
-        while not done[0]:
-            time.sleep(0.05)
-
-    return True
-
 # ── Wake Word Detection ─────────────────────────────────────────────────────────
 
 WAKE_WORD = "jarvis"
@@ -645,58 +660,107 @@ def listen_for_wake_word(activated_event):
 
 # ── Voice Recording For File Selection ──────────────────────────────────────────
 
-def listen_for_selection(max_attempts=3):
-    """Keep listening until we hear numbers, up to max_attempts times."""
-    for attempt in range(max_attempts):
-        if attempt > 0:
-            speak("I didn't catch that. Say the numbers you want, or say cancel.")
-        selection = listen_for_command(max_duration=20, silence_duration=3.0)
-        if not selection:
-            continue
-        if "cancel" in selection.lower():
-            return []
-        import re
-        nums = [int(n) for n in re.findall(r'\b(\d+)\b', selection) if 1 <= int(n) <= 20]
-        word_map = {"one":1,"two":2,"three":3,"four":4,"five":5,
-                    "six":6,"seven":7,"eight":8,"nine":9,"ten":10}
-        for word, num in word_map.items():
-            if word in selection.lower():
-                nums.append(num)
-        nums = sorted(set(nums))
-        if nums:
-            return nums
-    speak("No valid selection. Cancelling.")
-    return []
+def listen_for_selection(activated_event):
+    """Show the list, then wait for 'Jarvis' wake word, then listen once for numbers."""
+    speak("Let me know when you're ready to select")
+    
+    # Wait for wake word (reuse the existing event)
+    activated_event.wait(timeout=60)  # wait up to 60 seconds
+    activated_event.clear()
+    
+    speak("Which numbers?")
+    _tts_queue.join()
+    
+    selection = listen_for_command(max_duration=20, silence_duration=3.0)
+    if not selection or "cancel" in selection.lower():
+        speak("Cancelled.")
+        return []
+    
+    import re
+    nums = [int(n) for n in re.findall(r'\b(\d+)\b', selection) if 1 <= int(n) <= 20]
+    word_map = {"one":1,"two":2,"three":3,"four":4,"five":5,
+                "six":6,"seven":7,"eight":8,"nine":9,"ten":10}
+    for word, num in word_map.items():
+        if word in selection.lower():
+            nums.append(num)
+    nums = sorted(set(nums))
+    if not nums:
+        speak("No valid numbers heard. Cancelling.")
+    return nums
 
 # ── Voice Recording ────────────────────────────────────────────────────────────
-def listen_for_command(max_duration=10, silence_threshold=0.04, silence_duration=2.0):
-    print("  Speak your command... (stops when you go quiet)")
-    frames = []
-    silent_chunks = 0
-    speaking_started = False
+# ── Persistent audio stream ───────────────────────────────────────────────────
+_audio_buffer = []
+_audio_lock = threading.Lock()
+_capture_active = threading.Event()
+_capture_done = threading.Event()
+_ambient_level = [0.04]
+
+def _persistent_audio_callback(indata, frames, time_info, status):
+    """Runs continuously. Only stores frames when capture is active."""
+    volume = float(np.abs(indata).max())
+    # Always track ambient noise when not capturing
+    if not _capture_active.is_set():
+        _ambient_level[0] = _ambient_level[0] * 0.95 + volume * 0.05  # rolling average
+        return
+    with _audio_lock:
+        _audio_buffer.append(indata.copy())
+
+_persistent_stream = None
+
+def start_persistent_stream():
+    global _persistent_stream
+    _persistent_stream = sd.InputStream(
+        samplerate=SAMPLE_RATE, channels=1,
+        blocksize=CHUNK, dtype="float32",
+        callback=_persistent_audio_callback
+    )
+    _persistent_stream.start()
+
+def listen_for_command(max_duration=10, silence_duration=2.0):
+    # Drain any audio captured during TTS playback
+    time.sleep(0.05)  # let any last TTS audio arrive in buffer
+    with _audio_lock:
+        _audio_buffer.clear()
+    
+    silence_threshold = max(_ambient_level[0] * 4.0, 0.02)
+    print(f"  Speak your command... (noise floor: {silence_threshold:.3f})")
+
+    with _audio_lock:
+        _audio_buffer.clear()
+
     silence_chunks_needed = int((SAMPLE_RATE / CHUNK) * silence_duration)
     max_chunks = int((SAMPLE_RATE / CHUNK) * max_duration)
-    chunk_count = [0]
-    done = [False]
 
-    def callback(indata, frame_count, time_info, status):
-        nonlocal silent_chunks, speaking_started
-        volume = float(np.abs(indata).max())
-        frames.append(indata.copy())
-        chunk_count[0] += 1
+    _capture_active.set()   # start collecting audio
+
+    silent_chunks = 0
+    speaking_started = False
+    chunk_count = 0
+
+    while True:
+        time.sleep(0.01)
+        with _audio_lock:
+            chunk_count = len(_audio_buffer)
+            if chunk_count == 0:
+                continue
+            last_chunk = _audio_buffer[-1]
+
+        volume = float(np.abs(last_chunk).max())
+
         if volume > silence_threshold * 2.5:
             speaking_started = True
             silent_chunks = 0
         elif speaking_started:
             silent_chunks += 1
-        if chunk_count[0] >= max_chunks or (speaking_started and silent_chunks >= silence_chunks_needed):
-            done[0] = True
-            raise sd.CallbackStop()
 
-    with sd.InputStream(samplerate=SAMPLE_RATE, channels=1,
-                        blocksize=CHUNK, dtype="float32", callback=callback):
-        while not done[0]:
-            time.sleep(0.01)
+        if chunk_count >= max_chunks or (speaking_started and silent_chunks >= silence_chunks_needed):
+            break
+
+    _capture_active.clear()  # stop collecting
+
+    with _audio_lock:
+        frames = list(_audio_buffer)
 
     if not frames or not speaking_started:
         print("  No speech detected.")
@@ -709,9 +773,10 @@ def listen_for_command(max_duration=10, silence_threshold=0.04, silence_duration
     print("  Processing speech...")
     try:
         segments, _ = WHISPER_MODEL.transcribe(
-            tmp_path, 
-            language="en", 
-            vad_filter=True,           # voice activity detection — filters non-speech
+            tmp_path,
+            language="en",
+            vad_filter=True,
+            initial_prompt="Open Discord, search YouTube for, open workspace, never mind, stop, yes, no.",
             vad_parameters=dict(
                 min_silence_duration_ms=500,
                 speech_pad_ms=200,
@@ -732,7 +797,7 @@ def listen_for_command(max_duration=10, silence_threshold=0.04, silence_duration
             pass
 
 # ── Handle AI Response ─────────────────────────────────────────────────────────
-def handle_response(response, workspaces):
+def handle_response(response, workspaces, activated_event=None):
     global IN_CONVERSATION
 
     if response.get("mode") in ("find_files", "file", "bookmark", "history", "url", "app", "search", "workspace", "vscode"):
@@ -747,7 +812,7 @@ def handle_response(response, workspaces):
             speak("I'm not sure what to open.")
             return
         for action in actions:
-            result = execute_action(action, workspaces)
+            result = execute_action(action, workspaces, activated_event)
             print(f"  Done: {result}")
         if not all(a.get("type") == "none" for a in actions):
             speak("Done.")
@@ -784,6 +849,7 @@ def main():
     threading.Thread(target=build_history_index,  daemon=True).start()
 
     init_claude(workspaces)
+    start_persistent_stream()
 
     print(f"\n{'='*50}")
     print("  JARVIS is ready")
@@ -791,19 +857,12 @@ def main():
     print(f"  AI: Claude Haiku (local)")
     print(f"  OS: {OS}")
     print(f"{'='*50}")
-    print("\n  Clap twice or say 'Jarvis' to activate...\n")
+    print("\n  Say 'Jarvis' to activate...\n")
     print("  Tip: Say 'let's talk' to enter conversation mode.")
     print("  Tip: Say 'open Discord' / 'open Spotify' to launch apps.\n")
 
-    # Event to signal activation (clap or wake word)
+    # Event to signal activation (wake word)
     activated_event = threading.Event()
-
-    def clap_thread():
-        global LISTENING_FOR_ACTIVATION
-        while True:
-            if LISTENING_FOR_ACTIVATION and detect_claps():
-                print("Clap trigger detected!")
-                activated_event.set()
 
     def voice_thread():
         global LISTENING_FOR_ACTIVATION
@@ -811,7 +870,6 @@ def main():
             if LISTENING_FOR_ACTIVATION:
                 listen_for_wake_word(activated_event)  # triggers activated_event inside
 
-    threading.Thread(target=clap_thread, daemon=True).start()
     threading.Thread(target=voice_thread, daemon=True).start()
 
     # --- Main loop ---
@@ -819,7 +877,7 @@ def main():
         try:
             # --- Command mode ---
             if not IN_CONVERSATION:
-                print("Waiting for clap or wake-word...")
+                print("Waiting for wake-word...")
                 LISTENING_FOR_ACTIVATION = True
                 activated_event.wait()  # wait until triggered
                 LISTENING_FOR_ACTIVATION = False
@@ -827,6 +885,7 @@ def main():
                 print("\n  Activated!")
                 speak("Yes sir.")
                 _tts_queue.join()
+                time.sleep(0.1)
             else:
                 # Conversation mode
                 print("  [Conversation mode] Speak anytime, or say 'back to commands'...")
@@ -836,11 +895,15 @@ def main():
             if not command:
                 if IN_CONVERSATION:
                     continue  # keep listening in conversation
-                print("  No command heard. Clap or say 'Jarvis' again.\n")
+                print("  No command heard. Say 'Jarvis' again.\n")
                 speak("I didn't catch that. Try again.")
                 continue
 
             print("  Thinking...")
+            # ── Skip AI for simple dismissals ──
+            if should_bypass_ai(command):
+                print("  Bypassed AI (dismissal command).")
+                continue
 
             # --- Async AI call ---
             future = ask_claude_async(command, workspaces)
@@ -852,10 +915,10 @@ def main():
                 continue
 
             # --- Handle AI response ---
-            handle_response(response, workspaces)
+            handle_response(response, workspaces, activated_event)
 
             if not IN_CONVERSATION:
-                print("\n  Clap twice or say 'Jarvis' to activate...\n")
+                print("\n  Say 'Jarvis' to activate...\n")
 
             LISTENING_FOR_ACTIVATION = True
             
