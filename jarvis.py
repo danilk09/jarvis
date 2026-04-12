@@ -25,6 +25,7 @@ import vosk
 import queue
 import json
 import threading
+from speaker_auth import SpeakerAuth
 
 try:
     import sounddevice as sd
@@ -40,6 +41,8 @@ client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
 
 print("  Loading Whisper model (first run may take a moment)...")
 WHISPER_MODEL = WhisperModel("base", device="cpu", compute_type="int8")
+
+SPEAKER_AUTH = SpeakerAuth() 
 
 # ── Voice Engine ──────────────────────────────────────────────────────────────
 # SPEECH_RATE: -10 (slow) to 10 (fast)
@@ -703,11 +706,12 @@ def start_persistent_stream():
 
 def listen_for_command(max_duration=10, silence_duration=2.0):
     # Drain any audio captured during TTS playback
-    time.sleep(0.05)  # let any last TTS audio arrive in buffer
+    time.sleep(0.05)
     with _audio_lock:
         _audio_buffer.clear()
-    
-    silence_threshold = max(_ambient_level[0] * 4.0, 0.02)
+
+    # ── Tighter noise gate (was *4.0, now *6.0 + higher floor) ──────────────
+    silence_threshold = max(_ambient_level[0] * 6.0, 0.035)
     print(f"  Speak your command... (noise floor: {silence_threshold:.3f})")
 
     with _audio_lock:
@@ -716,11 +720,14 @@ def listen_for_command(max_duration=10, silence_duration=2.0):
     silence_chunks_needed = int((SAMPLE_RATE / CHUNK) * silence_duration)
     max_chunks = int((SAMPLE_RATE / CHUNK) * max_duration)
 
-    _capture_active.set()   # start collecting audio
+    _capture_active.set()
 
-    silent_chunks = 0
+    silent_chunks    = 0
     speaking_started = False
-    chunk_count = 0
+    chunk_count      = 0
+    # Require at least 0.4s of actual speech before treating it as a command
+    MIN_SPEAKING_CHUNKS = int((SAMPLE_RATE / CHUNK) * 0.4)
+    speaking_chunks  = 0
 
     while True:
         time.sleep(0.01)
@@ -734,23 +741,44 @@ def listen_for_command(max_duration=10, silence_duration=2.0):
 
         if volume > silence_threshold * 2.5:
             speaking_started = True
-            silent_chunks = 0
+            speaking_chunks += 1
+            silent_chunks    = 0
         elif speaking_started:
             silent_chunks += 1
 
-        if chunk_count >= max_chunks or (speaking_started and silent_chunks >= silence_chunks_needed):
+        if chunk_count >= max_chunks or (
+            speaking_started
+            and speaking_chunks >= MIN_SPEAKING_CHUNKS
+            and silent_chunks >= silence_chunks_needed
+        ):
             break
 
-    _capture_active.clear()  # stop collecting
+    _capture_active.clear()
 
     with _audio_lock:
         frames = list(_audio_buffer)
 
-    if not frames or not speaking_started:
+    if not frames or not speaking_started or speaking_chunks < MIN_SPEAKING_CHUNKS:
         print("  No speech detected.")
         return ""
 
     recording = np.concatenate(frames, axis=0)
+
+    # ── Speaker verification ─────────────────────────────────────────────────
+    # Resample to 16 kHz for the speaker model (recording is at SAMPLE_RATE)
+    try:
+        import soxr
+        audio_16k = soxr.resample(recording.flatten(), SAMPLE_RATE, 16000)
+    except ImportError:
+        # Fallback: simple decimation (good enough for verification)
+        step = SAMPLE_RATE // 16000
+        audio_16k = recording.flatten()[::step]
+
+    is_known, who = SPEAKER_AUTH.verify(audio_16k, sample_rate=16000)
+    if not is_known:
+        print("  [SpeakerAuth] Voice not recognised — ignoring audio.")
+        return ""
+
     tmp_path = os.path.join(tempfile.gettempdir(), "_jarvis_tmp.wav")
     sf.write(tmp_path, recording, SAMPLE_RATE)
 
@@ -826,6 +854,13 @@ LISTENING_FOR_ACTIVATION = True
 
 def main():
     workspaces = load_workspaces()
+
+    if not SPEAKER_AUTH.list_users():
+        print("\n  No users enrolled yet.")
+        print("  JARVIS will run in open mode (anyone can activate it).")
+        print("  To enroll yourself, run:  python jarvis.py --enroll")
+    else:
+        print(f"  Enrolled users: {SPEAKER_AUTH.list_users()}")
 
     # Build indexes in background so startup isn't slow
     threading.Thread(target=build_file_index,    daemon=True).start()
@@ -914,4 +949,19 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if "--enroll" in sys.argv:
+        # Standalone enrollment mode — no wake word loop needed
+        sa = SpeakerAuth()
+        sa.wait_until_ready(timeout=60)
+        sa.enroll_interactive()
+    elif "--remove-user" in sys.argv:
+        idx = sys.argv.index("--remove-user")
+        name = sys.argv[idx + 1] if idx + 1 < len(sys.argv) else ""
+        if name:
+            sa = SpeakerAuth()
+            removed = sa.remove_user(name)
+            print(f"  {'Removed' if removed else 'User not found'}: {name}")
+        else:
+            print("  Usage: python jarvis.py --remove-user <name>")
+    else:
+        main()
