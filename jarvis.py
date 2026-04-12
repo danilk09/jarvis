@@ -273,46 +273,29 @@ def open_workspace(name, workspaces):
 
 # ── System Actions ─────────────────────────────────────────────────────────────
 def open_app(name):
-    """Try multiple strategies to open an app by name on Windows."""
-    # Strategy 1: PowerShell — search Start Menu shortcuts (.lnk files)
-    try:
-        ps_cmd = (
-            f"$app = Get-ChildItem -Path "
-            f"'$env:APPDATA\\Microsoft\\Windows\\Start Menu', "
-            f"'$env:ProgramData\\Microsoft\\Windows\\Start Menu' "
-            f"-Recurse -Filter '*.lnk' -ErrorAction SilentlyContinue | "
-            f"Where-Object {{ $_.BaseName -like '*{name}*' }} | "
-            f"Select-Object -First 1; "
-            f"if ($app) {{ Start-Process $app.FullName }}"
-        )
-        result = subprocess.run(
-            ["powershell", "-NoProfile", "-Command", ps_cmd],
-            capture_output=True, timeout=5
-        )
-        if result.returncode == 0:
-            return True
-    except Exception:
-        pass
-    # Strategy 2: Shell :AppsFolder (UWP/Store apps like Xbox, Spotify)
+    # Strategy 1: UWP/Store apps via Get-StartApps
     try:
         ps_cmd = (
             f"$app = Get-StartApps | Where-Object {{ $_.Name -like '*{name}*' }} | "
             f"Select-Object -First 1; "
             f"if ($app) {{ Start-Process \"shell:AppsFolder\\$($app.AppID)\" }}"
         )
-        subprocess.run(
+        result = subprocess.run(
             ["powershell", "-NoProfile", "-Command", ps_cmd],
-            capture_output=True, timeout=5
+            capture_output=True, text=True, timeout=8
         )
-        return True
+        if result.returncode == 0:
+            return True
     except Exception:
         pass
-    # Strategy 3: direct exe name as fallback
+
+    # Strategy 2: direct exe name as fallback
     try:
         subprocess.Popen([name], shell=True)
         return True
     except Exception:
         pass
+
     return False
 
 def fuzzy_match_files(keyword, file_index, threshold=60, limit=20):
@@ -485,6 +468,7 @@ RULES:
 - "open [workspace]" → type "workspace". Fuzzy match (Example: "311","three eleven","3-11" all match workspace "311")
 - Words like "open","find","search","launch","show" → ALWAYS mode "action"
 - "let's talk","chat","conversation" → mode "conversation"
+- When in convbersation mode, reply concisely and emulate a natural conversation style
 - "back to commands","stop","exit" → mode "end_conversation"
 - Unclear/filler → mode "none"
 - in_conversation=true → stay in conversation mode unless user exits
@@ -776,7 +760,7 @@ def listen_for_command(max_duration=10, silence_duration=2.0):
             tmp_path,
             language="en",
             vad_filter=True,
-            initial_prompt="Open Discord, search YouTube for, open workspace, never mind, stop, yes, no.",
+            initial_prompt="Open Discord, search YouTube for, open workspace, never mind, stop, yes, no, cancel, let's talk, back to commands, open file, find files, Danil",
             vad_parameters=dict(
                 min_silence_duration_ms=500,
                 speech_pad_ms=200,
