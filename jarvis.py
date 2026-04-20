@@ -14,17 +14,24 @@ import time
 import subprocess
 import webbrowser
 import platform
-import requests
 import threading
 import queue as _queue
 import glob
 import sqlite3
 import shutil
 import tempfile
+import requests
 import vosk
-import queue
-import json
-import threading
+import base64
+import re
+
+try:
+    from PIL import ImageGrab
+    import pyautogui
+    import pygetwindow as gw
+except ImportError:
+    print("Missing dependencies. Run: pip install pyautogui pygetwindow Pillow")
+    sys.exit(1)
 
 try:
     import sounddevice as sd
@@ -37,6 +44,7 @@ except ImportError:
 
 load_dotenv()
 client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+BRAVE_API_KEY = os.environ.get("BRAVE_API_KEY", "")
 
 print("  Loading Whisper model (first run may take a moment)...")
 WHISPER_MODEL = WhisperModel("base", device="cpu", compute_type="int8")
@@ -50,8 +58,12 @@ SPEECH_RATE = 1
 
 _tts_queue = _queue.Queue()
 _tts_ready = threading.Event()
+_current_tts_proc = None
+_tts_proc_lock = threading.Lock()
+_tts_suppressed = threading.Event()
 
 def _tts_worker():
+    global _current_tts_proc
     _tts_ready.set()
     while True:
         text = _tts_queue.get()
@@ -65,10 +77,14 @@ def _tts_worker():
                 f"$s.Rate = {SPEECH_RATE};"
                 f"$s.Speak([System.String]::Concat('{text}')) | Out-Null"
             )
-            subprocess.run(
-                ["powershell", "-NoProfile", "-Command", ps_cmd],
-                check=True, capture_output=True
-            )
+            with _tts_proc_lock:
+                _current_tts_proc = subprocess.Popen(
+                    ["powershell", "-NoProfile", "-Command", ps_cmd],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                )
+            _current_tts_proc.wait()
+            with _tts_proc_lock:
+                _current_tts_proc = None
         except Exception as e:
             print(f"  TTS error: {e}")
         _tts_queue.task_done()
@@ -77,9 +93,32 @@ _tts_thread = threading.Thread(target=_tts_worker, daemon=True)
 _tts_thread.start()
 _tts_ready.wait()
 
+def stop_tts():
+    """Kill the current TTS subprocess and drain the queue."""
+    global _current_tts_proc
+    _tts_suppressed.set()
+    with _tts_proc_lock:
+        if _current_tts_proc and _current_tts_proc.poll() is None:
+            try:
+                _current_tts_proc.terminate()
+                _current_tts_proc.wait(timeout=1)
+            except Exception:
+                pass
+            _current_tts_proc = None
+    while True:
+        try:
+            _tts_queue.get_nowait()
+            _tts_queue.task_done()
+        except _queue.Empty:
+            break
+
 def speak(text):
+    if _tts_suppressed.is_set():
+        print(f"  [muted] JARVIS: {text}")
+        return
     print(f"  JARVIS: {text}")
-    _tts_queue.put(text.replace("'", "''"))
+    safe = text.replace("'", "''").replace("`", "").replace("$", "").replace(";", ",")
+    _tts_queue.put(safe)
 
 # ── Config ────────────────────────────────────────────────────────────────────
 WORKSPACES_FILE = os.path.join(os.path.dirname(__file__), "workspaces.json")
@@ -87,11 +126,18 @@ SAMPLE_RATE     = 44100
 CHUNK           = 1024
 OS              = platform.system()
 
+# Folders for image I/O — created at startup if missing
+JARVIS_INPUT_DIR  = os.path.join(os.path.dirname(__file__), "jarvis_input")
+JARVIS_OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "jarvis_output")
+
+# ── Amazon Music config ───────────────────────────────────────────────────────
+# Paste your default playlist share link from Amazon Music here
+DEFAULT_PLAYLIST_URL = "https://music.amazon.com/user-playlists/00b053022c9a4144b33058c5754792besune?ref=dm_sh_a1cc-2301-37bc-2421-8f6c3"
+
 # ── File Index ────────────────────────────────────────────────────────────────
-FILE_INDEX = []  # list of absolute file paths on the machine
+FILE_INDEX = []
 
 def build_file_index():
-    """Scan common user directories and build a file path index."""
     global FILE_INDEX
     print("  Building file index (scanning your directories)...")
     roots = [
@@ -108,7 +154,6 @@ def build_file_index():
     for root in roots:
         if os.path.exists(root):
             for dirpath, dirnames, filenames in os.walk(root):
-                # Skip hidden and system folders
                 dirnames[:] = [d for d in dirnames if not d.startswith('.') and d not in ['node_modules', '__pycache__', '.git']]
                 for f in filenames:
                     paths.append(os.path.join(dirpath, f))
@@ -116,11 +161,8 @@ def build_file_index():
     print(f"  File index built: {len(FILE_INDEX)} files found.")
 
 def get_chrome_bookmarks():
-    """Extract Chrome bookmark URLs and titles."""
     bookmarks = []
-    chrome_path = os.path.expanduser(
-        "~/AppData/Local/Google/Chrome/User Data/Default/Bookmarks"
-    )
+    chrome_path = os.path.expanduser("~/AppData/Local/Google/Chrome/User Data/Default/Bookmarks")
     if not os.path.exists(chrome_path):
         return bookmarks
     try:
@@ -138,11 +180,8 @@ def get_chrome_bookmarks():
     return bookmarks
 
 def get_edge_bookmarks():
-    """Extract Edge bookmark URLs and titles."""
     bookmarks = []
-    edge_path = os.path.expanduser(
-        "~/AppData/Local/Microsoft/Edge/User Data/Default/Bookmarks"
-    )
+    edge_path = os.path.expanduser("~/AppData/Local/Microsoft/Edge/User Data/Default/Bookmarks")
     if not os.path.exists(edge_path):
         return bookmarks
     try:
@@ -167,10 +206,9 @@ def build_bookmark_index():
     print(f"  Bookmark index built: {len(BOOKMARKS)} bookmarks found.")
 
 # ── Browser History ───────────────────────────────────────────────────────────
-HISTORY = []  # list of {"title": str, "url": str, "visited": datetime str}
+HISTORY = []
 
 def read_browser_history(db_path, limit=5000):
-    """Read Chrome/Edge history SQLite DB. Must copy first — browser locks it."""
     entries = []
     if not os.path.exists(db_path):
         return entries
@@ -179,14 +217,13 @@ def read_browser_history(db_path, limit=5000):
         shutil.copy2(db_path, tmp)
         conn = sqlite3.connect(tmp)
         cur  = conn.cursor()
-        # Chrome stores time as microseconds since 1601-01-01
         cur.execute("""
             SELECT title, url, last_visit_time
             FROM urls
             ORDER BY last_visit_time DESC
             LIMIT ?
         """, (limit,))
-        epoch_offset = 11644473600  # seconds between 1601 and 1970
+        epoch_offset = 11644473600
         for title, url, ts in cur.fetchall():
             try:
                 secs = ts / 1_000_000 - epoch_offset
@@ -213,7 +250,6 @@ def build_history_index():
     all_entries = []
     for p in paths:
         all_entries.extend(read_browser_history(p))
-    # Deduplicate by URL, keep most recent visit
     seen = {}
     for e in all_entries:
         url = e["url"]
@@ -223,7 +259,6 @@ def build_history_index():
     print(f"  History index built: {len(HISTORY)} unique pages found.")
 
 def search_history(keyword=None, days_ago=None, limit=5):
-    """Search history by keyword and/or recency."""
     results = HISTORY
     if days_ago is not None:
         cutoff = time.strftime("%Y-%m-%d", time.localtime(time.time() - days_ago * 86400))
@@ -250,7 +285,6 @@ def open_workspace(name, workspaces):
                 break
     if not ws:
         return False, f"No workspace named '{name}' found."
-
     opened = []
     for item in ws.get("items", []):
         kind = item.get("type")
@@ -268,15 +302,14 @@ def open_workspace(name, workspaces):
             subprocess.Popen(f'start "" "{path}"', shell=True)
             opened.append(f"App: {path}")
         time.sleep(0.3)
-
     return True, f"Opened workspace '{name}': {', '.join(opened)}"
 
 # ── System Actions ─────────────────────────────────────────────────────────────
 def open_app(name):
-    # Strategy 1: UWP/Store apps via Get-StartApps
     try:
+        safe_name = re.sub(r"[`$;{}\"'\\]", "", name)
         ps_cmd = (
-            f"$app = Get-StartApps | Where-Object {{ $_.Name -like '*{name}*' }} | "
+            f"$app = Get-StartApps | Where-Object {{ $_.Name -like '*{safe_name}*' }} | "
             f"Select-Object -First 1; "
             f"if ($app) {{ Start-Process \"shell:AppsFolder\\$($app.AppID)\" }}"
         )
@@ -288,14 +321,11 @@ def open_app(name):
             return True
     except Exception:
         pass
-
-    # Strategy 2: direct exe name as fallback
     try:
         subprocess.Popen([name], shell=True)
         return True
     except Exception:
         pass
-
     return False
 
 def fuzzy_match_files(keyword, file_index, threshold=60, limit=20):
@@ -305,16 +335,13 @@ def fuzzy_match_files(keyword, file_index, threshold=60, limit=20):
     for p in file_index:
         name = os.path.basename(p).lower()
         name_no_ext = os.path.splitext(name)[0]
-        # Exact substring match gets highest score
         if keyword in name:
             scored.append((100, p))
             continue
-        # Word overlap score
         name_words = set(name_no_ext.replace("_", " ").replace("-", " ").split())
         overlap = len(kw_words & name_words)
         if overlap == 0:
             continue
-        # Character similarity score
         shorter, longer = sorted([keyword, name_no_ext], key=len)
         char_score = sum(1 for c in shorter if c in longer) / max(len(longer), 1) * 100
         score = (overlap / max(len(kw_words), 1) * 60) + (char_score * 0.4)
@@ -323,6 +350,259 @@ def fuzzy_match_files(keyword, file_index, threshold=60, limit=20):
     scored.sort(key=lambda x: x[0], reverse=True)
     return [p for _, p in scored[:limit]]
 
+# ── Image Analysis ────────────────────────────────────────────────────────────
+def image_to_base64(path):
+    """Read an image file and return (base64_str, media_type)."""
+    ext = os.path.splitext(path)[1].lower()
+    media_map = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
+                 ".gif": "image/gif", ".webp": "image/webp"}
+    media_type = media_map.get(ext, "image/png")
+    with open(path, "rb") as f:
+        return base64.standard_b64encode(f.read()).decode("utf-8"), media_type
+
+def analyze_image_with_claude(image_path, prompt):
+    """
+    Send an image to Claude Haiku for analysis.
+    Returns the text response. Does NOT add the image to CHAT_HISTORY
+    to avoid re-sending the base64 blob on every subsequent call.
+    Instead, the text summary is added to history so Jarvis can refer back to it.
+    """
+    b64, media_type = image_to_base64(image_path)
+    try:
+        response = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=200,
+            system="You are a voice assistant. Answer only what was asked about the image in 1-3 concise sentences. No markdown, no bullet points, no headers — plain spoken sentences only.",
+            messages=[{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {"type": "base64", "media_type": media_type, "data": b64}
+                    },
+                    {"type": "text", "text": prompt or "Describe this image concisely."}
+                ]
+            }]
+        )
+        result = response.content[0].text.strip()
+        with _chat_lock:
+            CHAT_HISTORY.append({"role": "user", "content": f"[Image analysis request] {prompt}"})
+            CHAT_HISTORY.append({"role": "assistant", "content": f"[Image analysis result] {result}"})
+        return result
+    except Exception as e:
+        return f"Image analysis failed: {e}"
+
+def take_screenshot(prompt):
+    """Capture fullscreen, save to jarvis_output/, analyze with Claude."""
+    os.makedirs(JARVIS_OUTPUT_DIR, exist_ok=True)
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    path = os.path.join(JARVIS_OUTPUT_DIR, f"screenshot_{timestamp}.png")
+    try:
+        img = ImageGrab.grab()
+        img.save(path)
+        print(f"  Screenshot saved: {path}")
+    except Exception as e:
+        return f"Screenshot failed: {e}"
+    result = analyze_image_with_claude(path, prompt or "Describe what's on screen.")
+    return result
+
+def _pillow_enhance(image_path, prompt):
+    """Pillow-based enhancement fallback when Real-ESRGAN exe isn't available."""
+    from PIL import Image, ImageEnhance
+    try:
+        b64, media_type = image_to_base64(image_path)
+        response = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=200,
+            messages=[{"role": "user", "content": [
+                {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": b64}},
+                {"type": "text", "text": (
+                    f"User wants: '{prompt}'. Return ONLY JSON: "
+                    '{"brightness":1.0,"contrast":1.0,"sharpness":1.0,"color":1.0,"description":"..."} '
+                    "1.0=no change, range 0.5-2.0 (sharpness up to 3.0)."
+                )}
+            ]}]
+        )
+        raw = response.content[0].text.strip()
+        params = json.loads(raw[raw.find("{"):raw.rfind("}")+1])
+        img = Image.open(image_path).convert("RGB")
+        img = ImageEnhance.Brightness(img).enhance(params.get("brightness", 1.0))
+        img = ImageEnhance.Contrast(img).enhance(params.get("contrast", 1.0))
+        img = ImageEnhance.Sharpness(img).enhance(params.get("sharpness", 1.0))
+        img = ImageEnhance.Color(img).enhance(params.get("color", 1.0))
+        os.makedirs(JARVIS_OUTPUT_DIR, exist_ok=True)
+        out_path = os.path.join(JARVIS_OUTPUT_DIR, f"enhanced_{time.strftime('%Y%m%d_%H%M%S')}.png")
+        img.save(out_path)
+        os.startfile(out_path)
+        return params.get("description", "Enhancement applied.")
+    except Exception as e:
+        return f"Pillow enhancement failed: {e}"
+
+def analyze_input_image(prompt):
+    """
+    Find newest image in jarvis_input/, analyze or enhance it, delete source.
+    If prompt implies enhancement, Claude returns enhancement params as JSON
+    and Pillow applies them; enhanced image is saved to jarvis_output/.
+    """
+    os.makedirs(JARVIS_INPUT_DIR, exist_ok=True)
+    exts = ["*.jpg", "*.jpeg", "*.png", "*.webp", "*.gif"]
+    files = []
+    for ext in exts:
+        files.extend(glob.glob(os.path.join(JARVIS_INPUT_DIR, ext)))
+    if not files:
+        return "No image found in the jarvis_input folder."
+
+    image_path = max(files, key=os.path.getmtime)
+    print(f"  Processing image: {image_path}")
+
+    b64, media_type = image_to_base64(image_path)
+
+    # Detect if user wants enhancement vs plain analysis
+    enhance_keywords = ["enhance", "improve", "fix", "sharpen", "brighten",
+                        "denoise", "clean up", "make better", "increase contrast"]
+    wants_enhancement = any(kw in (prompt or "").lower() for kw in enhance_keywords)
+
+    if wants_enhancement:
+        # Use realesrgan-ncnn-vulkan exe (runs on integrated GPU via Vulkan — no NVIDIA needed)
+        # Download from: https://github.com/xinntao/Real-ESRGAN-ncnn-vulkan/releases
+        ESRGAN_EXE = r"C:\Users\paten\OneDrive\Desktop\Tools\realesrgan-ncnn-vulkan.exe"  # ← update this path
+
+        if not os.path.exists(ESRGAN_EXE):
+            # Graceful fallback to Pillow if exe not found
+            result = _pillow_enhance(image_path, prompt)
+        else:
+            os.makedirs(JARVIS_OUTPUT_DIR, exist_ok=True)
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            out_path  = os.path.join(JARVIS_OUTPUT_DIR, f"upscaled_{timestamp}.png")
+            speak("Upscaling image, this may take a moment.")
+            try:
+                subprocess.run(
+                    [ESRGAN_EXE, "-i", image_path, "-o", out_path, "-s", "4", "-n", "realesrgan-x4plus"],
+                    check=True, timeout=120
+                )
+                os.startfile(out_path)
+                result = "Image upscaled 4x and saved to jarvis_output."
+            except subprocess.TimeoutExpired:
+                result = "Upscaling timed out. Try a smaller image."
+            except subprocess.CalledProcessError as e:
+                result = f"Upscaling failed: {e}"
+            except Exception as e:
+                result = f"Upscaling error: {e}"
+
+        with _chat_lock:
+            CHAT_HISTORY.append({"role": "user", "content": f"[Image enhancement request] {prompt}"})
+            CHAT_HISTORY.append({"role": "assistant", "content": f"[Enhancement result] {result}"})
+    else:
+        # Plain analysis
+        result = analyze_image_with_claude(image_path, prompt or "Describe this image.")
+
+    # Auto-delete source image
+    try:
+        os.remove(image_path)
+        print(f"  Deleted source image: {image_path}")
+    except Exception as e:
+        print(f"  Could not delete image: {e}")
+
+    return result
+
+# ── Amazon Music ──────────────────────────────────────────────────────────────
+def play_amazon_music(query="", shuffle=True):
+    """
+    Try to control the Amazon Music Windows app via UI automation.
+    Falls back to opening the browser with a search or default playlist URL.
+    
+    Strategy:
+    1. If no query: open default playlist URL in browser (shuffle handled by Amazon's shuffle button)
+    2. If query: try to find/focus the Amazon Music app window and use Ctrl+F to search,
+       then fall back to a browser search URL.
+    """
+    # No specific query → open default playlist
+    if not query:
+        speak("Opening your default playlist.")
+        webbrowser.open(DEFAULT_PLAYLIST_URL)
+        return "Opened default playlist in browser."
+
+    # Try to find an open Amazon Music window and search within it
+    app_focused = False
+    try:
+        wins = gw.getWindowsWithTitle("Amazon Music")
+        if wins:
+            win = wins[0]
+            win.activate()
+            time.sleep(0.5)
+            # Ctrl+F opens search in the Amazon Music desktop app
+            pyautogui.hotkey("ctrl", "f")
+            time.sleep(0.4)
+            pyautogui.hotkey("ctrl", "a")  # clear existing search text
+            pyautogui.typewrite(query, interval=0.05)
+            pyautogui.press("enter")
+            app_focused = True
+            print(f"  Searched Amazon Music app for: {query}")
+        else:
+            # App not open — launch via Get-StartApps (same as open_app action)
+            open_app("Amazon Music")
+            speak("Opening Amazon Music, one moment.")
+            time.sleep(5)
+            wins = gw.getWindowsWithTitle("Amazon Music")
+            if wins:
+                wins[0].activate()
+                time.sleep(0.5)
+                pyautogui.hotkey("ctrl", "f")
+                time.sleep(0.4)
+                pyautogui.hotkey("ctrl", "a")
+                pyautogui.typewrite(query, interval=0.05)
+                pyautogui.press("enter")
+                app_focused = True
+    except Exception as e:
+        print(f"  Amazon Music UI automation failed: {e}")
+
+    if app_focused:
+        return f"Searched Amazon Music for '{query}'"
+
+    # Fallback: browser search on Amazon Music web player
+    search_url = f"https://music.amazon.com/search/{query.replace(' ', '%20')}"
+    webbrowser.open(search_url)
+    return f"Opened Amazon Music browser search for '{query}'"
+
+# ── Web Search ────────────────────────────────────────────────────────────────
+def brave_search(query, count=5):
+    """Call Brave Search API and return a list of {title, description, url} dicts."""
+    if not BRAVE_API_KEY:
+        return []
+    try:
+        resp = requests.get(
+            "https://api.search.brave.com/res/v1/web/search",
+            headers={"Accept": "application/json", "X-Subscription-Token": BRAVE_API_KEY},
+            params={"q": query, "count": count},
+            timeout=8,
+        )
+        resp.raise_for_status()
+        results = resp.json().get("web", {}).get("results", [])
+        return [{"title": r.get("title", ""), "description": r.get("description", ""), "url": r.get("url", "")} for r in results]
+    except Exception as e:
+        print(f"  Brave search error: {e}")
+        return []
+
+def synthesize_search_answer(query, results):
+    """Ask Claude to turn raw search snippets into a short spoken answer."""
+    if not results:
+        return "I couldn't find anything for that. Try again or check your Brave API key."
+    snippets = "\n".join(
+        f"{i+1}. {r['title']}: {r['description']} ({r['url']})"
+        for i, r in enumerate(results)
+    )
+    try:
+        response = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=300,
+            system="You are a voice assistant. Using the search results below, give a concise spoken answer (2-4 sentences). No markdown, no bullet points — plain conversational sentences only.",
+            messages=[{"role": "user", "content": f"Question: {query}\n\nSearch results:\n{snippets}"}],
+        )
+        return response.content[0].text.strip()
+    except Exception as e:
+        return f"Search succeeded but summary failed: {e}"
+
+# ── Execute Action ─────────────────────────────────────────────────────────────
 def execute_action(action, workspaces, activated_event=None):
     kind   = action.get("type", "")
     target = action.get("target", "")
@@ -364,46 +644,45 @@ def execute_action(action, workspaces, activated_event=None):
         if len(matches) == 1:
             os.startfile(matches[0])
             return f"Opened {matches[0]}"
-        # Multiple matches — write results file and ask user
-        results_path = os.path.join(os.path.dirname(__file__), "jarvis_matches.txt")
+        results_path = os.path.join(JARVIS_OUTPUT_DIR, "jarvis_matches.txt")
+        os.makedirs(JARVIS_OUTPUT_DIR, exist_ok=True)
         with open(results_path, "w") as f:
             for i, p in enumerate(matches[:20], 1):
                 f.write(f"{i}. {p}\n")
         os.startfile(results_path)
-        speak(f"I found {min(len(matches), 20)} matches. I've opened a list on your desktop. Say the numbers you want opened.")
-        # Listen for user response
+        speak(f"I found {min(len(matches), 20)} matches. I've opened a list. Say the numbers you want opened.")
         nums = listen_for_selection(activated_event)
         if not nums:
             return "Selection cancelled."
-        for n in nums:
-            if 1 <= n <= len(matches):
-                os.startfile(matches[n-1])
-                time.sleep(0.3)
-        return f"Opened {len(nums)} file(s): {', '.join(os.path.basename(matches[n-1]) for n in nums)}"
+        opened = [n for n in nums if 1 <= n <= len(matches)]
+        for n in opened:
+            os.startfile(matches[n-1])
+            time.sleep(0.3)
+        return f"Opened {len(opened)} file(s): {', '.join(os.path.basename(matches[n-1]) for n in opened)}"
 
     elif kind == "find_files":
         keyword = action.get("keyword", target).lower()
-        ext     = (action.get("extension") or "").lower()
         matches = fuzzy_match_files(keyword, FILE_INDEX, threshold=60, limit=20)
         if not matches:
             return f"No files found matching '{keyword}'"
         if len(matches) == 1:
             os.startfile(matches[0])
             return f"Opened {matches[0]}"
-        results_path = os.path.join(os.path.dirname(__file__), "jarvis_matches.txt")
+        results_path = os.path.join(JARVIS_OUTPUT_DIR, "jarvis_matches.txt")
+        os.makedirs(JARVIS_OUTPUT_DIR, exist_ok=True)
         with open(results_path, "w") as f:
             for i, p in enumerate(matches, 1):
                 f.write(f"{i}. {p}\n")
         os.startfile(results_path)
-        speak(f"Found {len(matches)} files. List is on your desktop. Say the numbers you want opened.")
+        speak(f"Found {len(matches)} files. List is open. Say the numbers you want opened.")
         nums = listen_for_selection(activated_event)
         if not nums:
             return "Selection cancelled."
-        for n in nums:
-            if 1 <= n <= len(matches):
-                os.startfile(matches[n-1])
-                time.sleep(0.3)
-        return f"Opened {len(nums)} file(s): {', '.join(os.path.basename(matches[n-1]) for n in nums)}"
+        opened = [n for n in nums if 1 <= n <= len(matches)]
+        for n in opened:
+            os.startfile(matches[n-1])
+            time.sleep(0.3)
+        return f"Opened {len(opened)} file(s): {', '.join(os.path.basename(matches[n-1]) for n in opened)}"
 
     elif kind == "bookmark":
         keyword = target.lower()
@@ -428,18 +707,72 @@ def execute_action(action, workspaces, activated_event=None):
             return reply
         return f"No history found matching '{keyword}'"
 
+    elif kind == "screenshot":
+        prompt = action.get("prompt", "")
+        speak("Taking a screenshot.")
+        result = take_screenshot(prompt)
+        print(f"\n  ── Screenshot Analysis ──────────────\n  {result}\n  ────────────────────────────────────\n")
+        speak(result)
+        return result
+
+    elif kind == "analyze_image":
+        prompt = action.get("prompt", "")
+        wants_enhancement = any(
+            kw in (prompt or "").lower()
+            for kw in ["enhance", "improve", "fix", "sharpen", "brighten",
+                       "denoise", "clean up", "make better", "increase contrast", "upscale"]
+        )
+
+        if wants_enhancement:
+            # Run in background thread — Jarvis stays responsive
+            def _enhance_bg():
+                result = analyze_input_image(prompt)
+                speak(result)  # speak() is thread-safe
+
+            threading.Thread(target=_enhance_bg, daemon=True).start()
+            speak("Enhancement started in the background. I'll let you know when it's done.")
+            return "Enhancement running in background."
+        else:
+            # Plain analysis is fast — run inline as before
+            speak("Analyzing image.")
+            result = analyze_input_image(prompt)
+            print(f"\n  ── Image Analysis ───────────────────\n  {result}\n  ────────────────────────────────────\n")
+            speak(result)
+            return result
+
+    elif kind == "music":
+        query   = action.get("query", "")
+        shuffle = action.get("shuffle", True)
+        result  = play_amazon_music(query, shuffle)
+        return result
+
+    elif kind == "web_search":
+        if not BRAVE_API_KEY:
+            msg = "Web search isn't set up. Add BRAVE_API_KEY to your .env file."
+            speak(msg)
+            return msg
+        search_query = action.get("query", target)
+        speak("Let me look that up.")
+        results = brave_search(search_query)
+        answer = synthesize_search_answer(search_query, results)
+        print(f"\n  ── Web Search: {search_query} ──────────\n  {answer}\n  ────────────────────────────────────\n")
+        speak(answer)
+        with _chat_lock:
+            CHAT_HISTORY.append({"role": "user", "content": f"[Web search] {search_query}"})
+            CHAT_HISTORY.append({"role": "assistant", "content": answer})
+        return f"Web search: {search_query}"
+
     elif kind == "none":
         return "No action"
 
     return f"Unknown action: {kind}"
 
 # ── Jarvis Brain ───────────────────────────────────────────────────────────────
-CHAT_HISTORY    = []
-IN_CONVERSATION = False
+CHAT_HISTORY = []
+_chat_lock = threading.Lock()
 
 def build_system_prompt(workspaces):
     workspace_list = json.dumps(list(workspaces.keys()))
-    bookmark_sample = json.dumps([b["name"] for b in BOOKMARKS[:30]])
 
     return f"""You are JARVIS. Return ONLY a single JSON object, no explanation.
 
@@ -449,7 +782,7 @@ FILES searchable by keyword (use type "find_files").
 HISTORY searchable by keyword (use type "history").
 
 ACTION TYPES (pick one):
-{{"mode":"action","actions":[{{"type":"workspace","target":"<name>"}}]}}
+{{"mode":"action","actions":[{{"type":"workspace","target":"<n>"}}]}}
 {{"mode":"action","actions":[{{"type":"url","target":"<full url>"}}]}}
 {{"mode":"action","actions":[{{"type":"app","target":"<app name>"}}]}}
 {{"mode":"action","actions":[{{"type":"search","engine":"google|youtube|github","query":"<q>"}}]}}
@@ -457,8 +790,11 @@ ACTION TYPES (pick one):
 {{"mode":"action","actions":[{{"type":"find_files","keyword":"<word>","extension":"<or empty>"}}]}}
 {{"mode":"action","actions":[{{"type":"bookmark","target":"<keyword>"}}]}}
 {{"mode":"action","actions":[{{"type":"history","keyword":"<word>","days_ago":null}}]}}
-{{"mode":"conversation","output":"speak","reply":"<response>"}}
-{{"mode":"end_conversation"}}
+{{"mode":"action","actions":[{{"type":"screenshot","prompt":"<what to analyze or do with the screenshot>"}}]}}
+{{"mode":"action","actions":[{{"type":"analyze_image","prompt":"<what to do with the image in the input folder>"}}]}}
+{{"mode":"action","actions":[{{"type":"music","query":"<song or artist name, empty for default playlist>","shuffle":true}}]}}
+{{"mode":"action","actions":[{{"type":"web_search","query":"<search query>"}}]}}
+{{"mode":"chat","reply":"<your answer>"}}
 {{"mode":"none"}}
 
 RULES:
@@ -467,11 +803,13 @@ RULES:
 - "find files" or "open file" → type "find_files" with keyword
 - "open [workspace]" → type "workspace". Fuzzy match (Example: "311","three eleven","3-11" all match workspace "311")
 - Words like "open","find","search","launch","show" → ALWAYS mode "action"
-- "let's talk","chat","conversation" → mode "conversation"
-- When in convbersation mode, reply concisely and emulate a natural conversation style
-- "back to commands","stop","exit" → mode "end_conversation"
+- "screenshot","take a screenshot","capture screen" → type "screenshot"; put intent in "prompt"
+- "analyze image","look at this","what's in the image", "enhance image" → type "analyze_image"; put intent in "prompt"
+- "play [song/artist]","open Amazon Music","play music" → type "music"; leave query empty for default playlist
+- Anything needing current/real-time info: news, weather, restaurants, sports scores, prices, recent events → type "web_search"
+- Any question or request for information that doesn't need real-time data → mode "chat" with a concise spoken reply
 - Unclear/filler → mode "none"
-- in_conversation=true → stay in conversation mode unless user exits
+- Keep chat replies SHORT: 1-2 sentences max. No markdown, no lists. Plain spoken sentences only. Answer only what was asked — no extra context unless the user asks to go in depth.
 """
 
 _ai_error_count = 0
@@ -488,55 +826,37 @@ def init_claude(workspaces):
 
 # ── Pre-AI Filter ─────────────────────────────────────────────────────────────
 BYPASS_COMMANDS = {
-    # Dismissals — no action needed
     "never mind", "nevermind", "forget it", "forget that", "cancel", "stop",
     "nothing", "nope", "no", "abort", "disregard", "ignore that",
     "never mind that", "scratch that", "skip it",
-    # Filler / false triggers
     "um", "uh", "hmm", "hm", "okay", "ok", "yeah", "yes", "alright",
     "thanks", "thank you", "cool", "got it",
 }
 
 def should_bypass_ai(text):
-    """Return True if this is a simple dismissal that doesn't need Claude."""
     cleaned = text.strip().lower().rstrip(".,!?")
     return cleaned in BYPASS_COMMANDS
 
 def ask_claude(command, workspaces):
-    """
-    Sends a command to Claude and returns the JSON response.
-    Automatically limits max_tokens depending on mode for speed.
-    """
-    global CHAT_HISTORY, IN_CONVERSATION
+    global CHAT_HISTORY, _ai_error_count
 
-    history_snapshot = CHAT_HISTORY.copy()
-
-    # Annotate message with conversation state
-    annotated = f"[in_conversation={IN_CONVERSATION}] {command}"
-    CHAT_HISTORY.append({"role": "user", "content": annotated})
-
-    # Decide token limit
-    max_tokens = 150 if not IN_CONVERSATION else 350  # command vs conversation
-
-    try:        
-        # Build messages without the system message (Claude takes it separately)
+    with _chat_lock:
+        history_snapshot = CHAT_HISTORY.copy()
+        CHAT_HISTORY.append({"role": "user", "content": command})
         messages = [m for m in CHAT_HISTORY if m["role"] != "system"]
         system_prompt = next((m["content"] for m in CHAT_HISTORY if m["role"] == "system"), "")
-        
+
+    try:
+        # chat mode needs more tokens for a full reply; action mode needs very few
         response = client.messages.create(
-            model="claude-haiku-4-5-20251001",  # fast + cheap, good for commands
-            max_tokens=350,
+            model="claude-haiku-4-5-20251001",
+            max_tokens=400,
             system=system_prompt,
             messages=messages
         )
-        
+
         raw = response.content[0].text.strip()
-        CHAT_HISTORY.append({"role": "assistant", "content": raw})
 
-        if len(CHAT_HISTORY) > 13:
-            CHAT_HISTORY = CHAT_HISTORY[:1] + CHAT_HISTORY[-12:]
-
-        # Strip markdown fences if model adds them
         # Strip markdown fences if model adds them
         if "```" in raw:
             raw = raw.split("```")[1]
@@ -544,16 +864,12 @@ def ask_claude(command, workspaces):
                 raw = raw[4:]
             raw = raw.split("```")[0]
 
-        # Try increasingly aggressive recovery strategies
         def try_parse(text):
-            text = text.replace("\\ ", " ").replace("\\.", ".")  # fix escaped spaces/dots
-
-            # Strategy 1: direct parse
+            text = text.replace("\\ ", " ").replace("\\.", ".")
             try:
                 return json.loads(text)
             except Exception:
                 pass
-            # Strategy 2: find first { to matching closing }
             try:
                 start = text.find("{")
                 if start != -1:
@@ -566,7 +882,6 @@ def ask_claude(command, workspaces):
                                 return json.loads(text[start:i+1])
             except Exception:
                 pass
-            # Strategy 3: strip trailing garbage character by character
             try:
                 start = text.find("{")
                 chunk = text[start:]
@@ -580,34 +895,27 @@ def ask_claude(command, workspaces):
             return None
 
         result = try_parse(raw.strip())
-        global _ai_error_count
 
-        if result:
-            _ai_error_count = 0  # reset error count on success
-            CHAT_HISTORY.append({"role": "assistant", "content": raw})  # only append if valid
-            return result
+        with _chat_lock:
+            if result:
+                _ai_error_count = 0
+                if len(CHAT_HISTORY) > 13:
+                    CHAT_HISTORY = CHAT_HISTORY[:1] + CHAT_HISTORY[-12:]
+                CHAT_HISTORY.append({"role": "assistant", "content": raw})
+                return result
 
-        # Bad response — remove the user message we just added too so history stays clean
-        
-        _ai_error_count += 1
-        CHAT_HISTORY = history_snapshot
-        if _ai_error_count >= _AI_ERROR_RESET_THRESHOLD:
-            print(f"  {_ai_error_count} consecutive AI errors — resetting chat history.")
-            init_chat_history(workspaces)  # full reset
-            _ai_error_count = 0
+            _ai_error_count += 1
+            CHAT_HISTORY = history_snapshot
+            if _ai_error_count >= _AI_ERROR_RESET_THRESHOLD:
+                print(f"  {_ai_error_count} consecutive AI errors — resetting chat history.")
+                init_chat_history(workspaces)
+                _ai_error_count = 0
         print(f"  Could not parse AI response: {raw[:100]}")
         return {"mode": "none"}
 
-    except requests.exceptions.Timeout:
-        CHAT_HISTORY = history_snapshot
-        print("  AI timed out.")
-        return {"mode": "none"}
-    except requests.exceptions.ConnectionError:
-        CHAT_HISTORY = history_snapshot
-        print("  Could not reach Claude. Is it still running?")
-        return {"mode": "none"}
     except Exception as e:
-        CHAT_HISTORY = history_snapshot
+        with _chat_lock:
+            CHAT_HISTORY = history_snapshot
         print(f"  Unexpected AI error: {e}")
         return {"mode": "none"}
 
@@ -618,12 +926,10 @@ def ask_claude_async(command, workspaces):
     return future
 
 # ── Wake Word Detection ─────────────────────────────────────────────────────────
-
 WAKE_WORD = "jarvis"
-q = queue.Queue()
+q = _queue.Queue()
 
-# Load Vosk model
-model = vosk.Model("models/vosk-model-small-en-us-0.15")
+model = vosk.Model(os.path.join(os.path.dirname(__file__), "models", "vosk-model-small-en-us-0.15"))
 
 def callback(indata, frames, time, status):
     q.put(bytes(indata))
@@ -639,28 +945,21 @@ def listen_for_wake_word(activated_event):
                 text = result.get("text", "")
                 if WAKE_WORD in text.lower():
                     print("Wake word detected!")
-                    activated_event.set()  # ← this was missing
+                    stop_tts()
+                    activated_event.set()
                     return
 
 # ── Voice Recording For File Selection ──────────────────────────────────────────
-
 def listen_for_selection(activated_event):
-    """Show the list, then wait for 'Jarvis' wake word, then listen once for numbers."""
     speak("Let me know when you're ready to select")
-    
-    # Wait for wake word (reuse the existing event)
-    activated_event.wait(timeout=60)  # wait up to 60 seconds
+    activated_event.wait(timeout=60)
     activated_event.clear()
-    
     speak("Which numbers?")
     _tts_queue.join()
-    
     selection = listen_for_command(max_duration=20, silence_duration=3.0)
     if not selection or "cancel" in selection.lower():
         speak("Cancelled.")
         return []
-    
-    import re
     nums = [int(n) for n in re.findall(r'\b(\d+)\b', selection) if 1 <= int(n) <= 20]
     word_map = {"one":1,"two":2,"three":3,"four":4,"five":5,
                 "six":6,"seven":7,"eight":8,"nine":9,"ten":10}
@@ -672,7 +971,6 @@ def listen_for_selection(activated_event):
         speak("No valid numbers heard. Cancelling.")
     return nums
 
-# ── Voice Recording ────────────────────────────────────────────────────────────
 # ── Persistent audio stream ───────────────────────────────────────────────────
 _audio_buffer = []
 _audio_lock = threading.Lock()
@@ -681,11 +979,9 @@ _capture_done = threading.Event()
 _ambient_level = [0.04]
 
 def _persistent_audio_callback(indata, frames, time_info, status):
-    """Runs continuously. Only stores frames when capture is active."""
     volume = float(np.abs(indata).max())
-    # Always track ambient noise when not capturing
     if not _capture_active.is_set():
-        _ambient_level[0] = _ambient_level[0] * 0.95 + volume * 0.05  # rolling average
+        _ambient_level[0] = _ambient_level[0] * 0.95 + volume * 0.05
         return
     with _audio_lock:
         _audio_buffer.append(indata.copy())
@@ -702,21 +998,17 @@ def start_persistent_stream():
     _persistent_stream.start()
 
 def listen_for_command(max_duration=10, silence_duration=2.0):
-    # Drain any audio captured during TTS playback
-    time.sleep(0.05)  # let any last TTS audio arrive in buffer
-    with _audio_lock:
-        _audio_buffer.clear()
-    
+    time.sleep(0.05)
+
     silence_threshold = max(_ambient_level[0] * 4.0, 0.02)
     print(f"  Speak your command... (noise floor: {silence_threshold:.3f})")
-
-    with _audio_lock:
-        _audio_buffer.clear()
 
     silence_chunks_needed = int((SAMPLE_RATE / CHUNK) * silence_duration)
     max_chunks = int((SAMPLE_RATE / CHUNK) * max_duration)
 
-    _capture_active.set()   # start collecting audio
+    with _audio_lock:
+        _audio_buffer.clear()
+    _capture_active.set()
 
     silent_chunks = 0
     speaking_started = False
@@ -741,7 +1033,7 @@ def listen_for_command(max_duration=10, silence_duration=2.0):
         if chunk_count >= max_chunks or (speaking_started and silent_chunks >= silence_chunks_needed):
             break
 
-    _capture_active.clear()  # stop collecting
+    _capture_active.clear()
 
     with _audio_lock:
         frames = list(_audio_buffer)
@@ -760,7 +1052,7 @@ def listen_for_command(max_duration=10, silence_duration=2.0):
             tmp_path,
             language="en",
             vad_filter=True,
-            initial_prompt="Open Discord, search YouTube for, open workspace, never mind, stop, yes, no, cancel, let's talk, back to commands, open file, find files, Danil",
+            initial_prompt="Open Discord, search YouTube for, open workspace, never mind, stop, yes, no, cancel, open file, find files, take a screenshot, analyze image, play music on Amazon, what's on screen",
             vad_parameters=dict(
                 min_silence_duration_ms=500,
                 speech_pad_ms=200,
@@ -782,9 +1074,10 @@ def listen_for_command(max_duration=10, silence_duration=2.0):
 
 # ── Handle AI Response ─────────────────────────────────────────────────────────
 def handle_response(response, workspaces, activated_event=None):
-    global IN_CONVERSATION
-
-    if response.get("mode") in ("find_files", "file", "bookmark", "history", "url", "app", "search", "workspace", "vscode"):
+    # Normalise bare action dicts (model sometimes skips the wrapper)
+    if response.get("mode") in ("find_files", "file", "bookmark", "history", "url",
+                                 "app", "search", "workspace", "vscode",
+                                 "screenshot", "analyze_image", "music", "web_search"):
         response = {"mode": "action", "actions": [response]}
 
     mode = response.get("mode", "none")
@@ -793,27 +1086,21 @@ def handle_response(response, workspaces, activated_event=None):
         actions = response.get("actions", [])
         actions = [a for a in actions if isinstance(a, dict)]
         if not actions:
-            speak("I'm not sure what to open.")
+            speak("I'm not sure what to do with that.")
             return
         for action in actions:
             result = execute_action(action, workspaces, activated_event)
             print(f"  Done: {result}")
-        if not all(a.get("type") == "none" for a in actions):
+        # screenshot/analyze_image/music speak their own results, so skip generic "Done."
+        silent_types = {"screenshot", "analyze_image", "history", "web_search"}
+        if not all(a.get("type") in silent_types for a in actions):
             speak("Done.")
 
-    elif mode == "conversation":
-        IN_CONVERSATION = True
-        reply  = response.get("reply", "I'm not sure how to respond to that.")
-        output = response.get("output", "speak")
-        if output in ("text", "both"):
-            print(f"\n  ── JARVIS ──────────────────────────\n  {reply}\n  ────────────────────────────────────\n")
-        if output in ("speak", "both"):
-            speak(reply)
-
-    elif mode == "end_conversation":
-        IN_CONVERSATION = False
-        speak("Returning to command mode.")
-        print("  Exited conversation mode.")
+    elif mode == "chat":
+        # General AI answer — speak it and store in history (already done in ask_claude)
+        reply = response.get("reply", "I'm not sure how to answer that.")
+        print(f"\n  ── JARVIS ──────────────────────────\n  {reply}\n  ────────────────────────────────────\n")
+        speak(reply)
 
     elif mode == "none":
         print("  No action taken.")
@@ -827,10 +1114,14 @@ LISTENING_FOR_ACTIVATION = True
 def main():
     workspaces = load_workspaces()
 
+    # Ensure I/O folders exist
+    os.makedirs(JARVIS_INPUT_DIR, exist_ok=True)
+    os.makedirs(JARVIS_OUTPUT_DIR, exist_ok=True)
+
     # Build indexes in background so startup isn't slow
-    threading.Thread(target=build_file_index,    daemon=True).start()
-    threading.Thread(target=build_bookmark_index, daemon=True).start()
-    threading.Thread(target=build_history_index,  daemon=True).start()
+    threading.Thread(target=build_file_index,     daemon=True).start()
+    threading.Thread(target=build_bookmark_index,  daemon=True).start()
+    threading.Thread(target=build_history_index,   daemon=True).start()
 
     init_claude(workspaces)
     start_persistent_stream()
@@ -838,74 +1129,63 @@ def main():
     print(f"\n{'='*50}")
     print("  JARVIS is ready")
     print(f"  Workspaces: {list(workspaces.keys()) or 'none'}")
-    print(f"  AI: Claude Haiku (local)")
+    print(f"  AI: Claude Haiku 4.5")
     print(f"  OS: {OS}")
+    print(f"  Input folder:  {JARVIS_INPUT_DIR}")
+    print(f"  Output folder: {JARVIS_OUTPUT_DIR}")
     print(f"{'='*50}")
     print("\n  Say 'Jarvis' to activate...\n")
-    print("  Tip: Say 'let's talk' to enter conversation mode.")
-    print("  Tip: Say 'open Discord' / 'open Spotify' to launch apps.\n")
+    print("  Tip: Say 'take a screenshot' to capture and analyze the screen.")
+    print("  Tip: Drop an image in jarvis_input/ then say 'analyze image'.")
+    print("  Tip: Say 'play [song/artist]' or 'play music' for Amazon Music.\n")
 
-    # Event to signal activation (wake word)
     activated_event = threading.Event()
 
     def voice_thread():
         global LISTENING_FOR_ACTIVATION
         while True:
             if LISTENING_FOR_ACTIVATION:
-                listen_for_wake_word(activated_event)  # triggers activated_event inside
+                listen_for_wake_word(activated_event)
 
     threading.Thread(target=voice_thread, daemon=True).start()
 
-    # --- Main loop ---
     while True:
         try:
-            # --- Command mode ---
-            if not IN_CONVERSATION:
-                print("Waiting for wake-word...")
-                LISTENING_FOR_ACTIVATION = True
-                activated_event.wait()  # wait until triggered
-                LISTENING_FOR_ACTIVATION = False
-                activated_event.clear()
-                print("\n  Activated!")
-                speak("Yes sir.")
-                _tts_queue.join()
-                time.sleep(0.1)
-            else:
-                # Conversation mode
-                print("  [Conversation mode] Speak anytime, or say 'back to commands'...")
+            print("Waiting for wake-word...")
+            LISTENING_FOR_ACTIVATION = True
+            activated_event.wait()
+            LISTENING_FOR_ACTIVATION = False
+            activated_event.clear()
+            _tts_suppressed.clear()
+            print("\n  Activated!")
+            speak("Yes sir.")
+            _tts_queue.join()
+            time.sleep(0.1)
 
-            # --- Listen for user command ---
             command = listen_for_command()
             if not command:
-                if IN_CONVERSATION:
-                    continue  # keep listening in conversation
                 print("  No command heard. Say 'Jarvis' again.\n")
                 speak("I didn't catch that. Try again.")
                 continue
 
             print("  Thinking...")
-            # ── Skip AI for simple dismissals ──
             if should_bypass_ai(command):
                 print("  Bypassed AI (dismissal command).")
                 continue
 
-            # --- Async AI call ---
             future = ask_claude_async(command, workspaces)
             try:
-                response = future.result(timeout=15)  # wait max 15s
+                response = future.result(timeout=15)
             except Exception as e:
                 print(f"  AI error: {e}")
                 speak("Something went wrong. Please try again.")
                 continue
 
-            # --- Handle AI response ---
-            handle_response(response, workspaces, activated_event)
-
-            if not IN_CONVERSATION:
-                print("\n  Say 'Jarvis' to activate...\n")
-
+            # Re-enable wake word so user can interrupt Jarvis mid-response
             LISTENING_FOR_ACTIVATION = True
-            
+            handle_response(response, workspaces, activated_event)
+            print("\n  Say 'Jarvis' to activate...\n")
+
         except KeyboardInterrupt:
             speak("Shutting down. Goodbye.")
             _tts_queue.join()
