@@ -1,21 +1,41 @@
 #!/bin/bash
 # JARVIS Setup Script
 
+set -e
+
 echo "Installing JARVIS dependencies..."
 
-# Python packages
-pip install anthropic pyaudio numpy SpeechRecognition
-
-# On macOS, pyaudio needs portaudio first:
-# brew install portaudio
-# pip install pyaudio
-
-# On Ubuntu/Debian:
-# sudo apt-get install portaudio19-dev python3-pyaudio
+pip install anthropic python-dotenv pyautogui pygetwindow Pillow \
+    sounddevice numpy faster-whisper soundfile vosk requests
 
 echo ""
-echo "Set your API key:"
-echo "  export ANTHROPIC_API_KEY='sk-ant-...'"
+echo "Downloading Vosk speech model..."
+mkdir -p models
+if [ ! -d "models/vosk-model-small-en-us-0.15" ]; then
+    curl -L -o models/vosk-model-small-en-us-0.15.zip \
+        https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip
+    unzip -q models/vosk-model-small-en-us-0.15.zip -d models/
+    rm models/vosk-model-small-en-us-0.15.zip
+    echo "  Vosk model downloaded."
+else
+    echo "  Vosk model already present, skipping."
+fi
+
 echo ""
-echo "Then run:"
+echo "Creating folders..."
+mkdir -p jarvis_input jarvis_output
+
+echo ""
+if [ ! -f ".env" ]; then
+    cat > .env <<EOF
+ANTHROPIC_API_KEY=sk-ant-...
+BRAVE_API_KEY=BSA...
+EOF
+    echo "Created .env — fill in your API keys before running."
+else
+    echo ".env already exists, skipping."
+fi
+
+echo ""
+echo "Setup complete. Run with:"
 echo "  python jarvis.py"
