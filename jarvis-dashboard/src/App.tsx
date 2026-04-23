@@ -132,11 +132,14 @@ export default function App() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const stateColor = orbState === 'speaking'
-    ? '#3dff8f' : orbState === 'activated'
-    ? '#3dff8f' : orbState === 'thinking'
-    ? '#a8ffd0' : orbState === 'error'
-    ? '#ff5555' : '#1a6640';
+  const STATE_COLORS: Record<OrbState, string> = {
+    idle:      '#1a5e32',
+    activated: '#0abfa0',
+    thinking:  '#6060eb',
+    speaking:  '#14e65f',
+    error:     '#e63232',
+  };
+  const stateColor = STATE_COLORS[orbState];
 
   return (
     <div className="shell">

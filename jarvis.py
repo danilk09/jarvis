@@ -77,7 +77,6 @@ def _tts_worker():
                 f"$s.Rate = {SPEECH_RATE};"
                 f"$s.Speak([System.String]::Concat('{text}')) | Out-Null"
             )
-            _push_state("speaking")
             _start_word_beats(text)
             with _tts_proc_lock:
                 _current_tts_proc = subprocess.Popen(
@@ -91,9 +90,9 @@ def _tts_worker():
         except Exception as e:
             print(f"  TTS error: {e}")
             _stop_word_beats()
-        _tts_queue.task_done()
         if _tts_queue.empty():
             _push_state("idle")
+        _tts_queue.task_done()
 
 _tts_thread = threading.Thread(target=_tts_worker, daemon=True)
 _tts_thread.start()
@@ -671,6 +670,11 @@ def _start_word_beats(text):
     wps   = max(1.0, (130 + SPEECH_RATE * 5) / 60)
 
     def _run():
+        # PowerShell SAPI needs ~0.7 s to initialize before audio starts.
+        # wait() returns True if stopped early (interrupted), False on timeout.
+        if _beat_stop.wait(timeout=0.72):
+            return
+        _push_state("speaking")
         for _ in range(words):
             if _beat_stop.is_set():
                 break
@@ -1303,6 +1307,7 @@ def main():
             speak("Yes sir.")
             _tts_queue.join()
             time.sleep(0.1)
+            _push_state("activated")
 
             command = listen_for_command()
             if not command:
