@@ -51,7 +51,7 @@
   font-family: 'Share Tech Mono', monospace;
   font-size: 9px;
   letter-spacing: 0.45em;
-  color: var(--text-dim);
+  color: var(--text);
 }
 
 /* ── Status bar ───────────────────────────────────────────────────────── */
@@ -96,7 +96,7 @@
   color: var(--text);
 }
 
-.dimmed { color: var(--text-dim) !important; }
+.dimmed { color: var(--text) !important; opacity: 0.7; }
 
 /* ── Body ─────────────────────────────────────────────────────────────── */
 .body {
@@ -171,8 +171,8 @@
 
 .statePhrase {
   font-size: 17px;
-  font-weight: 300;
-  color: var(--text-dim);
+  font-weight: 400;
+  color: var(--text);
   letter-spacing: 0.06em;
   margin-bottom: 24px;
   text-align: center;
@@ -192,9 +192,9 @@
 
 .transcriptLabel {
   font-family: 'Share Tech Mono', monospace;
-  font-size: 9px;
-  letter-spacing: 0.45em;
-  color: var(--text-dim);
+  font-size: 10px;
+  letter-spacing: 0.4em;
+  color: var(--text);
   margin-bottom: 7px;
 }
 
@@ -216,11 +216,11 @@
 
 .dataChip {
   font-family: 'Share Tech Mono', monospace;
-  font-size: 9px;
-  letter-spacing: 0.12em;
-  color: var(--text-dim);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  color: var(--text);
   border: 1px solid var(--border);
   border-radius: 2px;
   padding: 3px 8px;
-  background: rgba(61,255,143,0.02);
+  background: rgba(61,255,143,0.03);
 }

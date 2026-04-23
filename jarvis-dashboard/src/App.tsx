@@ -70,6 +70,7 @@ export default function App() {
   const [files,      setFiles]      = useState<JarvisFile[]>([]);
   const [serverOk,   setServerOk]   = useState(false);
   const [fileCount,  setFileCount]  = useState(0);
+  const [speechBeat, setSpeechBeat] = useState(0);
   const demoRef    = useRef<ReturnType<typeof setTimeout> | null>(null);
   const demoIdx    = useRef(0);
   const clock      = useClock();
@@ -95,6 +96,7 @@ export default function App() {
         setServerOk(true);
         setOrbState(data.state as OrbState);
         if (data.transcript) setTranscript(data.transcript);
+        if (data.speech_beat !== undefined) setSpeechBeat(data.speech_beat);
         if (data.files?.length !== fileCount) {
           setFiles(data.files ?? []);
           setFileCount(data.files?.length ?? 0);
@@ -102,7 +104,7 @@ export default function App() {
       } catch {
         setServerOk(false);
       }
-      if (alive) setTimeout(poll, 1200);
+      if (alive) setTimeout(poll, 300);
     }
     poll();
 
@@ -150,7 +152,7 @@ export default function App() {
           <div className="gridLines" />
 
           <div className="orbWrap">
-            <ParticleOrb state={orbState} />
+            <ParticleOrb state={orbState} beat={speechBeat} />
           </div>
 
           <div className="stateLabel" style={{ color: stateColor }}>

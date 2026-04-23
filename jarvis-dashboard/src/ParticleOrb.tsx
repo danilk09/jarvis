@@ -4,7 +4,7 @@ import { useEffect, useRef, useCallback } from 'react';
 // 2 200 particles on a sphere surface displaced by 3-D Perlin noise → wispy nebula.
 
 type OrbState = 'idle' | 'activated' | 'thinking' | 'speaking' | 'error';
-interface Props { state: OrbState }
+interface Props { state: OrbState; beat?: number }
 
 /* ── Perlin noise ──────────────────────────────────────────────────────────── */
 function makeNoise3D() {
@@ -43,16 +43,27 @@ interface P {
 }
 
 const TARGET: Record<OrbState, number> = {
-  idle: 0, activated: 0.6, thinking: 0.45, speaking: 1.0, error: 0.25,
+  idle: 0, activated: 0.6, thinking: 0.45, speaking: 0.70, error: 0.25,
 };
 
-export default function ParticleOrb({ state }: Props) {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const stateRef  = useRef(state);
-  const rafRef    = useRef(0);
-  const eRef      = useRef(0);      // current energy 0-1
+export default function ParticleOrb({ state, beat = 0 }: Props) {
+  const canvasRef  = useRef<HTMLCanvasElement>(null);
+  const stateRef   = useRef(state);
+  const rafRef     = useRef(0);
+  const eRef       = useRef(0);     // base energy 0-1 tracking state target
+  const beatRef    = useRef(0);     // extra energy burst from word beats, decays to 0
+  const prevBeatRef = useRef(0);    // last seen beat count for delta calc
 
   useEffect(() => { stateRef.current = state; }, [state]);
+
+  // Each new beat value: compute how many words fired since last poll and kick energy
+  useEffect(() => {
+    const delta = Math.min(beat - prevBeatRef.current, 4); // cap at 4 missed beats
+    prevBeatRef.current = beat;
+    if (delta > 0) {
+      beatRef.current = Math.min(beatRef.current + 0.30 * delta, 0.32);
+    }
+  }, [beat]);
 
   const init = useCallback(() => {
     const canvas = canvasRef.current!;
@@ -63,7 +74,7 @@ export default function ParticleOrb({ state }: Props) {
     const noise = makeNoise3D();
 
     /* build particles */
-    const TOTAL = 2_200;
+    const TOTAL = 1_400;
     const pts: P[] = [];
     for (let i = 0; i < TOTAL; i++) {
       const layer: 0|1 = i < TOTAL * 0.72 ? 0 : 1;
@@ -89,11 +100,15 @@ export default function ParticleOrb({ state }: Props) {
       prev = now;
       const t  = now * 0.001;
 
-      // smooth energy
+      // smooth base energy tracks state target
       const target = TARGET[stateRef.current];
       const spd    = eRef.current < target ? 2.0 : 1.4;
       eRef.current += (target - eRef.current) * spd * dt;
-      const e = eRef.current;
+
+      // word-beat pulse decays — 0.30 / 1.6 ≈ 0.19s full decay, rhythmic gap between words
+      beatRef.current = Math.max(0, beatRef.current - 1.6 * dt);
+
+      const e = Math.min(1, eRef.current + beatRef.current);
 
       ctx.clearRect(0, 0, SZ, SZ);
 
@@ -155,14 +170,11 @@ export default function ParticleOrb({ state }: Props) {
         ctx.fillStyle   = `rgb(${rC},${gC},${bC})`;
         ctx.beginPath(); ctx.arc(sx, sy, sz, 0, Math.PI * 2); ctx.fill();
 
-        /* soft glow on bright surface particles */
+        /* soft halo on bright surface particles — simple circle, no per-particle gradient */
         if (shell > .5 && depth > .4) {
-          ctx.globalAlpha = a * .32 * shell;
-          const g2 = ctx.createRadialGradient(sx, sy, 0, sx, sy, sz * 5);
-          g2.addColorStop(0, `rgba(${rC},${gC},${bC},1)`);
-          g2.addColorStop(1, 'rgba(0,0,0,0)');
-          ctx.fillStyle = g2;
-          ctx.beginPath(); ctx.arc(sx, sy, sz * 5, 0, Math.PI * 2); ctx.fill();
+          ctx.globalAlpha = a * .18 * shell;
+          ctx.fillStyle   = `rgb(${rC},${gC},${bC})`;
+          ctx.beginPath(); ctx.arc(sx, sy, sz * 3.5, 0, Math.PI * 2); ctx.fill();
         }
       }
 

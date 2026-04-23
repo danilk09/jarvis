@@ -24,6 +24,8 @@ import requests
 import vosk
 import base64
 import re
+from flask import Flask as _Flask, jsonify as _jsonify, request as _freq, send_from_directory as _sfd
+from flask_cors import CORS as _CORS
 
 try:
     from PIL import ImageGrab
@@ -77,6 +79,8 @@ def _tts_worker():
                 f"$s.Rate = {SPEECH_RATE};"
                 f"$s.Speak([System.String]::Concat('{text}')) | Out-Null"
             )
+            _push_state("speaking")
+            _start_word_beats(text)
             with _tts_proc_lock:
                 _current_tts_proc = subprocess.Popen(
                     ["powershell", "-NoProfile", "-Command", ps_cmd],
@@ -85,9 +89,13 @@ def _tts_worker():
             _current_tts_proc.wait()
             with _tts_proc_lock:
                 _current_tts_proc = None
+            _stop_word_beats()
         except Exception as e:
             print(f"  TTS error: {e}")
+            _stop_word_beats()
         _tts_queue.task_done()
+        if _tts_queue.empty():
+            _push_state("idle")
 
 _tts_thread = threading.Thread(target=_tts_worker, daemon=True)
 _tts_thread.start()
@@ -129,6 +137,68 @@ OS              = platform.system()
 # Folders for image I/O — created at startup if missing
 JARVIS_INPUT_DIR  = os.path.join(os.path.dirname(__file__), "jarvis_input")
 JARVIS_OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "jarvis_output")
+
+# ── Embedded dashboard server ─────────────────────────────────────────────────
+_DASH_BUILD = os.path.join(os.path.dirname(__file__), "jarvis-dashboard", "build")
+_dash_lock  = threading.Lock()
+_dash_state: dict = {
+    "state":       "idle",
+    "transcript":  "",
+    "files":       [],
+    "speech_beat": 0,
+}
+
+_flask = _Flask(__name__, static_folder=_DASH_BUILD, static_url_path="")
+_CORS(_flask)
+
+@_flask.route("/status")
+def _route_status():
+    with _dash_lock:
+        return _jsonify(dict(_dash_state))
+
+@_flask.route("/state", methods=["POST"])
+def _route_set_state():
+    data = _freq.get_json(force=True)
+    with _dash_lock:
+        if "state"      in data: _dash_state["state"]      = data["state"]
+        if "transcript" in data: _dash_state["transcript"]  = data["transcript"]
+    return _jsonify({"ok": True})
+
+@_flask.route("/file", methods=["POST"])
+def _route_add_file():
+    data    = _freq.get_json(force=True)
+    name    = data.get("name", "untitled.txt")
+    content = data.get("content", "")
+    entry   = {"name": name, "content": content,
+                "time": time.strftime("%H:%M:%S"), "size": f"{len(content):,} chars"}
+    with _dash_lock:
+        _dash_state["files"].append(entry)
+    return _jsonify({"ok": True})
+
+@_flask.route("/files", methods=["DELETE"])
+def _route_clear_files():
+    with _dash_lock:
+        _dash_state["files"].clear()
+    return _jsonify({"ok": True})
+
+@_flask.route("/beat", methods=["POST"])
+def _route_beat():
+    with _dash_lock:
+        _dash_state["speech_beat"] += 1
+    return _jsonify({"ok": True})
+
+@_flask.route("/", defaults={"path": ""})
+@_flask.route("/<path:path>")
+def _route_dashboard(path):
+    full = os.path.join(_DASH_BUILD, path)
+    if path and os.path.exists(full):
+        return _sfd(_DASH_BUILD, path)
+    return _sfd(_DASH_BUILD, "index.html")
+
+def _start_embedded_server():
+    import logging
+    logging.getLogger("werkzeug").setLevel(logging.ERROR)
+    _flask.run(host="127.0.0.1", port=5151, debug=False, threaded=True, use_reloader=False)
 
 # ── Amazon Music config ───────────────────────────────────────────────────────
 # Paste your default playlist share link from Amazon Music here
@@ -603,6 +673,62 @@ def synthesize_search_answer(query, results):
         return f"Search succeeded but summary failed: {e}"
 
 # ── Execute Action ─────────────────────────────────────────────────────────────
+def _generate_file_content(prompt_text, filename):
+    """Ask Claude Haiku to write the raw file content."""
+    ext = os.path.splitext(filename)[1].lower()
+    lang_hint = {
+        '.py': 'Python', '.js': 'JavaScript', '.ts': 'TypeScript',
+        '.html': 'HTML', '.css': 'CSS', '.md': 'Markdown',
+        '.json': 'JSON', '.sh': 'Shell script', '.txt': 'plain text',
+    }.get(ext, 'plain text')
+    try:
+        resp = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=2000,
+            system=(
+                f"You are a file generator. Output ONLY the raw file content with no "
+                f"explanation, preamble, or markdown code fences. "
+                f"The file is named '{filename}' and should be {lang_hint}."
+            ),
+            messages=[{"role": "user", "content": prompt_text}],
+        )
+        return resp.content[0].text.strip()
+    except Exception as e:
+        return f"# File generation failed: {e}"
+
+def _push_file_to_dashboard(name, content):
+    entry = {"name": name, "content": content,
+             "time": time.strftime("%H:%M:%S"), "size": f"{len(content):,} chars"}
+    with _dash_lock:
+        _dash_state["files"].append(entry)
+
+def _push_state(state, transcript=""):
+    with _dash_lock:
+        _dash_state["state"] = state
+        if transcript:
+            _dash_state["transcript"] = transcript
+
+# ── Word-beat sync ────────────────────────────────────────────────────────────
+_beat_stop = threading.Event()
+
+def _start_word_beats(text):
+    _beat_stop.clear()
+    words = len(text.split())
+    wps   = max(1.0, (130 + SPEECH_RATE * 5) / 60)
+
+    def _run():
+        for _ in range(words):
+            if _beat_stop.is_set():
+                break
+            with _dash_lock:
+                _dash_state["speech_beat"] += 1
+            _beat_stop.wait(timeout=1.0 / wps)
+
+    threading.Thread(target=_run, daemon=True).start()
+
+def _stop_word_beats():
+    _beat_stop.set()
+
 def execute_action(action, workspaces, activated_event=None):
     kind   = action.get("type", "")
     target = action.get("target", "")
@@ -762,6 +888,19 @@ def execute_action(action, workspaces, activated_event=None):
             CHAT_HISTORY.append({"role": "assistant", "content": answer})
         return f"Web search: {search_query}"
 
+    elif kind == "generate_file":
+        filename    = action.get("filename", "jarvis_output.txt")
+        prompt_text = action.get("prompt", "")
+        speak(f"Generating {filename}.")
+        content = _generate_file_content(prompt_text, filename)
+        os.makedirs(JARVIS_OUTPUT_DIR, exist_ok=True)
+        out_path = os.path.join(JARVIS_OUTPUT_DIR, filename)
+        with open(out_path, "w", encoding="utf-8") as f:
+            f.write(content)
+        _push_file_to_dashboard(filename, content)
+        speak(f"{filename} is ready. It's been saved to the output folder and sent to the dashboard.")
+        return f"Generated {filename}"
+
     elif kind == "none":
         return "No action"
 
@@ -794,6 +933,7 @@ ACTION TYPES (pick one):
 {{"mode":"action","actions":[{{"type":"analyze_image","prompt":"<what to do with the image in the input folder>"}}]}}
 {{"mode":"action","actions":[{{"type":"music","query":"<song or artist name, empty for default playlist>","shuffle":true}}]}}
 {{"mode":"action","actions":[{{"type":"web_search","query":"<search query>"}}]}}
+{{"mode":"action","actions":[{{"type":"generate_file","filename":"<name.ext>","prompt":"<full description of what to write in the file>"}}]}}
 {{"mode":"chat","reply":"<your answer>"}}
 {{"mode":"none"}}
 
@@ -807,6 +947,7 @@ RULES:
 - "analyze image","look at this","what's in the image", "enhance image" → type "analyze_image"; put intent in "prompt"
 - "play [song/artist]","open Amazon Music","play music" → type "music"; leave query empty for default playlist
 - Anything needing current/real-time info: news, weather, restaurants, sports scores, prices, recent events → type "web_search"
+- "write a [file]", "create a [file]", "generate [file]", "make a [file]" → type "generate_file"; filename must include an extension (.py, .txt, .md, .html, etc.); put the full description of what to write in "prompt"
 - Any question or request for information that doesn't need real-time data → mode "chat" with a concise spoken reply
 - Unclear/filler → mode "none"
 - Keep chat replies SHORT: 1-2 sentences max. No markdown, no lists. Plain spoken sentences only. Answer only what was asked — no extra context unless the user asks to go in depth.
@@ -1118,6 +1259,11 @@ def main():
     os.makedirs(JARVIS_INPUT_DIR, exist_ok=True)
     os.makedirs(JARVIS_OUTPUT_DIR, exist_ok=True)
 
+    # Start embedded dashboard server
+    threading.Thread(target=_start_embedded_server, daemon=True).start()
+    time.sleep(0.6)   # give Flask a moment to bind before opening browser
+    webbrowser.open("http://localhost:5151")
+
     # Build indexes in background so startup isn't slow
     threading.Thread(target=build_file_index,     daemon=True).start()
     threading.Thread(target=build_bookmark_index,  daemon=True).start()
@@ -1128,6 +1274,7 @@ def main():
 
     print(f"\n{'='*50}")
     print("  JARVIS is ready")
+    print(f"  Dashboard: http://localhost:5151")
     print(f"  Workspaces: {list(workspaces.keys()) or 'none'}")
     print(f"  AI: Claude Haiku 4.5")
     print(f"  OS: {OS}")
@@ -1157,6 +1304,7 @@ def main():
             LISTENING_FOR_ACTIVATION = False
             activated_event.clear()
             _tts_suppressed.clear()
+            _push_state("activated")
             print("\n  Activated!")
             speak("Yes sir.")
             _tts_queue.join()
@@ -1166,9 +1314,12 @@ def main():
             if not command:
                 print("  No command heard. Say 'Jarvis' again.\n")
                 speak("I didn't catch that. Try again.")
+                _tts_queue.join()
+                _push_state("idle")
                 continue
 
             print("  Thinking...")
+            _push_state("thinking", transcript=command)
             if should_bypass_ai(command):
                 print("  Bypassed AI (dismissal command).")
                 continue
@@ -1179,6 +1330,8 @@ def main():
             except Exception as e:
                 print(f"  AI error: {e}")
                 speak("Something went wrong. Please try again.")
+                _tts_queue.join()
+                _push_state("error")
                 continue
 
             # Re-enable wake word so user can interrupt Jarvis mid-response

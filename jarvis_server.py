@@ -20,6 +20,7 @@ _state = {
     "state":      "idle",   # idle | activated | thinking | speaking | error
     "transcript": "",
     "files":      [],       # list of {name, content, time, size}
+    "speech_beat": 0,       # increments once per spoken word
 }
 
 def update_state(**kwargs):
@@ -58,6 +59,13 @@ def add_file():
             "size": size,
         })
     print(f"  [server] File received: {name} ({size})")
+    return jsonify({"ok": True})
+
+@app.route("/beat", methods=["POST"])
+def beat():
+    """Called by JARVIS once per spoken word for orb pulse sync."""
+    with _lock:
+        _state["speech_beat"] += 1
     return jsonify({"ok": True})
 
 @app.route("/files", methods=["DELETE"])

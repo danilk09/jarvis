@@ -21,7 +21,7 @@
   font-family: 'Share Tech Mono', monospace;
   font-size: 10px;
   letter-spacing: 0.4em;
-  color: var(--text-dim);
+  color: var(--text);
 }
 
 .count {
@@ -62,13 +62,13 @@
 
 .emptyText {
   font-size: 14px;
-  color: var(--text-dim);
+  color: var(--text);
 }
 
 .emptyHint {
   font-size: 11px;
-  color: var(--text-dim);
-  opacity: 0.6;
+  color: var(--text);
+  opacity: 0.65;
   margin-top: 2px;
 }
 
@@ -200,3 +200,87 @@
   white-space: pre-wrap;
   word-break: break-word;
 }
+
+/* ── Markdown viewer ── */
+.markdownContent {
+  flex: 1;
+  overflow-y: auto;
+  padding: 28px 32px;
+  color: var(--text-bright);
+  font-family: 'Rajdhani', sans-serif;
+  font-size: 15px;
+  line-height: 1.7;
+}
+
+.markdownContent h1,
+.markdownContent h2,
+.markdownContent h3,
+.markdownContent h4 {
+  font-family: 'Share Tech Mono', monospace;
+  color: var(--green);
+  letter-spacing: 0.06em;
+  margin: 1.4em 0 0.5em;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 6px;
+}
+
+.markdownContent h1 { font-size: 22px; }
+.markdownContent h2 { font-size: 17px; }
+.markdownContent h3 { font-size: 14px; color: var(--green-bright); border-bottom: none; }
+
+.markdownContent p { margin: 0.6em 0; }
+
+.markdownContent ul,
+.markdownContent ol {
+  padding-left: 1.4em;
+  margin: 0.5em 0;
+}
+
+.markdownContent li { margin: 0.25em 0; }
+
+.markdownContent code {
+  font-family: 'Share Tech Mono', monospace;
+  font-size: 12px;
+  background: rgba(61,255,143,0.06);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  padding: 1px 6px;
+  color: var(--green-bright);
+}
+
+.markdownContent pre {
+  background: rgba(4,14,9,0.9);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 16px;
+  overflow-x: auto;
+  margin: 1em 0;
+}
+
+.markdownContent pre code {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 12.5px;
+  line-height: 1.65;
+  color: var(--text);
+}
+
+.markdownContent blockquote {
+  border-left: 3px solid var(--green-dim);
+  margin: 0.8em 0;
+  padding: 4px 16px;
+  color: var(--text);
+  font-style: italic;
+}
+
+.markdownContent hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 1.5em 0;
+}
+
+.markdownContent a { color: var(--green); text-decoration: underline; }
+
+.markdownContent strong { color: var(--green-bright); font-weight: 600; }
+.markdownContent em { color: var(--text-bright); }
