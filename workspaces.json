@@ -1,6 +1,6 @@
 {
   "311": {
-    "description": "My main React app",
+    "description": "Course materials for ICS 311",
     "items": [
       {
         "type": "url",
@@ -17,7 +17,7 @@
     ]
   },
   "314": {
-    "description": "Daily work setup",
+    "description": "Course materials for ICS 314",
     "items": [
       {
         "type": "url",
@@ -38,7 +38,7 @@
     ]
   },
   "japanese": {
-    "description": "",
+    "description": "Course materials for JPN 102",
     "items": [
       {
         "type": "url",
@@ -58,29 +58,12 @@
       }
     ]
   },
-  "discord": {
-    "description": "",
-    "items": [
-      {
-        "type": "app",
-        "path": "Discord"
-      }
-    ]
-  },
-  "coding mode": {
-    "description": "",
+  "dashboard": {
+    "description": "JARVIS dashboard",
     "items": [
       {
         "type": "url",
-        "path": "https://claude.ai/new"
-      },
-      {
-        "type": "vscode",
-        "path": ""
-      },
-      {
-        "type": "app",
-        "path": "Amazon Music"
+        "path": "http://localhost:5151/"
       }
     ]
   }

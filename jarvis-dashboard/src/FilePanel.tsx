@@ -11,6 +11,7 @@ export interface JarvisFile {
 
 interface Props {
   files: JarvisFile[];
+  style?: React.CSSProperties;
 }
 
 function ext(name: string) {
@@ -95,8 +96,18 @@ function downloadWord(name: string, content: string) {
       xmlns:w='urn:schemas-microsoft-com:office:word'
       xmlns='http://www.w3.org/TR/REC-html40'>
 <head><meta charset='utf-8'>
-<style>body{font-family:Calibri,sans-serif;font-size:11pt;color:#1a1a1a;margin:2cm}</style>
-</head><body>${bodyHtml}</body></html>`;
+<!--[if gte mso 9]><xml>
+ <w:WordDocument>
+  <w:View>Print</w:View>
+  <w:DoNotOptimizeForBrowser/>
+ </w:WordDocument>
+</xml><![endif]-->
+<style>
+body{font-family:'Times New Roman',serif;font-size:12pt;color:#1a1a1a;margin:0.12in}
+div.content{width:100%}
+p{margin:4pt 0}
+</style>
+</head><body><div class='content'>${bodyHtml}</div></body></html>`;
   const blob = new Blob([html], { type: 'application/msword' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
@@ -145,11 +156,11 @@ function FileViewer({ file, onClose }: { file: JarvisFile; onClose: () => void }
   );
 }
 
-export default function FilePanel({ files }: Props) {
+export default function FilePanel({ files, style }: Props) {
   const [selected, setSelected] = useState<JarvisFile | null>(null);
 
   return (
-    <aside className={styles.panel}>
+    <aside className={styles.panel} style={style}>
       <div className={styles.header}>
         <span className={styles.label}>OUTPUT FILES</span>
         <span className={styles.count}>{files.length}</span>

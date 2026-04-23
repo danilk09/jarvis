@@ -101,9 +101,22 @@
 /* ── Body ─────────────────────────────────────────────────────────────── */
 .body {
   display: grid;
-  grid-template-columns: 1fr 360px;
+  grid-template-columns: 1fr 5px 360px;
   flex: 1;
   overflow: hidden;
+}
+
+/* ── Resize handle ────────────────────────────────────────────────────── */
+.resizeHandle {
+  cursor: col-resize;
+  background: var(--border);
+  transition: background 0.2s;
+  position: relative;
+  z-index: 5;
+}
+
+.resizeHandle:hover {
+  background: var(--green-dim);
 }
 
 /* ── Orb panel ────────────────────────────────────────────────────────── */

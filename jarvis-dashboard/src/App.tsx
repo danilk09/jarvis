@@ -71,10 +71,26 @@ export default function App() {
   const [serverOk,   setServerOk]   = useState(false);
   const [fileCount,  setFileCount]  = useState(0);
   const [speechBeat, setSpeechBeat] = useState(0);
+  const [panelWidth, setPanelWidth] = useState(360);
   const demoRef    = useRef<ReturnType<typeof setTimeout> | null>(null);
   const demoIdx    = useRef(0);
+  const dragging   = useRef(false);
   const clock      = useClock();
   const hex        = useHexTicker();
+
+  useEffect(() => {
+    const onMove = (e: MouseEvent) => {
+      if (!dragging.current) return;
+      const shell = document.querySelector('.shell') as HTMLElement;
+      if (!shell) return;
+      const newWidth = shell.getBoundingClientRect().right - e.clientX;
+      setPanelWidth(Math.max(220, Math.min(1200, newWidth)));
+    };
+    const onUp = () => { dragging.current = false; document.body.style.cursor = ''; };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    return () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); };
+  }, []);
 
   const runDemo = useCallback(() => {
     const step = DEMO_CYCLE[demoIdx.current % DEMO_CYCLE.length];
@@ -129,7 +145,7 @@ export default function App() {
       <header className="header">
         <div className="logo">
           <span className="logoMain">JARVIS</span>
-          <span className="logoSub">ADVANCED AI INTERFACE · v2.1</span>
+          <span className="logoSub">ADVANCED AI INTERFACE</span>
         </div>
         <div className="statusBar">
           <StatusDot active={serverOk} label="SERVER" />
@@ -145,7 +161,7 @@ export default function App() {
         </div>
       </header>
 
-      <div className="body">
+      <div className="body" style={{ gridTemplateColumns: `1fr 5px ${panelWidth}px` }}>
         <main className="orbPanel">
           <div className="cornerTL" />
           <div className="cornerBR" />
@@ -164,14 +180,12 @@ export default function App() {
             <div className="transcriptLabel">LAST COMMAND</div>
             <div className="transcriptText">{transcript}</div>
           </div>
-
-          <div className="dataStrip">
-            {['NEURAL.OK', 'VAD.ACTIVE', 'ASR.READY', 'TTS.ARMED'].map(v => (
-              <span key={v} className="dataChip">{v}</span>
-            ))}
-          </div>
         </main>
 
+        <div
+          className="resizeHandle"
+          onMouseDown={() => { dragging.current = true; document.body.style.cursor = 'col-resize'; }}
+        />
         <FilePanel files={files} />
       </div>
     </div>

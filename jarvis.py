@@ -29,10 +29,8 @@ from flask_cors import CORS as _CORS
 
 try:
     from PIL import ImageGrab
-    import pyautogui
-    import pygetwindow as gw
 except ImportError:
-    print("Missing dependencies. Run: pip install pyautogui pygetwindow Pillow")
+    print("Missing dependencies. Run: pip install Pillow")
     sys.exit(1)
 
 try:
@@ -137,6 +135,7 @@ OS              = platform.system()
 # Folders for image I/O — created at startup if missing
 JARVIS_INPUT_DIR  = os.path.join(os.path.dirname(__file__), "jarvis_input")
 JARVIS_OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "jarvis_output")
+CODING_DIR        = os.path.join(os.path.expanduser("~"), "Desktop", "jarvis_coding")
 
 # ── Embedded dashboard server ─────────────────────────────────────────────────
 _DASH_BUILD = os.path.join(os.path.dirname(__file__), "jarvis-dashboard", "build")
@@ -156,37 +155,6 @@ def _route_status():
     with _dash_lock:
         return _jsonify(dict(_dash_state))
 
-@_flask.route("/state", methods=["POST"])
-def _route_set_state():
-    data = _freq.get_json(force=True)
-    with _dash_lock:
-        if "state"      in data: _dash_state["state"]      = data["state"]
-        if "transcript" in data: _dash_state["transcript"]  = data["transcript"]
-    return _jsonify({"ok": True})
-
-@_flask.route("/file", methods=["POST"])
-def _route_add_file():
-    data    = _freq.get_json(force=True)
-    name    = data.get("name", "untitled.txt")
-    content = data.get("content", "")
-    entry   = {"name": name, "content": content,
-                "time": time.strftime("%H:%M:%S"), "size": f"{len(content):,} chars"}
-    with _dash_lock:
-        _dash_state["files"].append(entry)
-    return _jsonify({"ok": True})
-
-@_flask.route("/files", methods=["DELETE"])
-def _route_clear_files():
-    with _dash_lock:
-        _dash_state["files"].clear()
-    return _jsonify({"ok": True})
-
-@_flask.route("/beat", methods=["POST"])
-def _route_beat():
-    with _dash_lock:
-        _dash_state["speech_beat"] += 1
-    return _jsonify({"ok": True})
-
 @_flask.route("/", defaults={"path": ""})
 @_flask.route("/<path:path>")
 def _route_dashboard(path):
@@ -199,10 +167,6 @@ def _start_embedded_server():
     import logging
     logging.getLogger("werkzeug").setLevel(logging.ERROR)
     _flask.run(host="127.0.0.1", port=5151, debug=False, threaded=True, use_reloader=False)
-
-# ── Amazon Music config ───────────────────────────────────────────────────────
-# Paste your default playlist share link from Amazon Music here
-DEFAULT_PLAYLIST_URL = "https://music.amazon.com/user-playlists/00b053022c9a4144b33058c5754792besune?ref=dm_sh_a1cc-2301-37bc-2421-8f6c3"
 
 # ── File Index ────────────────────────────────────────────────────────────────
 FILE_INDEX = []
@@ -575,64 +539,6 @@ def analyze_input_image(prompt):
 
     return result
 
-# ── Amazon Music ──────────────────────────────────────────────────────────────
-def play_amazon_music(query="", shuffle=True):
-    """
-    Try to control the Amazon Music Windows app via UI automation.
-    Falls back to opening the browser with a search or default playlist URL.
-    
-    Strategy:
-    1. If no query: open default playlist URL in browser (shuffle handled by Amazon's shuffle button)
-    2. If query: try to find/focus the Amazon Music app window and use Ctrl+F to search,
-       then fall back to a browser search URL.
-    """
-    # No specific query → open default playlist
-    if not query:
-        speak("Opening your default playlist.")
-        webbrowser.open(DEFAULT_PLAYLIST_URL)
-        return "Opened default playlist in browser."
-
-    # Try to find an open Amazon Music window and search within it
-    app_focused = False
-    try:
-        wins = gw.getWindowsWithTitle("Amazon Music")
-        if wins:
-            win = wins[0]
-            win.activate()
-            time.sleep(0.5)
-            # Ctrl+F opens search in the Amazon Music desktop app
-            pyautogui.hotkey("ctrl", "f")
-            time.sleep(0.4)
-            pyautogui.hotkey("ctrl", "a")  # clear existing search text
-            pyautogui.typewrite(query, interval=0.05)
-            pyautogui.press("enter")
-            app_focused = True
-            print(f"  Searched Amazon Music app for: {query}")
-        else:
-            # App not open — launch via Get-StartApps (same as open_app action)
-            open_app("Amazon Music")
-            speak("Opening Amazon Music, one moment.")
-            time.sleep(5)
-            wins = gw.getWindowsWithTitle("Amazon Music")
-            if wins:
-                wins[0].activate()
-                time.sleep(0.5)
-                pyautogui.hotkey("ctrl", "f")
-                time.sleep(0.4)
-                pyautogui.hotkey("ctrl", "a")
-                pyautogui.typewrite(query, interval=0.05)
-                pyautogui.press("enter")
-                app_focused = True
-    except Exception as e:
-        print(f"  Amazon Music UI automation failed: {e}")
-
-    if app_focused:
-        return f"Searched Amazon Music for '{query}'"
-
-    # Fallback: browser search on Amazon Music web player
-    search_url = f"https://music.amazon.com/search/{query.replace(' ', '%20')}"
-    webbrowser.open(search_url)
-    return f"Opened Amazon Music browser search for '{query}'"
 
 # ── Web Search ────────────────────────────────────────────────────────────────
 def brave_search(query, count=5):
@@ -673,28 +579,76 @@ def synthesize_search_answer(query, results):
         return f"Search succeeded but summary failed: {e}"
 
 # ── Execute Action ─────────────────────────────────────────────────────────────
-def _generate_file_content(prompt_text, filename):
-    """Ask Claude Haiku to write the raw file content."""
+def _generate_file_content(prompt_text, filename, context=""):
+    """Ask Claude to write the raw file content, optionally grounded in real-time search context."""
     ext = os.path.splitext(filename)[1].lower()
     lang_hint = {
         '.py': 'Python', '.js': 'JavaScript', '.ts': 'TypeScript',
         '.html': 'HTML', '.css': 'CSS', '.md': 'Markdown',
         '.json': 'JSON', '.sh': 'Shell script', '.txt': 'plain text',
     }.get(ext, 'plain text')
+    user_content = prompt_text
+    if context:
+        user_content = f"Real-time web data:\n{context}\n\nTask: {prompt_text}"
     try:
         resp = client.messages.create(
             model="claude-haiku-4-5-20251001",
-            max_tokens=2000,
+            max_tokens=3000,
             system=(
                 f"You are a file generator. Output ONLY the raw file content with no "
                 f"explanation, preamble, or markdown code fences. "
-                f"The file is named '{filename}' and should be {lang_hint}."
+                f"The file is named '{filename}' and should be {lang_hint}. "
+                f"Provide thorough, in-depth content using any real-time data supplied."
             ),
-            messages=[{"role": "user", "content": prompt_text}],
+            messages=[{"role": "user", "content": user_content}],
         )
         return resp.content[0].text.strip()
     except Exception as e:
         return f"# File generation failed: {e}"
+
+def _summarize_file_for_speech(content, filename):
+    """Generate a short 1-2 sentence spoken summary of a generated file."""
+    try:
+        resp = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=120,
+            system="You are a voice assistant. In 1-2 spoken sentences, briefly summarize what was written. Be concise and conversational. No markdown or bullet points.",
+            messages=[{"role": "user", "content": f"Summarize what is in '{filename}':\n\n{content[:2500]}"}],
+        )
+        return resp.content[0].text.strip()
+    except Exception:
+        return f"{filename} is ready."
+
+def _generate_coding_skeleton(prompt_text, context=""):
+    """Ask Claude Haiku to generate a project skeleton as JSON."""
+    user_content = prompt_text
+    if context:
+        user_content = f"Real-time web data:\n{context}\n\nTask: {prompt_text}"
+    try:
+        resp = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=4000,
+            system=(
+                'You are a project scaffolding assistant. Output ONLY a raw JSON object with this exact structure:\n'
+                '{"project_name":"<short_snake_case_name>","files":[{"path":"<relative_path>","content":"<file_content>"}],"summary":"<1 spoken sentence>"}\n'
+                'Always include:\n'
+                '- A main entry point file with skeleton code and TODO comments marking what needs implementing\n'
+                '- A requirements.txt (Python) or package.json (JS/TS) listing all needed dependencies\n'
+                '- An install.bat that installs all dependencies in one command (e.g. pip install -r requirements.txt)\n'
+                '- A CLAUDE.md describing the project goal, file structure, and what still needs to be implemented\n'
+                'Keep file content minimal — stubs with clear TODO comments, not full implementations.\n'
+                'No markdown fences. Output raw JSON only.'
+            ),
+            messages=[{"role": "user", "content": user_content}],
+        )
+        raw = resp.content[0].text.strip()
+        if raw.startswith("```"):
+            raw = re.sub(r"^```[^\n]*\n", "", raw)
+            raw = re.sub(r"\n```$", "", raw.strip())
+        return json.loads(raw)
+    except Exception as e:
+        print(f"  Skeleton generation error: {e}")
+        return None
 
 def _push_file_to_dashboard(name, content):
     entry = {"name": name, "content": content,
@@ -866,12 +820,6 @@ def execute_action(action, workspaces, activated_event=None):
             speak(result)
             return result
 
-    elif kind == "music":
-        query   = action.get("query", "")
-        shuffle = action.get("shuffle", True)
-        result  = play_amazon_music(query, shuffle)
-        return result
-
     elif kind == "web_search":
         if not BRAVE_API_KEY:
             msg = "Web search isn't set up. Add BRAVE_API_KEY to your .env file."
@@ -889,17 +837,66 @@ def execute_action(action, workspaces, activated_event=None):
         return f"Web search: {search_query}"
 
     elif kind == "generate_file":
-        filename    = action.get("filename", "jarvis_output.txt")
-        prompt_text = action.get("prompt", "")
+        filename     = action.get("filename", "jarvis_output.txt")
+        prompt_text  = action.get("prompt", "")
+        search_query = action.get("search_query", "")
         speak(f"Generating {filename}.")
-        content = _generate_file_content(prompt_text, filename)
+        context = ""
+        if search_query and BRAVE_API_KEY:
+            speak("Looking up current data first.")
+            results = brave_search(search_query, count=6)
+            if results:
+                context = "\n".join(
+                    f"{r['title']}: {r['description']} ({r['url']})" for r in results
+                )
+        elif search_query and not BRAVE_API_KEY:
+            speak("Note: no Brave API key, so current data unavailable.")
+        content = _generate_file_content(prompt_text, filename, context)
         os.makedirs(JARVIS_OUTPUT_DIR, exist_ok=True)
         out_path = os.path.join(JARVIS_OUTPUT_DIR, filename)
         with open(out_path, "w", encoding="utf-8") as f:
             f.write(content)
         _push_file_to_dashboard(filename, content)
-        speak(f"{filename} is ready. It's been saved to the output folder and sent to the dashboard.")
+        summary = _summarize_file_for_speech(content, filename)
+        speak(summary)
         return f"Generated {filename}"
+
+    elif kind == "coding_mode":
+        prompt_text = action.get("prompt", "")
+        speak("Starting coding mode. Generating project skeleton.")
+        context = ""
+        if BRAVE_API_KEY:
+            results = brave_search(prompt_text[:200], count=4)
+            if results:
+                context = "\n".join(
+                    f"{r['title']}: {r['description']}" for r in results
+                )
+        skeleton = _generate_coding_skeleton(prompt_text, context)
+        if not skeleton:
+            speak("Skeleton generation failed. Try again.")
+            return "Coding mode: generation failed"
+        project_name = re.sub(r'[^\w-]', '_', skeleton.get("project_name", "project")).strip('_') or "project"
+        project_dir  = os.path.join(CODING_DIR, project_name)
+        os.makedirs(project_dir, exist_ok=True)
+        for f in skeleton.get("files", []):
+            rel = f.get("path", "").lstrip("/\\")
+            if not rel:
+                continue
+            full_path = os.path.join(project_dir, rel)
+            parent = os.path.dirname(full_path)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            with open(full_path, "w", encoding="utf-8") as fh:
+                fh.write(f.get("content", ""))
+            _push_file_to_dashboard(rel, f.get("content", ""))
+        subprocess.Popen(["code", project_dir], shell=True)
+        subprocess.Popen(
+            f'start "Claude Code – {project_name}" cmd /k "cd /d "{project_dir}" && claude"',
+            shell=True
+        )
+        summary = skeleton.get("summary", f"Project {project_name} is ready.")
+        speak(summary)
+        return f"Coding mode: {project_name} at {project_dir}"
 
     elif kind == "none":
         return "No action"
@@ -931,9 +928,9 @@ ACTION TYPES (pick one):
 {{"mode":"action","actions":[{{"type":"history","keyword":"<word>","days_ago":null}}]}}
 {{"mode":"action","actions":[{{"type":"screenshot","prompt":"<what to analyze or do with the screenshot>"}}]}}
 {{"mode":"action","actions":[{{"type":"analyze_image","prompt":"<what to do with the image in the input folder>"}}]}}
-{{"mode":"action","actions":[{{"type":"music","query":"<song or artist name, empty for default playlist>","shuffle":true}}]}}
 {{"mode":"action","actions":[{{"type":"web_search","query":"<search query>"}}]}}
-{{"mode":"action","actions":[{{"type":"generate_file","filename":"<name.ext>","prompt":"<full description of what to write in the file>"}}]}}
+{{"mode":"action","actions":[{{"type":"generate_file","filename":"<name.ext>","prompt":"<full description of what to write in the file>","search_query":"<targeted web search query, or empty string if no current data needed>"}}]}}
+{{"mode":"action","actions":[{{"type":"coding_mode","prompt":"<full description of the project/feature to scaffold>"}}]}}
 {{"mode":"chat","reply":"<your answer>"}}
 {{"mode":"none"}}
 
@@ -945,9 +942,9 @@ RULES:
 - Words like "open","find","search","launch","show" → ALWAYS mode "action"
 - "screenshot","take a screenshot","capture screen" → type "screenshot"; put intent in "prompt"
 - "analyze image","look at this","what's in the image", "enhance image" → type "analyze_image"; put intent in "prompt"
-- "play [song/artist]","open Amazon Music","play music" → type "music"; leave query empty for default playlist
-- Anything needing current/real-time info: news, weather, restaurants, sports scores, prices, recent events → type "web_search"
-- "write a [file]", "create a [file]", "generate [file]", "make a [file]" → type "generate_file"; filename must include an extension (.py, .txt, .md, .html, etc.); put the full description of what to write in "prompt"
+- Anything needing current/real-time info WITHOUT file generation: news, weather, sports scores, prices, recent events → type "web_search"
+- "write a [file]", "create a [file]", "generate [file]", "make a [file]" → type "generate_file"; filename must include an extension (.py, .txt, .md, .html, etc.); put the full description of what to write in "prompt"; if the file content requires current/real-time data (e.g. today's news, current prices, recent stats, live standings), set "search_query" to a targeted search query — otherwise leave it as an empty string ""
+- "code [thing]", "coding mode [thing]", "build a project for [thing]", "start a project", "scaffold [thing]" → type "coding_mode"; put the full description in "prompt"
 - Any question or request for information that doesn't need real-time data → mode "chat" with a concise spoken reply
 - Unclear/filler → mode "none"
 - Keep chat replies SHORT: 1-2 sentences max. No markdown, no lists. Plain spoken sentences only. Answer only what was asked — no extra context unless the user asks to go in depth.
@@ -1193,7 +1190,7 @@ def listen_for_command(max_duration=10, silence_duration=2.0):
             tmp_path,
             language="en",
             vad_filter=True,
-            initial_prompt="Open Discord, search YouTube for, open workspace, never mind, stop, yes, no, cancel, open file, find files, take a screenshot, analyze image, play music on Amazon, what's on screen",
+            initial_prompt="Open Discord, search YouTube for, open workspace, never mind, stop, yes, no, cancel, open file, find files, take a screenshot, analyze image, what's on screen",
             vad_parameters=dict(
                 min_silence_duration_ms=500,
                 speech_pad_ms=200,
@@ -1218,7 +1215,8 @@ def handle_response(response, workspaces, activated_event=None):
     # Normalise bare action dicts (model sometimes skips the wrapper)
     if response.get("mode") in ("find_files", "file", "bookmark", "history", "url",
                                  "app", "search", "workspace", "vscode",
-                                 "screenshot", "analyze_image", "music", "web_search"):
+                                 "screenshot", "analyze_image", "web_search",
+                                 "coding_mode"):
         response = {"mode": "action", "actions": [response]}
 
     mode = response.get("mode", "none")
@@ -1232,10 +1230,6 @@ def handle_response(response, workspaces, activated_event=None):
         for action in actions:
             result = execute_action(action, workspaces, activated_event)
             print(f"  Done: {result}")
-        # screenshot/analyze_image/music speak their own results, so skip generic "Done."
-        silent_types = {"screenshot", "analyze_image", "history", "web_search"}
-        if not all(a.get("type") in silent_types for a in actions):
-            speak("Done.")
 
     elif mode == "chat":
         # General AI answer — speak it and store in history (already done in ask_claude)
@@ -1284,7 +1278,7 @@ def main():
     print("\n  Say 'Jarvis' to activate...\n")
     print("  Tip: Say 'take a screenshot' to capture and analyze the screen.")
     print("  Tip: Drop an image in jarvis_input/ then say 'analyze image'.")
-    print("  Tip: Say 'play [song/artist]' or 'play music' for Amazon Music.\n")
+    print("  Tip: Say 'generate [filename]' to create a file with current data support.\n")
 
     activated_event = threading.Event()
 

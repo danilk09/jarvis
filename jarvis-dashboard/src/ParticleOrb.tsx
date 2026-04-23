@@ -40,6 +40,7 @@ interface P {
   n0: number; n1: number;           // noise offsets
   size: number; alpha: number;
   layer: 0 | 1;                     // 0 = shell, 1 = wisps
+  radialPhase: number;              // per-particle phase for radial pulsing
 }
 
 const TARGET: Record<OrbState, number> = {
@@ -86,9 +87,10 @@ export default function ParticleOrb({ state, beat = 0 }: Props) {
         speed:  0.00025 + Math.random() * 0.0005,
         n0:     Math.random() * 100,
         n1:     Math.random() * 100,
-        size:   layer === 0 ? .6 + Math.random() * 1.5 : .4 + Math.random() * .9,
-        alpha:  .3 + Math.random() * .7,
+        size:        layer === 0 ? .6 + Math.random() * 1.5 : .4 + Math.random() * .9,
+        alpha:       .3 + Math.random() * .7,
         layer,
+        radialPhase: Math.random() * Math.PI * 2,
       });
     }
 
@@ -122,7 +124,7 @@ export default function ParticleOrb({ state, beat = 0 }: Props) {
 
       /* particles */
       for (const p of pts) {
-        p.phi += p.speed * (1 + e * 2.5);
+        p.phi += p.speed * (1 + e * 0.8);
 
         const nx = noise(
           Math.sin(p.theta) * Math.cos(p.phi) * 1.2 + p.n0,
@@ -133,10 +135,11 @@ export default function ParticleOrb({ state, beat = 0 }: Props) {
           Math.sin(p.phi)   * .8 + p.n0,
           t * (.08 + e * .20) + 5.3);
 
-        const wAmp = 16 + e * 42;
-        const wT   = p.theta + nx * .55 * (1 + e * 1.1);
-        const wP   = p.phi   + ny * .55 * (1 + e * 1.1);
-        const wR   = p.baseR + nx * wAmp + p.dr;
+        const wAmp       = 16 + e * 42;
+        const wT         = p.theta + nx * .55 * (1 + e * 1.1);
+        const wP         = p.phi   + ny * .55 * (1 + e * 1.1);
+        const beatOffset = beatRef.current * 72 * Math.cos(p.radialPhase);
+        const wR         = p.baseR + nx * wAmp + p.dr + beatOffset;
 
         /* sphere → 3D */
         const sinT = Math.sin(wT), cosT = Math.cos(wT);
