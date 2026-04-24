@@ -49,8 +49,6 @@ BRAVE_API_KEY = os.environ.get("BRAVE_API_KEY", "")
 print("  Loading Whisper model (first run may take a moment)...")
 WHISPER_MODEL = WhisperModel("base", device="cpu", compute_type="int8")
 
-SPEAKER_AUTH = SpeakerAuth() 
-
 # ── Voice Engine ──────────────────────────────────────────────────────────────
 # SPEECH_RATE: -10 (slow) to 10 (fast)
 # VOICE_NAME: "Microsoft Guy" "Microsoft Davis" "Microsoft David" "Microsoft Zira"
@@ -1157,12 +1155,9 @@ def listen_for_command(max_duration=10, silence_duration=2.0):
         _audio_buffer.clear()
     _capture_active.set()
 
-    silent_chunks    = 0
+    silent_chunks = 0
     speaking_started = False
-    chunk_count      = 0
-    # Require at least 0.4s of actual speech before treating it as a command
-    MIN_SPEAKING_CHUNKS = int((SAMPLE_RATE / CHUNK) * 0.4)
-    speaking_chunks  = 0
+    chunk_count = 0
 
     while True:
         time.sleep(0.01)
@@ -1176,16 +1171,11 @@ def listen_for_command(max_duration=10, silence_duration=2.0):
 
         if volume > silence_threshold * 2.5:
             speaking_started = True
-            speaking_chunks += 1
-            silent_chunks    = 0
+            silent_chunks = 0
         elif speaking_started:
             silent_chunks += 1
 
-        if chunk_count >= max_chunks or (
-            speaking_started
-            and speaking_chunks >= MIN_SPEAKING_CHUNKS
-            and silent_chunks >= silence_chunks_needed
-        ):
+        if chunk_count >= max_chunks or (speaking_started and silent_chunks >= silence_chunks_needed):
             break
 
     _capture_active.clear()
@@ -1193,27 +1183,11 @@ def listen_for_command(max_duration=10, silence_duration=2.0):
     with _audio_lock:
         frames = list(_audio_buffer)
 
-    if not frames or not speaking_started or speaking_chunks < MIN_SPEAKING_CHUNKS:
+    if not frames or not speaking_started:
         print("  No speech detected.")
         return ""
 
     recording = np.concatenate(frames, axis=0)
-
-    # ── Speaker verification ─────────────────────────────────────────────────
-    # Resample to 16 kHz for the speaker model (recording is at SAMPLE_RATE)
-    try:
-        import soxr
-        audio_16k = soxr.resample(recording.flatten(), SAMPLE_RATE, 16000)
-    except ImportError:
-        # Fallback: simple decimation (good enough for verification)
-        step = SAMPLE_RATE // 16000
-        audio_16k = recording.flatten()[::step]
-
-    is_known, who = SPEAKER_AUTH.verify(audio_16k, sample_rate=16000)
-    if not is_known:
-        print("  [SpeakerAuth] Voice not recognised — ignoring audio.")
-        return ""
-
     tmp_path = os.path.join(tempfile.gettempdir(), "_jarvis_tmp.wav")
     sf.write(tmp_path, recording, SAMPLE_RATE)
 
@@ -1380,19 +1354,4 @@ def main():
 
 
 if __name__ == "__main__":
-    if "--enroll" in sys.argv:
-        # Standalone enrollment mode — no wake word loop needed
-        sa = SpeakerAuth()
-        sa.wait_until_ready(timeout=60)
-        sa.enroll_interactive()
-    elif "--remove-user" in sys.argv:
-        idx = sys.argv.index("--remove-user")
-        name = sys.argv[idx + 1] if idx + 1 < len(sys.argv) else ""
-        if name:
-            sa = SpeakerAuth()
-            removed = sa.remove_user(name)
-            print(f"  {'Removed' if removed else 'User not found'}: {name}")
-        else:
-            print("  Usage: python jarvis.py --remove-user <name>")
-    else:
-        main()
+    main()
