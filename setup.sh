@@ -7,7 +7,7 @@ echo "Installing JARVIS dependencies..."
 
 pip install anthropic python-dotenv pyautogui pygetwindow Pillow \
     sounddevice numpy faster-whisper soundfile vosk requests \
-    flask flask-cors
+    flask flask-cors webrtcvad resemblyzer
 
 echo ""
 echo "Downloading Vosk speech model..."

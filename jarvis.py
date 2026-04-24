@@ -42,6 +42,20 @@ except ImportError:
     print("Missing dependencies. Run: pip install sounddevice numpy faster-whisper soundfile")
     sys.exit(1)
 
+try:
+    import webrtcvad as _webrtcvad
+    _WEBRTCVAD_OK = True
+except ImportError:
+    _WEBRTCVAD_OK = False
+    print("  webrtcvad not installed — falling back to amplitude VAD. Run setup.sh to fix.")
+
+try:
+    from resemblyzer import VoiceEncoder as _VoiceEncoder, preprocess_wav as _preprocess_wav
+    _RESEMBLYZER_OK = True
+except ImportError:
+    _RESEMBLYZER_OK = False
+    print("  resemblyzer not installed — speaker verification disabled. Run setup.sh to fix.")
+
 load_dotenv()
 client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
 BRAVE_API_KEY = os.environ.get("BRAVE_API_KEY", "")
@@ -130,8 +144,11 @@ def speak(text, update_state=True):
 
 # ── Config ────────────────────────────────────────────────────────────────────
 WORKSPACES_FILE = os.path.join(os.path.dirname(__file__), "workspaces.json")
-SAMPLE_RATE     = 44100
-CHUNK           = 1024
+SAMPLE_RATE     = 16000   # 16 kHz — matches Whisper and WebRTC VAD requirements
+CHUNK           = 320     # 20 ms at 16 kHz — exact frame size required by webrtcvad
+
+VOICE_PROFILE_PATH       = os.path.join(os.path.dirname(__file__), "jarvis_voice_profile.npy")
+VOICE_SIMILARITY_THRESHOLD = 0.75  # cosine similarity; lower = more permissive
 OS              = platform.system()
 
 # Folders for image I/O — created at startup if missing
@@ -1121,15 +1138,99 @@ _audio_buffer = []
 _audio_lock = threading.Lock()
 _capture_active = threading.Event()
 _capture_done = threading.Event()
-_ambient_level = [0.04]
 
 def _persistent_audio_callback(indata, frames, time_info, status):
-    volume = float(np.abs(indata).max())
     if not _capture_active.is_set():
-        _ambient_level[0] = _ambient_level[0] * 0.95 + volume * 0.05
         return
     with _audio_lock:
         _audio_buffer.append(indata.copy())
+
+# ── Speaker verification ──────────────────────────────────────────────────────
+_voice_encoder  = None
+_voice_profile  = None
+
+def _get_voice_encoder():
+    global _voice_encoder
+    if _voice_encoder is None and _RESEMBLYZER_OK:
+        print("  Loading speaker encoder...")
+        _voice_encoder = _VoiceEncoder()
+    return _voice_encoder
+
+def _load_voice_profile():
+    global _voice_profile
+    if os.path.exists(VOICE_PROFILE_PATH):
+        try:
+            _voice_profile = np.load(VOICE_PROFILE_PATH)
+            print("  Voice profile loaded.")
+        except Exception as e:
+            print(f"  Could not load voice profile: {e}")
+            _voice_profile = None
+    return _voice_profile
+
+def _verify_speaker(audio_np):
+    """Return (is_user, similarity). Fails open (True) on any error or short clip."""
+    if not _RESEMBLYZER_OK or _voice_profile is None:
+        return True, 1.0
+    if len(audio_np.flatten()) / SAMPLE_RATE < 1.0:
+        return True, 1.0  # too short to verify reliably
+    try:
+        enc = _get_voice_encoder()
+        wav = _preprocess_wav(audio_np.flatten(), source_sr=SAMPLE_RATE)
+        embedding = enc.embed_utterance(wav)
+        sim = float(np.dot(_voice_profile, embedding) /
+                    (np.linalg.norm(_voice_profile) * np.linalg.norm(embedding)))
+        print(f"  Speaker similarity: {sim:.2f}")
+        return sim >= VOICE_SIMILARITY_THRESHOLD, sim
+    except Exception as e:
+        print(f"  Speaker verification error: {e}")
+        return True, 1.0
+
+def enroll_voice():
+    """Record ~10 s of the user's voice and save an embedding as the speaker profile."""
+    if not _RESEMBLYZER_OK:
+        print("  resemblyzer not installed — skipping enrollment.")
+        return False
+
+    print("\n  === Voice Enrollment ===")
+    speak("I will learn your voice now. Please speak naturally for about ten seconds after I finish talking — tell me about your day, read something aloud, anything works.", update_state=False)
+    _tts_queue.join()
+    time.sleep(0.4)
+    print("  Recording for 10 seconds — speak now...")
+
+    with _audio_lock:
+        _audio_buffer.clear()
+    _capture_active.set()
+    time.sleep(10.0)
+    _capture_active.clear()
+
+    with _audio_lock:
+        frames = list(_audio_buffer)
+
+    if not frames:
+        speak("No audio was recorded. Enrollment failed.", update_state=False)
+        _tts_queue.join()
+        return False
+
+    recording = np.concatenate(frames, axis=0).flatten()
+    duration  = len(recording) / SAMPLE_RATE
+    print(f"  Recorded {duration:.1f}s.")
+
+    try:
+        enc = _get_voice_encoder()
+        wav = _preprocess_wav(recording, source_sr=SAMPLE_RATE)
+        embedding = enc.embed_utterance(wav)
+        np.save(VOICE_PROFILE_PATH, embedding)
+        global _voice_profile
+        _voice_profile = embedding
+        speak("Voice profile saved. I will now filter out other voices.", update_state=False)
+        _tts_queue.join()
+        print(f"  Saved to {VOICE_PROFILE_PATH}")
+        return True
+    except Exception as e:
+        print(f"  Enrollment error: {e}")
+        speak("Enrollment failed. Sorry.", update_state=False)
+        _tts_queue.join()
+        return False
 
 _persistent_stream = None
 
@@ -1142,52 +1243,84 @@ def start_persistent_stream():
     )
     _persistent_stream.start()
 
-def listen_for_command(max_duration=10, silence_duration=2.0):
+def listen_for_command(max_duration=8):
+    """Record a command using WebRTC VAD for end-of-speech, then verify speaker identity."""
     time.sleep(0.05)
 
-    silence_threshold = max(_ambient_level[0] * 4.0, 0.02)
-    print(f"  Speak your command... (noise floor: {silence_threshold:.3f})")
+    # 20 ms frames at 16 kHz → 50 frames/sec
+    SPEECH_ONSET = 4   # consecutive speech frames to confirm speech started (~80 ms)
+    SILENCE_END  = 40  # consecutive silence frames to stop recording (~800 ms)
+    MAX_FRAMES   = max_duration * 50
 
-    silence_chunks_needed = int((SAMPLE_RATE / CHUNK) * silence_duration)
-    max_chunks = int((SAMPLE_RATE / CHUNK) * max_duration)
+    vad = _webrtcvad.Vad(3) if _WEBRTCVAD_OK else None
 
     with _audio_lock:
         _audio_buffer.clear()
     _capture_active.set()
 
-    silent_chunks = 0
+    print("  Speak your command...")
+
+    all_chunks      = []
+    consec_speech   = 0
+    consec_silence  = 0
     speaking_started = False
-    chunk_count = 0
+    speech_start_idx = 0
+    done = False
 
-    while True:
-        time.sleep(0.01)
+    while len(all_chunks) < MAX_FRAMES and not done:
         with _audio_lock:
-            chunk_count = len(_audio_buffer)
-            if chunk_count == 0:
-                continue
-            last_chunk = _audio_buffer[-1]
+            new_chunks = list(_audio_buffer)
+            _audio_buffer.clear()
 
-        volume = float(np.abs(last_chunk).max())
+        if not new_chunks:
+            time.sleep(0.01)
+            continue
 
-        if volume > silence_threshold * 2.5:
-            speaking_started = True
-            silent_chunks = 0
-        elif speaking_started:
-            silent_chunks += 1
+        for chunk in new_chunks:
+            all_chunks.append(chunk)
 
-        if chunk_count >= max_chunks or (speaking_started and silent_chunks >= silence_chunks_needed):
-            break
+            if vad is not None:
+                pcm = np.clip(chunk.flatten() * 32767, -32768, 32767).astype(np.int16)
+                try:
+                    is_speech = vad.is_speech(pcm.tobytes(), SAMPLE_RATE)
+                except Exception:
+                    is_speech = True
+            else:
+                # Fallback: simple amplitude gate
+                is_speech = float(np.abs(chunk).max()) > 0.02
+
+            if is_speech:
+                consec_speech  += 1
+                consec_silence  = 0
+                if not speaking_started and consec_speech >= SPEECH_ONSET:
+                    speaking_started = True
+                    # Include a couple of frames before the confirmed onset
+                    speech_start_idx = max(0, len(all_chunks) - SPEECH_ONSET - 2)
+            else:
+                consec_speech = 0
+                if speaking_started:
+                    consec_silence += 1
+
+            if speaking_started and consec_silence >= SILENCE_END:
+                done = True
+                break
 
     _capture_active.clear()
 
-    with _audio_lock:
-        frames = list(_audio_buffer)
-
-    if not frames or not speaking_started:
+    if not speaking_started:
         print("  No speech detected.")
         return ""
 
-    recording = np.concatenate(frames, axis=0)
+    # Trim trailing silence from the recording
+    speech_end = len(all_chunks) - consec_silence
+    recording   = np.concatenate(all_chunks[speech_start_idx:speech_end], axis=0)
+
+    # Speaker verification — rejects other people's voices
+    is_user, sim = _verify_speaker(recording)
+    if not is_user:
+        print(f"  Voice not recognised (similarity {sim:.2f} < {VOICE_SIMILARITY_THRESHOLD}). Ignoring.")
+        return ""
+
     tmp_path = os.path.join(tempfile.gettempdir(), "_jarvis_tmp.wav")
     sf.write(tmp_path, recording, SAMPLE_RATE)
 
@@ -1273,6 +1406,15 @@ def main():
     init_claude(workspaces)
     start_persistent_stream()
 
+    # Load or enroll voice profile
+    if _RESEMBLYZER_OK:
+        _load_voice_profile()
+        if _voice_profile is None:
+            print("\n  No voice profile found — starting enrollment.")
+            enroll_voice()
+    else:
+        print("  Speaker verification disabled.")
+
     print(f"\n{'='*50}")
     print("  JARVIS is ready")
     print(f"  Dashboard: http://localhost:5151")
@@ -1322,6 +1464,10 @@ def main():
 
             print("  Thinking...")
             _push_state("thinking", transcript=command)
+            if command.strip().lower() in ("enroll", "re-enroll", "update voice", "train voice"):
+                enroll_voice()
+                _push_state("idle")
+                continue
             if should_bypass_ai(command):
                 print("  Bypassed AI (dismissal command).")
                 _push_state("idle")
