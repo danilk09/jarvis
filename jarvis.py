@@ -66,9 +66,10 @@ def _tts_worker():
     global _current_tts_proc
     _tts_ready.set()
     while True:
-        text = _tts_queue.get()
-        if text is None:
+        item = _tts_queue.get()
+        if item is None:
             break
+        text, update_state = item if isinstance(item, tuple) else (item, True)
         try:
             voice_line = f"$s.Voice = $s.GetVoices() | Where-Object {{$_.GetAttribute('Name') -like '*{VOICE_NAME}*'}} | Select-Object -First 1;" if VOICE_NAME else ""
             ps_cmd = (
@@ -77,7 +78,8 @@ def _tts_worker():
                 f"$s.Rate = {SPEECH_RATE};"
                 f"$s.Speak([System.String]::Concat('{text}')) | Out-Null"
             )
-            _start_word_beats(text)
+            if update_state:
+                _start_word_beats(text)
             with _tts_proc_lock:
                 _current_tts_proc = subprocess.Popen(
                     ["powershell", "-NoProfile", "-Command", ps_cmd],
@@ -86,11 +88,12 @@ def _tts_worker():
             _current_tts_proc.wait()
             with _tts_proc_lock:
                 _current_tts_proc = None
-            _stop_word_beats()
+            if update_state:
+                _stop_word_beats()
         except Exception as e:
             print(f"  TTS error: {e}")
             _stop_word_beats()
-        if _tts_queue.empty():
+        if update_state and _tts_queue.empty():
             _push_state("idle")
         _tts_queue.task_done()
 
@@ -117,13 +120,13 @@ def stop_tts():
         except _queue.Empty:
             break
 
-def speak(text):
+def speak(text, update_state=True):
     if _tts_suppressed.is_set():
         print(f"  [muted] JARVIS: {text}")
         return
     print(f"  JARVIS: {text}")
     safe = text.replace("'", "''").replace("`", "").replace("$", "").replace(";", ",")
-    _tts_queue.put(safe)
+    _tts_queue.put((safe, update_state))
 
 # ── Config ────────────────────────────────────────────────────────────────────
 WORKSPACES_FILE = os.path.join(os.path.dirname(__file__), "workspaces.json")
@@ -1304,7 +1307,7 @@ def main():
             _tts_suppressed.clear()
             _push_state("activated")
             print("\n  Activated!")
-            speak("Yes sir.")
+            speak("Yes sir.", update_state=False)
             _tts_queue.join()
             time.sleep(0.1)
             _push_state("activated")
@@ -1321,6 +1324,7 @@ def main():
             _push_state("thinking", transcript=command)
             if should_bypass_ai(command):
                 print("  Bypassed AI (dismissal command).")
+                _push_state("idle")
                 continue
 
             future = ask_claude_async(command, workspaces)
@@ -1336,6 +1340,10 @@ def main():
             # Re-enable wake word so user can interrupt Jarvis mid-response
             LISTENING_FOR_ACTIVATION = True
             handle_response(response, workspaces, activated_event)
+            _tts_queue.join()
+            with _dash_lock:
+                if _dash_state["state"] == "thinking":
+                    _push_state("idle")
             print("\n  Say 'Jarvis' to activate...\n")
 
         except KeyboardInterrupt:
