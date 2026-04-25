@@ -148,7 +148,7 @@ OS              = platform.system()
 # Folders for image I/O — created at startup if missing
 JARVIS_INPUT_DIR  = os.path.join(os.path.dirname(__file__), "jarvis_input")
 JARVIS_OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "jarvis_output")
-CODING_DIR        = os.path.join(os.path.expanduser("~"), "Desktop", "jarvis_coding")
+CODING_DIR        = os.path.join(os.path.expanduser("~"), "OneDrive", "Desktop", "jarvis_coding")
 
 # ── Embedded dashboard server ─────────────────────────────────────────────────
 _DASH_BUILD = os.path.join(os.path.dirname(__file__), "jarvis-dashboard", "build")
@@ -849,6 +849,35 @@ def _summarize_file_for_speech(content, filename):
     except Exception:
         return f"{filename} is ready."
 
+def _repair_json_strings(raw):
+    """Escape literal newlines/tabs inside JSON string values so json.loads won't fail."""
+    result = []
+    in_string = False
+    i = 0
+    while i < len(raw):
+        c = raw[i]
+        if c == '\\' and in_string:
+            result.append(c)
+            i += 1
+            if i < len(raw):
+                result.append(raw[i])
+            i += 1
+            continue
+        if c == '"':
+            in_string = not in_string
+            result.append(c)
+        elif in_string and c == '\n':
+            result.append('\\n')
+        elif in_string and c == '\r':
+            result.append('\\r')
+        elif in_string and c == '\t':
+            result.append('\\t')
+        else:
+            result.append(c)
+        i += 1
+    return ''.join(result)
+
+
 def _generate_coding_skeleton(prompt_text, context=""):
     """Ask Claude Haiku to generate a project skeleton as JSON."""
     user_content = prompt_text
@@ -857,15 +886,18 @@ def _generate_coding_skeleton(prompt_text, context=""):
     try:
         resp = client.messages.create(
             model="claude-haiku-4-5-20251001",
-            max_tokens=4000,
+            max_tokens=8192,
             system=(
                 'You are a project scaffolding assistant. Output ONLY a raw JSON object with this exact structure:\n'
                 '{"project_name":"<short_snake_case_name>","files":[{"path":"<relative_path>","content":"<file_content>"}],"summary":"<1 spoken sentence>"}\n'
+                'CRITICAL JSON RULES: All string values must use \\n for newlines, \\t for tabs, \\\\ for backslashes, \\" for quotes. Never use literal newlines inside string values.\n'
+                'Framework preference: If the project is a web application, website, frontend, UI, dashboard, or anything browser-based, scaffold it as a React app using Vite (npm create vite). Include src/App.jsx, src/main.jsx, index.html, package.json with react + vite devDependencies, and an install.bat running "npm install". Do NOT use plain HTML/CSS/JS for web projects.\n'
                 'Always include:\n'
                 '- A main entry point file with skeleton code and TODO comments marking what needs implementing\n'
                 '- A requirements.txt (Python) or package.json (JS/TS) listing all needed dependencies\n'
-                '- An install.bat that installs all dependencies in one command (e.g. pip install -r requirements.txt)\n'
+                '- An install.bat that installs all dependencies in one command (e.g. pip install -r requirements.txt or npm install)\n'
                 '- A CLAUDE.md describing the project goal, file structure, and what still needs to be implemented\n'
+                '- A .gitignore appropriate for the project type. Always exclude: .env, .env.*, *.env, .vscode/, .idea/, *.log, *.tmp. For Python projects also exclude: __pycache__/, *.pyc, *.pyo, venv/, .venv/, dist/, *.egg-info/. For Node/JS projects also exclude: node_modules/, dist/, .next/, .cache/, coverage/.\n'
                 'Keep file content minimal — stubs with clear TODO comments, not full implementations.\n'
                 'No markdown fences. Output raw JSON only.'
             ),
@@ -875,7 +907,10 @@ def _generate_coding_skeleton(prompt_text, context=""):
         if raw.startswith("```"):
             raw = re.sub(r"^```[^\n]*\n", "", raw)
             raw = re.sub(r"\n```$", "", raw.strip())
-        return json.loads(raw)
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            return json.loads(_repair_json_strings(raw))
     except Exception as e:
         print(f"  Skeleton generation error: {e}")
         return None
