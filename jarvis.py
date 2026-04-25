@@ -1300,6 +1300,9 @@ def ask_claude_async(command, workspaces):
 
 # ── Wake Word Detection ─────────────────────────────────────────────────────────
 WAKE_WORD = "jarvis"
+# Rolling noise-floor estimate in int16 RMS units (0–32767).  Adapts to the
+# room automatically; threshold = max(ambient * 4.0, 100).
+_ambient_rms = [200.0]
 q = _queue.Queue()
 
 model = vosk.Model(os.path.join(os.path.dirname(__file__), "models", "vosk-model-small-en-us-0.15"))
@@ -1313,6 +1316,13 @@ def listen_for_wake_word(activated_event):
         rec = vosk.KaldiRecognizer(model, 16000)
         while True:
             data = q.get()
+            arr = np.frombuffer(data, dtype=np.int16)
+            rms = float(np.sqrt(np.mean(arr.astype(np.float32) ** 2)))
+            threshold = max(_ambient_rms[0] * 4.0, 100.0)
+            if rms < threshold:
+                # quiet chunk — slowly pull the noise floor toward current level
+                _ambient_rms[0] = 0.95 * _ambient_rms[0] + 0.05 * rms
+                continue
             if rec.AcceptWaveform(data):
                 result = json.loads(rec.Result())
                 text = result.get("text", "")
