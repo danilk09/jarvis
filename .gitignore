@@ -2,3 +2,5 @@
 *.txt
 node_modules
 jarvis_output
+*.crt
+*.key

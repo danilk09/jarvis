@@ -2,7 +2,11 @@ import { useEffect, useRef, useCallback } from 'react';
 
 // 2-D canvas particle orb. Particles live on a spherical shell displaced by
 // 3-D Perlin noise. Each state has distinct colour, rotation speed and noise
-// speed. Speech beats cause the whole orb to breathe outward uniformly.
+// speed. Transitions use per-parameter damped springs so faster params (energy,
+// waveAmp) snap and overshoot while colour lags behind — making state changes
+// feel layered rather than a single sweep. A 0.15 Hz autonomous breath pulses
+// the orb continuously. Speech beats produce a polar ripple that travels from
+// the top of the sphere downward rather than inflating all particles at once.
 
 type OrbState = 'idle' | 'activated' | 'thinking' | 'speaking' | 'error';
 interface Props { state: OrbState; beat?: number }
@@ -37,18 +41,18 @@ function makeNoise3D() {
 interface P {
   theta: number; phi: number;
   baseR: number; dr: number;
-  speed: number;       // rad/s — frame-rate independent
+  speed: number;
   n0: number; n1: number;
   size: number; alpha: number;
   layer: 0 | 1;
 }
 
-/* ── Per-state visual targets (all values smoothly interpolated) ─────────── */
+/* ── Per-state visual targets ─────────────────────────────────────────────── */
 interface VisTarget {
   energy:   number;
-  rotSpeed: number;   // orbital rotation speed multiplier
-  noiseSpd: number;   // noise time evolution speed
-  waveAmp:  number;   // max noise displacement (px)
+  rotSpeed: number;
+  noiseSpd: number;
+  waveAmp:  number;
   r: number; g: number; b: number;
 }
 
@@ -60,11 +64,32 @@ const TARGETS: Record<OrbState, VisTarget> = {
   error:     { energy: 0.28, rotSpeed: 2.20, noiseSpd: 0.32, waveAmp: 14, r: 230, g:  50, b:  45 },
 };
 
+/* ── Damped spring (single scalar) ───────────────────────────────────────── */
+// ω₀ = sqrt(stiffness), ζ = damping / (2·ω₀). ζ < 1 → underdamped (overshoots).
+function springStep(
+  cur: number, vel: number, tgt: number, dt: number,
+  stiffness: number, damping: number
+): [number, number] {
+  const acc  = stiffness * (tgt - cur) - damping * vel;
+  const vel2 = vel + acc * dt;
+  return [cur + vel2 * dt, vel2];
+}
+
+/* ── Spring state: value + velocity per visual param ─────────────────────── */
+interface SpringState extends VisTarget {
+  energyV: number; rotSpeedV: number; noiseSpdV: number; waveAmpV: number;
+  rV: number; gV: number; bV: number;
+}
+
 export default function ParticleOrb({ state, beat = 0 }: Props) {
   const canvasRef   = useRef<HTMLCanvasElement>(null);
   const stateRef    = useRef(state);
   const rafRef      = useRef(0);
-  const vis         = useRef<VisTarget>({ ...TARGETS.idle });
+  const spring      = useRef<SpringState>({
+    ...TARGETS.idle,
+    energyV: 0, rotSpeedV: 0, noiseSpdV: 0, waveAmpV: 0,
+    rV: 0, gV: 0, bV: 0,
+  });
   const beatRef     = useRef(0);
   const prevBeatRef = useRef(0);
 
@@ -95,7 +120,7 @@ export default function ParticleOrb({ state, beat = 0 }: Props) {
         phi:    Math.random() * Math.PI * 2,
         baseR:  layer === 0 ? 106 + Math.random() * 18 : 114 + Math.random() * 36,
         dr:     (Math.random() - .5) * 6,
-        speed:  0.02 + Math.random() * 0.06,   // rad/s
+        speed:  0.02 + Math.random() * 0.06,
         n0:     Math.random() * 100,
         n1:     Math.random() * 100,
         size:   layer === 0 ? .6 + Math.random() * 1.4 : .4 + Math.random() * .8,
@@ -113,24 +138,31 @@ export default function ParticleOrb({ state, beat = 0 }: Props) {
       prev = now;
       t += dt;
 
-      /* smooth all vis params toward current state target */
-      const tgt  = TARGETS[stateRef.current];
-      const rate = 2.2 * dt;
-      const v    = vis.current;
-      v.energy   += (tgt.energy   - v.energy)   * rate;
-      v.rotSpeed += (tgt.rotSpeed - v.rotSpeed)  * rate;
-      v.noiseSpd += (tgt.noiseSpd - v.noiseSpd)  * rate;
-      v.waveAmp  += (tgt.waveAmp  - v.waveAmp)   * rate;
-      v.r        += (tgt.r        - v.r)         * rate;
-      v.g        += (tgt.g        - v.g)         * rate;
-      v.b        += (tgt.b        - v.b)         * rate;
+      /* ── spring transitions — each param settles at its own pace ──────── */
+      // energy / waveAmp / rotSpeed snap fast with noticeable overshoot
+      // colour lags, nearly critically damped — transitions feel layered
+      const tgt = TARGETS[stateRef.current];
+      const sp  = spring.current;
 
-      /* beat decays gently so each word produces a sustained breath */
+      [sp.energy,   sp.energyV]   = springStep(sp.energy,   sp.energyV,   tgt.energy,   dt, 22,  7.5); // ω₀≈4.7 ζ≈0.80
+      [sp.rotSpeed, sp.rotSpeedV] = springStep(sp.rotSpeed, sp.rotSpeedV, tgt.rotSpeed, dt, 18,  7.0); // ω₀≈4.2 ζ≈0.83
+      [sp.noiseSpd, sp.noiseSpdV] = springStep(sp.noiseSpd, sp.noiseSpdV, tgt.noiseSpd, dt, 14,  6.5); // ω₀≈3.7 ζ≈0.87
+      [sp.waveAmp,  sp.waveAmpV]  = springStep(sp.waveAmp,  sp.waveAmpV,  tgt.waveAmp,  dt, 20,  7.5); // ω₀≈4.5 ζ≈0.83
+      [sp.r,        sp.rV]        = springStep(sp.r,        sp.rV,        tgt.r,        dt,  9,  5.5); // ω₀=3   ζ≈0.92 — slow colour drift
+      [sp.g,        sp.gV]        = springStep(sp.g,        sp.gV,        tgt.g,        dt,  9,  5.5);
+      [sp.b,        sp.bV]        = springStep(sp.b,        sp.bV,        tgt.b,        dt,  9,  5.5);
+
+      /* beat decays; as bv falls the ripple wavefront travels down the sphere */
       beatRef.current = Math.max(0, beatRef.current - 0.75 * dt);
       const bv = beatRef.current;
 
-      const e  = v.energy;
-      const cr = v.r | 0, cg = v.g | 0, cb = v.b | 0;
+      /* ── autonomous breathing: 0.15 Hz sine, strongest at idle ──────────
+         breatheScale → 1.0 at idle (energy=0), → 0.5 at max energy        */
+      const breatheScale = 1.0 - sp.energy * 0.5;
+      const slowBreath   = Math.sin(t * Math.PI * 2 * 0.15) * 6 * breatheScale;
+
+      const e  = sp.energy;
+      const cr = sp.r | 0, cg = sp.g | 0, cb = sp.b | 0;
 
       ctx.clearRect(0, 0, SZ, SZ);
 
@@ -154,24 +186,32 @@ export default function ParticleOrb({ state, beat = 0 }: Props) {
 
       /* particles */
       for (const p of pts) {
-        /* dt-based rotation — consistent across all frame rates */
-        p.phi += p.speed * v.rotSpeed * dt;
+        p.phi += p.speed * sp.rotSpeed * dt;
 
         const nx = noise(
           Math.sin(p.theta) * Math.cos(p.phi) * 1.2 + p.n0,
           Math.sin(p.theta) * Math.sin(p.phi) * 1.2 + p.n1,
-          t * v.noiseSpd);
+          t * sp.noiseSpd);
         const ny = noise(
           Math.cos(p.theta) * .8 + p.n1,
           Math.sin(p.phi)   * .8 + p.n0,
-          t * v.noiseSpd * 0.7 + 5.3);
+          t * sp.noiseSpd * 0.7 + 5.3);
 
         const wT = p.theta + nx * .45 * (1 + e);
         const wP = p.phi   + ny * .45 * (1 + e);
 
-        /* uniform outward breath — every particle expands together */
-        const breathe = bv * 24;
-        const wR = p.baseR + nx * v.waveAmp + p.dr + breathe;
+        /* ── polar ripple beat ────────────────────────────────────────────
+           waveFront travels from theta=0 (top pole) to theta=PI (bottom)
+           as bv decays 1→0. A Gaussian centred on the front gives each
+           particle a local push as the wave passes through its latitude.  */
+        let beatBreath = 0;
+        if (bv > 0.02) {
+          const waveFront = (1 - bv) * Math.PI;
+          const dist      = p.theta - waveFront;
+          beatBreath      = bv * Math.exp(-dist * dist * 2.5) * 26;
+        }
+
+        const wR = p.baseR + nx * sp.waveAmp + p.dr + beatBreath + slowBreath;
 
         const sinT = Math.sin(wT), cosT = Math.cos(wT);
         const sinP = Math.sin(wP), cosP = Math.cos(wP);
@@ -192,9 +232,9 @@ export default function ParticleOrb({ state, beat = 0 }: Props) {
 
         /* colour: state hue × brightness with white specular at front */
         const spec = bright * bright * 90;
-        const rC = Math.min(255, (v.r * .12 + bright * v.r * .88 + spec + e * 45) | 0);
-        const gC = Math.min(255, (v.g * .10 + bright * v.g * .90 + spec)           | 0);
-        const bC = Math.min(255, (v.b * .10 + bright * v.b * .90 + spec)           | 0);
+        const rC = Math.min(255, (sp.r * .12 + bright * sp.r * .88 + spec + e * 45) | 0);
+        const gC = Math.min(255, (sp.g * .10 + bright * sp.g * .90 + spec)           | 0);
+        const bC = Math.min(255, (sp.b * .10 + bright * sp.b * .90 + spec)           | 0);
 
         /* wisps: slightly cooler and more translucent */
         const rF = p.layer === 1 ? Math.min(255, (rC * .75 + 20) | 0) : rC;

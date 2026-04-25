@@ -106,7 +106,7 @@ export default function App() {
     async function poll() {
       if (!alive) return;
       try {
-        const res  = await fetch('http://localhost:5151/status', { signal: AbortSignal.timeout(1800) });
+        const res  = await fetch('/status', { signal: AbortSignal.timeout(1800) });
         const data = await res.json();
         if (demoRef.current) { clearTimeout(demoRef.current); demoRef.current = null; }
         setServerOk(true);

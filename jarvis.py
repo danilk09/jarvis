@@ -49,12 +49,6 @@ except ImportError:
     _WEBRTCVAD_OK = False
     print("  webrtcvad not installed — falling back to amplitude VAD. Run setup.sh to fix.")
 
-try:
-    from resemblyzer import VoiceEncoder as _VoiceEncoder, preprocess_wav as _preprocess_wav
-    _RESEMBLYZER_OK = True
-except ImportError:
-    _RESEMBLYZER_OK = False
-    print("  resemblyzer not installed — speaker verification disabled. Run setup.sh to fix.")
 
 load_dotenv()
 client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
@@ -75,6 +69,8 @@ _tts_ready = threading.Event()
 _current_tts_proc = None
 _tts_proc_lock = threading.Lock()
 _tts_suppressed = threading.Event()
+_phone_command_queue = _queue.Queue()
+_whisper_lock = threading.Lock()
 
 def _tts_worker():
     global _current_tts_proc
@@ -147,8 +143,6 @@ WORKSPACES_FILE = os.path.join(os.path.dirname(__file__), "workspaces.json")
 SAMPLE_RATE     = 16000   # 16 kHz — matches Whisper and WebRTC VAD requirements
 CHUNK           = 320     # 20 ms at 16 kHz — exact frame size required by webrtcvad
 
-VOICE_PROFILE_PATH       = os.path.join(os.path.dirname(__file__), "jarvis_voice_profile.npy")
-VOICE_SIMILARITY_THRESHOLD = 0.75  # cosine similarity; lower = more permissive
 OS              = platform.system()
 
 # Folders for image I/O — created at startup if missing
@@ -169,6 +163,66 @@ _dash_state: dict = {
 _flask = _Flask(__name__, static_folder=_DASH_BUILD, static_url_path="")
 _CORS(_flask)
 
+_TAILSCALE_CERT_PATH = ""
+_TAILSCALE_KEY_PATH  = ""
+_tailscale_url       = ""
+
+def _tailscale_exe():
+    """Return the tailscale CLI path, checking common Windows install locations."""
+    candidates = [
+        "tailscale",
+        r"C:\Program Files\Tailscale\tailscale.exe",
+        r"C:\Program Files (x86)\Tailscale\tailscale.exe",
+    ]
+    for c in candidates:
+        try:
+            r = subprocess.run([c, "version"], capture_output=True, timeout=3)
+            if r.returncode == 0:
+                return c
+        except Exception:
+            continue
+    return None
+
+def _detect_tailscale():
+    """Returns (ip, fqdn) e.g. ('100.x.x.x', 'my-pc.tail1234.ts.net') or (None, None)."""
+    exe = _tailscale_exe()
+    if not exe:
+        return None, None
+    try:
+        ip = subprocess.run(
+            [exe, "ip", "-4"],
+            capture_output=True, text=True, timeout=4
+        ).stdout.strip()
+        if not ip or not ip.startswith("100."):
+            return None, None
+        data = json.loads(subprocess.run(
+            [exe, "status", "--json"],
+            capture_output=True, text=True, timeout=4
+        ).stdout)
+        fqdn = data.get("Self", {}).get("DNSName", "").rstrip(".")
+        return ip, fqdn or None
+    except Exception:
+        return None, None
+
+def _setup_tailscale_https(fqdn):
+    """Run 'tailscale cert <fqdn>' and return (cert_path, key_path) or (None, None)."""
+    exe = _tailscale_exe()
+    if not exe:
+        return None, None
+    base = os.path.dirname(os.path.abspath(__file__))
+    cert = os.path.join(base, f"{fqdn}.crt")
+    key  = os.path.join(base, f"{fqdn}.key")
+    try:
+        subprocess.run(
+            [exe, "cert", fqdn],
+            capture_output=True, text=True, timeout=15, cwd=base
+        )
+        if os.path.exists(cert) and os.path.exists(key):
+            return cert, key
+    except Exception:
+        pass
+    return None, None
+
 @_flask.route("/status")
 def _route_status():
     with _dash_lock:
@@ -182,10 +236,167 @@ def _route_dashboard(path):
         return _sfd(_DASH_BUILD, path)
     return _sfd(_DASH_BUILD, "index.html")
 
+_PHONE_PAGE = """<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <title>Jarvis Mic</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: #0a0a0f; color: #e0e0e0;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      display: flex; flex-direction: column; align-items: center;
+      justify-content: center; min-height: 100vh; padding: 24px;
+      -webkit-tap-highlight-color: transparent;
+    }
+    h1 { font-size: 1.2rem; letter-spacing: 0.3em; color: #5c9ce6; margin-bottom: 40px; font-weight: 300; }
+    #btn {
+      width: 180px; height: 180px; border-radius: 50%;
+      border: 2px solid #1e3a5f; background: #111827;
+      color: #5c9ce6; font-size: 0.8rem; letter-spacing: 0.15em; font-weight: 500;
+      cursor: pointer; transition: all 0.2s; outline: none;
+      -webkit-user-select: none; user-select: none;
+      display: flex; align-items: center; justify-content: center;
+      line-height: 1.6; text-align: center;
+    }
+    #btn:active { transform: scale(0.96); }
+    #btn.recording { background: #1a0a0a; border-color: #c0392b; color: #e74c3c; animation: pulse 1.4s ease-in-out infinite; }
+    #btn.sending   { background: #0a1a0a; border-color: #27ae60; color: #2ecc71; cursor: default; }
+    @keyframes pulse {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(231,76,60,0.3); }
+      50%       { box-shadow: 0 0 0 20px rgba(231,76,60,0); }
+    }
+    #status  { margin-top: 32px; font-size: 0.85rem; color: #666; min-height: 1.4em; text-align: center; letter-spacing: 0.05em; }
+    #command { margin-top: 14px; font-size: 0.9rem; color: #9e9e9e; min-height: 1.2em; max-width: 300px; text-align: center; font-style: italic; line-height: 1.5; }
+    .error   { color: #e74c3c !important; }
+    .success { color: #2ecc71 !important; }
+  </style>
+</head>
+<body>
+  <h1>J A R V I S</h1>
+  <button id="btn">TAP TO<br>SPEAK</button>
+  <div id="status">Ready</div>
+  <div id="command"></div>
+  <script>
+    const btn = document.getElementById('btn');
+    const statusEl = document.getElementById('status');
+    const cmdEl = document.getElementById('command');
+    let recorder = null, chunks = [], recording = false;
+
+    btn.addEventListener('click', async () => {
+      if (btn.classList.contains('sending')) return;
+      if (recording) { stopRecording(); return; }
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1 } });
+        chunks = [];
+        recorder = new MediaRecorder(stream);
+        recorder.ondataavailable = e => { if (e.data.size > 0) chunks.push(e.data); };
+        recorder.onstop = () => { stream.getTracks().forEach(t => t.stop()); sendAudio(); };
+        recorder.start();
+        recording = true;
+        btn.innerHTML = 'TAP TO<br>STOP';
+        btn.classList.add('recording');
+        statusEl.textContent = 'Recording…';
+        statusEl.className = '';
+        cmdEl.textContent = '';
+        cmdEl.className = '';
+      } catch(e) {
+        statusEl.textContent = 'Microphone access denied.';
+        statusEl.className = 'error';
+      }
+    });
+
+    function stopRecording() {
+      if (recorder && recorder.state !== 'inactive') recorder.stop();
+      recording = false;
+      btn.innerHTML = '···';
+      btn.classList.remove('recording');
+      btn.classList.add('sending');
+      statusEl.textContent = 'Sending…';
+    }
+
+    async function sendAudio() {
+      const blob = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' });
+      const form = new FormData();
+      form.append('audio', blob, 'command.webm');
+      try {
+        const res = await fetch('/phone-command', { method: 'POST', body: form });
+        const data = await res.json();
+        if (res.ok) {
+          statusEl.textContent = 'Command sent!';
+          statusEl.className = 'success';
+          cmdEl.textContent = '\\u201c' + data.command + '\\u201d';
+        } else {
+          statusEl.textContent = 'Error: ' + (data.error || 'Unknown');
+          statusEl.className = 'error';
+        }
+      } catch(e) {
+        statusEl.textContent = 'Network error — same Wi-Fi?';
+        statusEl.className = 'error';
+      }
+      btn.innerHTML = 'TAP TO<br>SPEAK';
+      btn.classList.remove('sending');
+    }
+  </script>
+</body>
+</html>"""
+
+@_flask.route("/phone")
+def _route_phone():
+    return _PHONE_PAGE, 200, {"Content-Type": "text/html; charset=utf-8"}
+
+@_flask.route("/phone-command", methods=["POST"])
+def _route_phone_command():
+    audio_file = _freq.files.get("audio")
+    if not audio_file:
+        return _jsonify({"error": "no audio"}), 400
+
+    ct = audio_file.content_type or ""
+    suffix = ".wav" if "wav" in ct else ".mp4" if ("mp4" in ct or "m4a" in ct) else ".webm"
+
+    src_fd, src_path = tempfile.mkstemp(suffix=suffix)
+    wav_path = src_path.rsplit(".", 1)[0] + "_16k.wav"
+    try:
+        with os.fdopen(src_fd, "wb") as fh:
+            audio_file.save(fh)
+
+        r = subprocess.run(
+            ["ffmpeg", "-y", "-i", src_path, "-ar", "16000", "-ac", "1", "-f", "wav", wav_path],
+            capture_output=True, timeout=15,
+        )
+        if r.returncode != 0:
+            return _jsonify({"error": "audio conversion failed"}), 500
+
+        with _whisper_lock:
+            segments, _ = WHISPER_MODEL.transcribe(
+                wav_path, language="en", vad_filter=True,
+                initial_prompt="Open Discord, search YouTube for, open workspace, never mind, stop, yes, no, cancel, open file, find files, take a screenshot, analyze image, what's on screen",
+                vad_parameters=dict(min_silence_duration_ms=500, speech_pad_ms=200),
+            )
+        command = " ".join(s.text.strip() for s in segments).strip()
+        if not command:
+            return _jsonify({"error": "no speech detected"}), 400
+
+        _phone_command_queue.put(command)
+        print(f'  Phone command queued: "{command}"')
+        return _jsonify({"command": command, "status": "processing"})
+    except Exception as e:
+        return _jsonify({"error": str(e)}), 500
+    finally:
+        for p in [src_path, wav_path]:
+            try:
+                os.remove(p)
+            except Exception:
+                pass
+
 def _start_embedded_server():
     import logging
     logging.getLogger("werkzeug").setLevel(logging.ERROR)
-    _flask.run(host="127.0.0.1", port=5151, debug=False, threaded=True, use_reloader=False)
+    ssl_ctx = (_TAILSCALE_CERT_PATH, _TAILSCALE_KEY_PATH) if _TAILSCALE_CERT_PATH else None
+    _flask.run(host="0.0.0.0", port=5151, debug=False, threaded=True,
+               use_reloader=False, ssl_context=ssl_ctx)
 
 # ── File Index ────────────────────────────────────────────────────────────────
 FILE_INDEX = []
@@ -1145,92 +1356,6 @@ def _persistent_audio_callback(indata, frames, time_info, status):
     with _audio_lock:
         _audio_buffer.append(indata.copy())
 
-# ── Speaker verification ──────────────────────────────────────────────────────
-_voice_encoder  = None
-_voice_profile  = None
-
-def _get_voice_encoder():
-    global _voice_encoder
-    if _voice_encoder is None and _RESEMBLYZER_OK:
-        print("  Loading speaker encoder...")
-        _voice_encoder = _VoiceEncoder()
-    return _voice_encoder
-
-def _load_voice_profile():
-    global _voice_profile
-    if os.path.exists(VOICE_PROFILE_PATH):
-        try:
-            _voice_profile = np.load(VOICE_PROFILE_PATH)
-            print("  Voice profile loaded.")
-        except Exception as e:
-            print(f"  Could not load voice profile: {e}")
-            _voice_profile = None
-    return _voice_profile
-
-def _verify_speaker(audio_np):
-    """Return (is_user, similarity). Fails open (True) on any error or short clip."""
-    if not _RESEMBLYZER_OK or _voice_profile is None:
-        return True, 1.0
-    if len(audio_np.flatten()) / SAMPLE_RATE < 1.0:
-        return True, 1.0  # too short to verify reliably
-    try:
-        enc = _get_voice_encoder()
-        wav = _preprocess_wav(audio_np.flatten(), source_sr=SAMPLE_RATE)
-        embedding = enc.embed_utterance(wav)
-        sim = float(np.dot(_voice_profile, embedding) /
-                    (np.linalg.norm(_voice_profile) * np.linalg.norm(embedding)))
-        print(f"  Speaker similarity: {sim:.2f}")
-        return sim >= VOICE_SIMILARITY_THRESHOLD, sim
-    except Exception as e:
-        print(f"  Speaker verification error: {e}")
-        return True, 1.0
-
-def enroll_voice():
-    """Record ~10 s of the user's voice and save an embedding as the speaker profile."""
-    if not _RESEMBLYZER_OK:
-        print("  resemblyzer not installed — skipping enrollment.")
-        return False
-
-    print("\n  === Voice Enrollment ===")
-    speak("I will learn your voice now. Please speak naturally for about ten seconds after I finish talking — tell me about your day, read something aloud, anything works.", update_state=False)
-    _tts_queue.join()
-    time.sleep(0.4)
-    print("  Recording for 10 seconds — speak now...")
-
-    with _audio_lock:
-        _audio_buffer.clear()
-    _capture_active.set()
-    time.sleep(10.0)
-    _capture_active.clear()
-
-    with _audio_lock:
-        frames = list(_audio_buffer)
-
-    if not frames:
-        speak("No audio was recorded. Enrollment failed.", update_state=False)
-        _tts_queue.join()
-        return False
-
-    recording = np.concatenate(frames, axis=0).flatten()
-    duration  = len(recording) / SAMPLE_RATE
-    print(f"  Recorded {duration:.1f}s.")
-
-    try:
-        enc = _get_voice_encoder()
-        wav = _preprocess_wav(recording, source_sr=SAMPLE_RATE)
-        embedding = enc.embed_utterance(wav)
-        np.save(VOICE_PROFILE_PATH, embedding)
-        global _voice_profile
-        _voice_profile = embedding
-        speak("Voice profile saved. I will now filter out other voices.", update_state=False)
-        _tts_queue.join()
-        print(f"  Saved to {VOICE_PROFILE_PATH}")
-        return True
-    except Exception as e:
-        print(f"  Enrollment error: {e}")
-        speak("Enrollment failed. Sorry.", update_state=False)
-        _tts_queue.join()
-        return False
 
 _persistent_stream = None
 
@@ -1266,8 +1391,11 @@ def listen_for_command(max_duration=8):
     speaking_started = False
     speech_start_idx = 0
     done = False
+    deadline = time.monotonic() + max_duration + 1.0
 
     while len(all_chunks) < MAX_FRAMES and not done:
+        if time.monotonic() > deadline:
+            break
         with _audio_lock:
             new_chunks = list(_audio_buffer)
             _audio_buffer.clear()
@@ -1315,32 +1443,27 @@ def listen_for_command(max_duration=8):
     speech_end = len(all_chunks) - consec_silence
     recording   = np.concatenate(all_chunks[speech_start_idx:speech_end], axis=0)
 
-    # Speaker verification — rejects other people's voices
-    is_user, sim = _verify_speaker(recording)
-    if not is_user:
-        print(f"  Voice not recognised (similarity {sim:.2f} < {VOICE_SIMILARITY_THRESHOLD}). Ignoring.")
-        return ""
-
     tmp_path = os.path.join(tempfile.gettempdir(), "_jarvis_tmp.wav")
     sf.write(tmp_path, recording, SAMPLE_RATE)
 
     print("  Processing speech...")
     try:
-        segments, _ = WHISPER_MODEL.transcribe(
-            tmp_path,
-            language="en",
-            vad_filter=True,
-            initial_prompt="Open Discord, search YouTube for, open workspace, never mind, stop, yes, no, cancel, open file, find files, take a screenshot, analyze image, what's on screen",
-            vad_parameters=dict(
-                min_silence_duration_ms=500,
-                speech_pad_ms=200,
-            ))
+        with _whisper_lock:
+            segments, _ = WHISPER_MODEL.transcribe(
+                tmp_path,
+                language="en",
+                vad_filter=True,
+                initial_prompt="Open Discord, search YouTube for, open workspace, never mind, stop, yes, no, cancel, open file, find files, take a screenshot, analyze image, what's on screen",
+                vad_parameters=dict(
+                    min_silence_duration_ms=500,
+                    speech_pad_ms=200,
+                ))
         text = " ".join(s.text for s in segments).strip()
         if text:
             print(f'  Heard: "{text}"')
         else:
             print("  Could not understand audio.")
-        return text
+            return ""
     except Exception as e:
         print(f"  Whisper error: {e}")
         return ""
@@ -1349,6 +1472,8 @@ def listen_for_command(max_duration=8):
             os.remove(tmp_path)
         except Exception:
             pass
+
+    return text
 
 # ── Handle AI Response ─────────────────────────────────────────────────────────
 def handle_response(response, workspaces, activated_event=None):
@@ -1393,10 +1518,26 @@ def main():
     os.makedirs(JARVIS_INPUT_DIR, exist_ok=True)
     os.makedirs(JARVIS_OUTPUT_DIR, exist_ok=True)
 
+    # Detect Tailscale and obtain HTTPS cert before starting server
+    global _TAILSCALE_CERT_PATH, _TAILSCALE_KEY_PATH, _tailscale_url
+    _ts_ip, _ts_fqdn = _detect_tailscale()
+    if _ts_fqdn:
+        print("  Tailscale detected — requesting TLS cert (this may take a moment)...")
+        _TAILSCALE_CERT_PATH, _TAILSCALE_KEY_PATH = _setup_tailscale_https(_ts_fqdn)
+        if _TAILSCALE_CERT_PATH:
+            _tailscale_url = f"https://{_ts_fqdn}:5151/phone"
+        else:
+            _tailscale_url = f"http://{_ts_ip}:5151/phone"
+    elif _ts_ip:
+        _tailscale_url = f"http://{_ts_ip}:5151/phone"
+
     # Start embedded dashboard server
     threading.Thread(target=_start_embedded_server, daemon=True).start()
     time.sleep(0.6)   # give Flask a moment to bind before opening browser
-    webbrowser.open("http://localhost:5151")
+    if _TAILSCALE_CERT_PATH and _ts_fqdn:
+        webbrowser.open(f"https://{_ts_fqdn}:5151")
+    else:
+        webbrowser.open("http://localhost:5151")
 
     # Build indexes in background so startup isn't slow
     threading.Thread(target=build_file_index,     daemon=True).start()
@@ -1406,18 +1547,17 @@ def main():
     init_claude(workspaces)
     start_persistent_stream()
 
-    # Load or enroll voice profile
-    if _RESEMBLYZER_OK:
-        _load_voice_profile()
-        if _voice_profile is None:
-            print("\n  No voice profile found — starting enrollment.")
-            enroll_voice()
-    else:
-        print("  Speaker verification disabled.")
 
     print(f"\n{'='*50}")
     print("  JARVIS is ready")
-    print(f"  Dashboard: http://localhost:5151")
+    _dash_url = f"https://{_ts_fqdn}:5151" if _TAILSCALE_CERT_PATH and _ts_fqdn else "http://localhost:5151"
+    print(f"  Dashboard:  {_dash_url}")
+    if _tailscale_url:
+        scheme = "https" if _TAILSCALE_CERT_PATH else "http"
+        tls_note = "" if _TAILSCALE_CERT_PATH else " (no HTTPS — mic may be blocked; run 'tailscale cert' manually)"
+        print(f"  Phone mic:  {_tailscale_url}{tls_note}")
+    else:
+        print(f"  Phone mic:  Tailscale not detected — install Tailscale for remote phone access")
     print(f"  Workspaces: {list(workspaces.keys()) or 'none'}")
     print(f"  AI: Claude Haiku 4.5")
     print(f"  OS: {OS}")
@@ -1434,40 +1574,46 @@ def main():
     def voice_thread():
         global LISTENING_FOR_ACTIVATION
         while True:
-            if LISTENING_FOR_ACTIVATION:
+            if LISTENING_FOR_ACTIVATION and not activated_event.is_set():
                 listen_for_wake_word(activated_event)
+            else:
+                time.sleep(0.02)
 
     threading.Thread(target=voice_thread, daemon=True).start()
 
     while True:
         try:
-            print("Waiting for wake-word...")
+            print("Waiting for wake-word or phone command...")
             LISTENING_FOR_ACTIVATION = True
-            activated_event.wait()
+            phone_command = None
+            while not activated_event.wait(timeout=0.05):
+                if not _phone_command_queue.empty():
+                    phone_command = _phone_command_queue.get_nowait()
+                    break
             LISTENING_FOR_ACTIVATION = False
             activated_event.clear()
             _tts_suppressed.clear()
-            _push_state("activated")
-            print("\n  Activated!")
-            speak("Yes sir.", update_state=False)
-            _tts_queue.join()
-            time.sleep(0.1)
-            _push_state("activated")
 
-            command = listen_for_command()
-            if not command:
-                print("  No command heard. Say 'Jarvis' again.\n")
-                speak("I didn't catch that. Try again.")
+            if phone_command:
+                print(f'\n  Phone command: "{phone_command}"')
+                command = phone_command
+            else:
+                _push_state("activated")
+                print("\n  Activated!")
+                speak("Yes sir.")
                 _tts_queue.join()
-                _push_state("idle")
-                continue
+                _push_state("activated")
+
+                command = listen_for_command()
+                if not command:
+                    print("  No command heard. Say 'Jarvis' again.\n")
+                    speak("I didn't catch that. Try again.")
+                    _tts_queue.join()
+                    _push_state("idle")
+                    continue
 
             print("  Thinking...")
             _push_state("thinking", transcript=command)
-            if command.strip().lower() in ("enroll", "re-enroll", "update voice", "train voice"):
-                enroll_voice()
-                _push_state("idle")
-                continue
             if should_bypass_ai(command):
                 print("  Bypassed AI (dismissal command).")
                 _push_state("idle")
@@ -1485,11 +1631,12 @@ def main():
 
             # Re-enable wake word so user can interrupt Jarvis mid-response
             LISTENING_FOR_ACTIVATION = True
-            handle_response(response, workspaces, activated_event)
+            try:
+                handle_response(response, workspaces, activated_event)
+            except Exception as e:
+                print(f"  Error in handle_response: {e}")
             _tts_queue.join()
-            with _dash_lock:
-                if _dash_state["state"] == "thinking":
-                    _push_state("idle")
+            _push_state("idle")
             print("\n  Say 'Jarvis' to activate...\n")
 
         except KeyboardInterrupt:
@@ -1497,6 +1644,10 @@ def main():
             _tts_queue.join()
             print("\n  JARVIS shutting down. Goodbye.")
             break
+        except Exception as e:
+            print(f"  Unexpected main loop error: {e}")
+            _push_state("idle")
+            time.sleep(0.5)
 
 
 if __name__ == "__main__":
