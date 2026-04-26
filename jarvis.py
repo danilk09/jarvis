@@ -54,6 +54,8 @@ load_dotenv()
 client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
 BRAVE_API_KEY = os.environ.get("BRAVE_API_KEY", "")
 
+from memory import memory
+
 print("  Loading Whisper model (first run may take a moment)...")
 WHISPER_MODEL = WhisperModel("base", device="cpu", compute_type="int8")
 
@@ -1201,6 +1203,9 @@ ACTION TYPES (pick one):
 {{"mode":"action","actions":[{{"type":"web_search","query":"<search query>"}}]}}
 {{"mode":"action","actions":[{{"type":"generate_file","filename":"<name.ext>","prompt":"<full description of what to write in the file>","search_query":"<targeted web search query, or empty string if no current data needed>"}}]}}
 {{"mode":"action","actions":[{{"type":"coding_mode","prompt":"<full description of the project/feature to scaffold>"}}]}}
+{{"mode":"memory","operation":"save","content":"<fact to store>"}}
+{{"mode":"memory","operation":"recall","query":"<topic to look up>"}}
+{{"mode":"memory","operation":"forget","content":"<keyword to erase>"}}
 {{"mode":"chat","reply":"<your answer>"}}
 {{"mode":"none"}}
 
@@ -1218,6 +1223,9 @@ RULES:
 - Any question or request for information that doesn't need real-time data → mode "chat" with a concise spoken reply
 - Unclear/filler → mode "none"
 - Keep chat replies SHORT: 1-2 sentences max. No markdown, no lists. Plain spoken sentences only. Answer only what was asked — no extra context unless the user asks to go in depth.
+- "remember that [X]", "don't forget [X]", "note that [X]" → mode "memory" operation "save"; put the fact in "content"
+- "what do you know about [X]", "recall [X]", "do you remember [X]" → mode "memory" operation "recall"; put topic in "query"
+- "forget [X]", "forget about [X]" (when X is a topic, not a dismissal) → mode "memory" operation "forget"; put keyword in "content"
 """
 
 _ai_error_count = 0
@@ -1245,27 +1253,108 @@ def should_bypass_ai(text):
     cleaned = text.strip().lower().rstrip(".,!?")
     return cleaned in BYPASS_COMMANDS
 
+# ── Command Classifier ────────────────────────────────────────────────────────
+_ACTION_RE = re.compile(
+    r'\b(open|launch|start|run|play|find|search|close|take|capture|show|analyze|'
+    r'generate|create|write|make|code|scaffold|build|workspace|enhance|upscale|'
+    r'screenshot|bookmark|history)\b',
+    re.IGNORECASE,
+)
+_MEMORY_RE = re.compile(
+    r"\b(remember that|don't forget|note that|keep in mind|recall|memorize|"
+    r"what do you know about|do you remember)\b",
+    re.IGNORECASE,
+)
+
+def classify_command(text: str) -> str:
+    """Returns 'action', 'memory', or 'chat'."""
+    if _MEMORY_RE.search(text):
+        return "memory"
+    if _ACTION_RE.search(text):
+        return "action"
+    return "chat"
+
+def _build_system_with_memory(base_system: str, command: str, cmd_type: str) -> str:
+    """Append hot layer (always) and warm memories (chat only) to system prompt."""
+    ctx_parts = []
+    hot = memory.get_hot_context()
+    if hot:
+        ctx_parts.append(f"USER PROFILE:\n{hot}")
+    if cmd_type == "chat" and memory.is_ready:
+        warm = memory.retrieve(command, top_k=5)
+        if warm:
+            ctx_parts.append("RELEVANT MEMORIES:\n" + "\n".join(f"- {m}" for m in warm))
+    if ctx_parts:
+        return base_system + "\n\n" + "\n\n".join(ctx_parts)
+    return base_system
+
+def _extract_memories_bg(user_input: str, reply: str):
+    """Background thread: extract notable facts from a chat exchange and save to memory."""
+    if not user_input.strip() or not reply.strip():
+        return
+    prompt = (
+        f'User: "{user_input}"\nJarvis: "{reply}"\n\n'
+        "Extract any facts worth long-term storage about the user "
+        "(preferences, personal info, names, habits). Be conservative — most exchanges have nothing. "
+        'Return ONLY JSON: {"memories":[{"content":"...","category":"preference|fact|person","hot":false}]} '
+        'or {"memories":[]} if nothing notable.'
+    )
+    try:
+        resp = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=200,
+            system="Extract memorable user facts from conversations. Return only JSON.",
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw  = resp.content[0].text.strip()
+        data = json.loads(raw[raw.find("{"):raw.rfind("}")+1])
+        for mem_item in data.get("memories", []):
+            content = mem_item.get("content", "").strip()
+            if not content or len(content) < 8:
+                continue
+            cat = mem_item.get("category", "general")
+            memory.add(content, cat)
+            if mem_item.get("hot"):
+                if ":" in content:
+                    k, _, v = content.partition(":")
+                    memory.update_hot(cat if cat in ("preference", "person") else "fact",
+                                      k.strip(), v.strip())
+                else:
+                    memory.update_hot("fact", content)
+    except Exception:
+        pass
+
 def ask_claude(command, workspaces):
     global CHAT_HISTORY, _ai_error_count
 
+    cmd_type = classify_command(command)
+
     with _chat_lock:
         history_snapshot = CHAT_HISTORY.copy()
-        CHAT_HISTORY.append({"role": "user", "content": command})
-        messages = [m for m in CHAT_HISTORY if m["role"] != "system"]
-        system_prompt = next((m["content"] for m in CHAT_HISTORY if m["role"] == "system"), "")
+        base_system = next((m["content"] for m in CHAT_HISTORY if m["role"] == "system"), "")
+
+        if cmd_type == "action":
+            # Actions are stateless — no history needed, saves tokens
+            messages = [{"role": "user", "content": command}]
+        else:
+            # Chat/memory — include recent history for conversational context
+            CHAT_HISTORY.append({"role": "user", "content": command})
+            non_sys = [m for m in CHAT_HISTORY if m["role"] != "system"]
+            messages = non_sys[-8:] if len(non_sys) > 8 else non_sys
+
+    # Build memory-augmented system prompt (hot always; warm only for chat)
+    system_prompt = _build_system_with_memory(base_system, command, cmd_type)
 
     try:
-        # chat mode needs more tokens for a full reply; action mode needs very few
         response = client.messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=400,
             system=system_prompt,
-            messages=messages
+            messages=messages,
         )
 
         raw = response.content[0].text.strip()
 
-        # Strip markdown fences if model adds them
         if "```" in raw:
             raw = raw.split("```")[1]
             if raw.startswith("json"):
@@ -1307,9 +1396,20 @@ def ask_claude(command, workspaces):
         with _chat_lock:
             if result:
                 _ai_error_count = 0
-                if len(CHAT_HISTORY) > 13:
-                    CHAT_HISTORY = CHAT_HISTORY[:1] + CHAT_HISTORY[-12:]
-                CHAT_HISTORY.append({"role": "assistant", "content": raw})
+                if cmd_type != "action":
+                    CHAT_HISTORY.append({"role": "assistant", "content": raw})
+                    # Keep system + last 8 turns (4 exchanges)
+                    if len(CHAT_HISTORY) > 9:
+                        CHAT_HISTORY = CHAT_HISTORY[:1] + CHAT_HISTORY[-8:]
+
+                # Background memory extraction for chat replies only
+                if cmd_type == "chat" and result.get("mode") == "chat":
+                    threading.Thread(
+                        target=_extract_memories_bg,
+                        args=(command, result.get("reply", "")),
+                        daemon=True,
+                    ).start()
+
                 return result
 
             _ai_error_count += 1
@@ -1546,6 +1646,30 @@ def handle_response(response, workspaces, activated_event=None):
         reply = response.get("reply", "I'm not sure how to answer that.")
         print(f"\n  ── JARVIS ──────────────────────────\n  {reply}\n  ────────────────────────────────────\n")
         speak(reply)
+
+    elif mode == "memory":
+        op = response.get("operation", "save")
+        if op == "save":
+            content = response.get("content", "").strip()
+            if content:
+                memory.add(content, "explicit")
+                memory.update_hot("fact", content)
+                speak("Got it, I'll remember that.")
+            else:
+                speak("What would you like me to remember?")
+        elif op == "recall":
+            query   = response.get("query", "")
+            results = memory.retrieve(query, top_k=5) if query else []
+            if results:
+                speak("Here's what I know: " + ". ".join(results[:2]))
+            else:
+                speak("I don't have anything stored about that.")
+        elif op == "forget":
+            keyword = response.get("content", "").strip()
+            if keyword:
+                memory.delete_by_keyword(keyword)
+                memory.remove_hot(keyword)
+                speak("Forgotten.")
 
     elif mode == "none":
         print("  No action taken.")
