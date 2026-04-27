@@ -1,0 +1,694 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <title>Jarvis</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:        #08090f;
+      --surface:   #10121c;
+      --border:    #1c2035;
+      --blue:      #4a90d9;
+      --blue-dim:  #1e3a5f;
+      --green:     #2ecc71;
+      --red:       #e74c3c;
+      --amber:     #f39c12;
+      --text:      #d0d4e8;
+      --muted:     #5a6080;
+      --radius:    14px;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      min-height: 100dvh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 24px 16px;
+      -webkit-tap-highlight-color: transparent;
+      user-select: none;
+    }
+
+    h1 {
+      font-size: 1rem;
+      letter-spacing: 0.45em;
+      color: var(--blue);
+      font-weight: 300;
+      margin-bottom: 32px;
+    }
+
+    /* ── Login card ── */
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 28px 24px;
+      width: 100%;
+      max-width: 340px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    .card label {
+      font-size: 0.75rem;
+      letter-spacing: 0.12em;
+      color: var(--muted);
+      text-transform: uppercase;
+    }
+
+    .card input[type="text"] {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      font-size: 1rem;
+      padding: 12px 14px;
+      width: 100%;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+    .card input[type="text"]:focus { border-color: var(--blue); }
+    .card input[type="text"]::placeholder { color: var(--muted); }
+
+    .toggle-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      cursor: pointer;
+    }
+    .toggle-row span {
+      font-size: 0.88rem;
+      color: var(--text);
+      user-select: none;
+    }
+
+    /* Toggle switch */
+    .switch {
+      position: relative;
+      width: 44px;
+      height: 24px;
+      flex-shrink: 0;
+    }
+    .switch input { display: none; }
+    .switch-track {
+      position: absolute;
+      inset: 0;
+      background: var(--border);
+      border-radius: 12px;
+      transition: background 0.2s;
+    }
+    .switch input:checked ~ .switch-track { background: var(--blue); }
+    .switch-thumb {
+      position: absolute;
+      top: 3px; left: 3px;
+      width: 18px; height: 18px;
+      background: #fff;
+      border-radius: 50%;
+      transition: transform 0.2s;
+    }
+    .switch input:checked ~ .switch-thumb { transform: translateX(20px); }
+
+    .mem-hint {
+      font-size: 0.75rem;
+      color: var(--muted);
+      line-height: 1.5;
+    }
+
+    .btn-primary {
+      background: var(--blue-dim);
+      border: 1px solid var(--blue);
+      border-radius: 8px;
+      color: var(--blue);
+      font-size: 0.85rem;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      padding: 13px;
+      cursor: pointer;
+      transition: background 0.2s;
+      width: 100%;
+    }
+    .btn-primary:hover  { background: #254a7a; }
+    .btn-primary:active { background: #1a3558; }
+
+    /* ── Main screen ── */
+    #main-screen {
+      width: 100%;
+      max-width: 380px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 0;
+    }
+
+    .top-bar {
+      width: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 32px;
+    }
+
+    .user-pill {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      padding: 6px 14px;
+      font-size: 0.8rem;
+      color: var(--muted);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .user-pill .dot {
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      background: var(--green);
+    }
+    .btn-disconnect {
+      background: none;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--muted);
+      font-size: 0.75rem;
+      letter-spacing: 0.1em;
+      padding: 7px 14px;
+      cursor: pointer;
+      transition: border-color 0.2s, color 0.2s;
+    }
+    .btn-disconnect:hover { border-color: var(--red); color: var(--red); }
+
+    /* ── Mic orb ── */
+    .orb-wrap {
+      position: relative;
+      width: 180px;
+      height: 180px;
+      margin-bottom: 28px;
+    }
+    .orb-ring {
+      position: absolute;
+      inset: 0;
+      border-radius: 50%;
+      border: 2px solid var(--border);
+      transition: border-color 0.3s, box-shadow 0.3s;
+    }
+    .orb {
+      position: absolute;
+      inset: 8px;
+      border-radius: 50%;
+      background: var(--surface);
+      border: none;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+      gap: 6px;
+      font-size: 0.72rem;
+      letter-spacing: 0.14em;
+      color: var(--blue);
+      font-weight: 500;
+      text-transform: uppercase;
+      outline: none;
+      transition: background 0.2s, color 0.2s;
+    }
+    .orb svg { width: 32px; height: 32px; fill: currentColor; transition: fill 0.2s; }
+    .orb:active { transform: scale(0.96); }
+
+    /* State: recording */
+    .orb-wrap.recording .orb-ring {
+      border-color: var(--red);
+      box-shadow: 0 0 0 6px rgba(231,76,60,0.12);
+      animation: pulse-red 1.4s ease-in-out infinite;
+    }
+    .orb-wrap.recording .orb { color: var(--red); }
+
+    /* State: thinking / transcribing */
+    .orb-wrap.thinking .orb-ring {
+      border-color: var(--amber);
+      animation: spin-ring 2s linear infinite;
+    }
+    .orb-wrap.thinking .orb { color: var(--amber); cursor: default; }
+
+    /* State: speaking */
+    .orb-wrap.speaking .orb-ring {
+      border-color: var(--blue);
+      box-shadow: 0 0 0 6px rgba(74,144,217,0.12);
+      animation: pulse-blue 1.2s ease-in-out infinite;
+    }
+
+    /* State: sleeping */
+    .orb-wrap.sleeping .orb-ring { border-color: #2a2a3a; }
+    .orb-wrap.sleeping .orb { color: var(--muted); cursor: default; }
+
+    @keyframes pulse-red  {
+      0%,100% { box-shadow: 0 0 0 0   rgba(231,76,60,0.3); }
+      50%      { box-shadow: 0 0 0 16px rgba(231,76,60,0);   }
+    }
+    @keyframes pulse-blue {
+      0%,100% { box-shadow: 0 0 0 0   rgba(74,144,217,0.3); }
+      50%      { box-shadow: 0 0 0 16px rgba(74,144,217,0);  }
+    }
+    @keyframes spin-ring {
+      from { transform: rotate(0deg); }
+      to   { transform: rotate(360deg); }
+    }
+
+    /* ── Text areas ── */
+    .text-area {
+      width: 100%;
+      min-height: 22px;
+      text-align: center;
+      font-size: 0.85rem;
+      line-height: 1.55;
+      transition: color 0.2s;
+    }
+    #status-text   { color: var(--muted); margin-bottom: 10px; letter-spacing: 0.05em; }
+    #transcript    { color: var(--muted); font-style: italic; margin-bottom: 10px; max-width: 320px; }
+    #response-text { color: var(--text);  font-size: 0.92rem; max-width: 320px; margin-bottom: 6px; }
+    #error-text    { color: var(--red);   font-size: 0.8rem; margin-top: 6px; }
+
+    /* ── Sleep overlay ── */
+    #sleep-overlay {
+      position: fixed;
+      inset: 0;
+      background: var(--bg);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 24px;
+      z-index: 100;
+    }
+    #sleep-overlay h2 {
+      font-size: 1rem;
+      letter-spacing: 0.3em;
+      color: var(--muted);
+      font-weight: 300;
+    }
+    #sleep-overlay p {
+      font-size: 0.85rem;
+      color: var(--muted);
+      text-align: center;
+      max-width: 280px;
+      line-height: 1.6;
+    }
+    #wake-btn {
+      background: none;
+      border: 1px solid var(--muted);
+      border-radius: 8px;
+      color: var(--muted);
+      font-size: 0.8rem;
+      letter-spacing: 0.15em;
+      text-transform: uppercase;
+      padding: 12px 28px;
+      cursor: pointer;
+      transition: border-color 0.2s, color 0.2s;
+    }
+    #wake-btn:hover { border-color: var(--blue); color: var(--blue); }
+
+    /* ── Hidden ── */
+    .hidden { display: none !important; }
+  </style>
+</head>
+<body>
+
+<!-- ── Login ──────────────────────────────────────────────────────────────── -->
+<div id="login-screen">
+  <h1>J A R V I S</h1>
+  <div class="card">
+    <label for="username-input">Who are you?</label>
+    <input type="text" id="username-input" placeholder="Your name"
+           autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+
+    <button class="btn-primary" id="connect-btn">Connect</button>
+    <p id="login-error" class="mem-hint" style="color:var(--red);display:none"></p>
+  </div>
+</div>
+
+<!-- ── Main ───────────────────────────────────────────────────────────────── -->
+<div id="main-screen" class="hidden">
+  <h1>J A R V I S</h1>
+
+  <div class="top-bar">
+    <div class="user-pill">
+      <div class="dot"></div>
+      <span id="user-label">—</span>
+    </div>
+    <button class="btn-disconnect" id="disconnect-btn">Disconnect</button>
+  </div>
+
+  <div class="orb-wrap" id="orb-wrap">
+    <div class="orb-ring"></div>
+    <button class="orb" id="orb-btn" aria-label="Tap to speak">
+      <!-- Mic icon -->
+      <svg id="orb-icon" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+        <path d="M12 1a4 4 0 0 1 4 4v6a4 4 0 0 1-8 0V5a4 4 0 0 1 4-4zm-1.5 14.93A7.001 7.001 0 0 1 5 9H3a9.001 9.001 0 0 0 8 8.938V20H8v2h8v-2h-3v-2.062A9.001 9.001 0 0 0 21 9h-2a7 7 0 0 1-5.5 6.93z"/>
+      </svg>
+      <span id="orb-label">TAP TO SPEAK</span>
+    </button>
+  </div>
+
+  <div class="text-area" id="status-text">Ready</div>
+  <div class="text-area" id="transcript"></div>
+  <div class="text-area" id="response-text"></div>
+  <div class="text-area" id="error-text"></div>
+</div>
+
+<!-- ── Sleep overlay ───────────────────────────────────────────────────────── -->
+<div id="sleep-overlay" class="hidden">
+  <h2>J A R V I S</h2>
+  <p id="sleep-msg">Jarvis is resting. Check back in the morning.</p>
+  <button id="wake-btn">Wake Jarvis</button>
+</div>
+
+<script>
+  // ── State ───────────────────────────────────────────────────────────────────
+  const WS_URL      = (location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + location.host + '/ws';
+  let ws            = null;
+  let recorder      = null;
+  let audioChunks   = [];
+  let isRecording = false;
+  let orbState    = 'idle';   // idle | recording | thinking | speaking | sleeping
+  let sessionUser = '';
+  let pendingWake = false;    // true if sleep overlay showed before session was created
+
+  const synth = window.speechSynthesis;
+
+  // ── DOM refs ─────────────────────────────────────────────────────────────────
+  const loginScreen   = document.getElementById('login-screen');
+  const mainScreen    = document.getElementById('main-screen');
+  const sleepOverlay  = document.getElementById('sleep-overlay');
+  const usernameInput = document.getElementById('username-input');
+  const connectBtn    = document.getElementById('connect-btn');
+  const loginError    = document.getElementById('login-error');
+  const userLabel     = document.getElementById('user-label');
+  const disconnectBtn = document.getElementById('disconnect-btn');
+  const orbWrap       = document.getElementById('orb-wrap');
+  const orbBtn        = document.getElementById('orb-btn');
+  const orbLabel      = document.getElementById('orb-label');
+  const statusText    = document.getElementById('status-text');
+  const transcriptEl  = document.getElementById('transcript');
+  const responseEl    = document.getElementById('response-text');
+  const errorEl       = document.getElementById('error-text');
+  const sleepMsg      = document.getElementById('sleep-msg');
+  const wakeBtn       = document.getElementById('wake-btn');
+
+  // ── UI helpers ───────────────────────────────────────────────────────────────
+  function showLogin() {
+    loginScreen.classList.remove('hidden');
+    mainScreen.classList.add('hidden');
+    sleepOverlay.classList.add('hidden');
+    loginError.style.display = 'none';
+  }
+
+  function showMain() {
+    loginScreen.classList.add('hidden');
+    mainScreen.classList.remove('hidden');
+    sleepOverlay.classList.add('hidden');
+  }
+
+  function showSleep(message) {
+    sleepMsg.textContent = message || 'Jarvis is resting.';
+    sleepOverlay.classList.remove('hidden');
+    mainScreen.classList.add('hidden');
+    loginScreen.classList.add('hidden');
+  }
+
+  function setOrbState(state) {
+    orbState = state;
+    orbWrap.classList.remove('idle', 'recording', 'thinking', 'speaking', 'sleeping');
+    orbWrap.classList.add(state);
+
+    const labels = {
+      idle:        'TAP TO SPEAK',
+      recording:   'TAP TO STOP',
+      thinking:    'THINKING…',
+      transcribing:'PROCESSING…',
+      speaking:    'SPEAKING',
+      sleeping:    'SLEEPING',
+    };
+    orbLabel.textContent = labels[state] || 'TAP TO SPEAK';
+  }
+
+  function setStatus(text, color = '') {
+    statusText.textContent = text;
+    statusText.style.color = color || 'var(--muted)';
+  }
+
+  function setError(msg) {
+    errorEl.textContent = msg;
+    setTimeout(() => { errorEl.textContent = ''; }, 4000);
+  }
+
+  function clearConversation() {
+    transcriptEl.textContent = '';
+    responseEl.textContent   = '';
+    errorEl.textContent      = '';
+  }
+
+  // ── TTS via Web Speech API (uses device's own voices — Siri on iOS, SAPI on Windows) ──
+  function speak(text) {
+    synth.cancel();
+    if (!text) return;
+    const utt = new SpeechSynthesisUtterance(text);
+    utt.onstart = () => setOrbState('speaking');
+    utt.onend   = () => { if (orbState === 'speaking') setOrbState('idle'); };
+    utt.onerror = () => { if (orbState === 'speaking') setOrbState('idle'); };
+    synth.speak(utt);
+  }
+
+  // ── Connection ────────────────────────────────────────────────────────────────
+  function connect() {
+    const username = usernameInput.value.trim();
+    if (!username) {
+      loginError.textContent = 'Please enter your name.';
+      loginError.style.display = 'block';
+      return;
+    }
+    loginError.style.display = 'none';
+    sessionUser = username.toLowerCase();
+
+    connectBtn.disabled = true;
+    connectBtn.textContent = 'Connecting…';
+
+    ws = new WebSocket(WS_URL);
+
+    ws.onopen = () => {
+      ws.send(JSON.stringify({ type: 'auth', username: sessionUser }));
+    };
+
+    ws.onmessage = (event) => {
+      let msg;
+      try { msg = JSON.parse(event.data); } catch { return; }
+      handleMessage(msg);
+    };
+
+    ws.onerror = () => {
+      connectBtn.disabled = false;
+      connectBtn.textContent = 'Connect';
+      loginError.textContent = 'Could not reach Jarvis server. Is the Pi running?';
+      loginError.style.display = 'block';
+      ws = null;
+    };
+
+    ws.onclose = () => {
+      ws = null;
+      synth.cancel();
+      connectBtn.disabled = false;
+      connectBtn.textContent = 'Connect';
+      if (!sleepOverlay.classList.contains('hidden')) return; // closed intentionally from sleep screen
+      showLogin();
+      setStatus('Ready');
+      clearConversation();
+    };
+  }
+
+  function disconnect() {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'disconnect' }));
+      ws.close();
+    }
+    synth.cancel();
+    showLogin();
+    setOrbState('idle');
+    clearConversation();
+  }
+
+  // ── Message handler ───────────────────────────────────────────────────────────
+  function handleMessage(msg) {
+    switch (msg.type) {
+
+      case 'auth_ok':
+        userLabel.textContent = sessionUser;
+        showMain();
+        setOrbState('idle');
+        setStatus('Ready');
+        speak('Ready for your command.');
+        break;
+
+      case 'sleeping':
+        showSleep(msg.message);
+        pendingWake = true;
+        break;
+
+      case 'awake':
+        // Server confirmed wake — proceed to show main if we have a session
+        sleepOverlay.classList.add('hidden');
+        if (mainScreen.classList.contains('hidden')) {
+          // Session not yet established — this shouldn't happen in normal flow
+          showMain();
+        } else {
+          mainScreen.classList.remove('hidden');
+        }
+        setOrbState('idle');
+        speak(msg.message || "I'm awake.");
+        break;
+
+      case 'state':
+        if (msg.state === 'transcribing') {
+          setOrbState('thinking');
+          setStatus('Processing audio…');
+        } else if (msg.state === 'thinking') {
+          setOrbState('thinking');
+          setStatus('Thinking…');
+        } else if (msg.state === 'idle') {
+          if (orbState !== 'speaking') setOrbState('idle');
+          setStatus('Ready');
+        }
+        break;
+
+      case 'transcript':
+        transcriptEl.textContent = '“' + msg.text + '”';
+        break;
+
+      case 'response': {
+        const text = msg.text || '';
+        responseEl.textContent = text;
+        speak(text);
+        const actions = msg.client_actions || [];
+        actions.forEach(handleClientAction);
+        break;
+      }
+
+      case 'error':
+        setError(msg.message || 'An error occurred.');
+        setOrbState('idle');
+        setStatus('Ready');
+        break;
+    }
+  }
+
+  // ── Client-side action handler ────────────────────────────────────────────────
+  function handleClientAction(action) {
+    if (action.type === 'open_url') {
+      window.open(action.url, '_blank', 'noopener');
+    } else if (action.type === 'download_file') {
+      const blob = new Blob([action.content], { type: 'text/plain' });
+      const a    = document.createElement('a');
+      a.href     = URL.createObjectURL(blob);
+      a.download = action.filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(a.href);
+    }
+  }
+
+  // ── Audio recording & sending ─────────────────────────────────────────────────
+  async function startRecording() {
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, sampleRate: 16000 } });
+    } catch {
+      setError('Microphone access denied.');
+      return;
+    }
+
+    synth.cancel();   // interrupt any ongoing speech
+    audioChunks = [];
+    recorder = new MediaRecorder(stream);
+
+    recorder.ondataavailable = (e) => { if (e.data.size > 0) audioChunks.push(e.data); };
+    recorder.onstop = () => {
+      stream.getTracks().forEach(t => t.stop());
+      sendAudio();
+    };
+
+    recorder.start();
+    isRecording = true;
+    setOrbState('recording');
+    setStatus('Recording…');
+    clearConversation();
+  }
+
+  function stopRecording() {
+    if (recorder && recorder.state !== 'inactive') recorder.stop();
+    isRecording = false;
+    setOrbState('thinking');
+    setStatus('Sending…');
+  }
+
+  async function sendAudio() {
+    const blob = new Blob(audioChunks, { type: recorder.mimeType || 'audio/webm' });
+    const arrayBuf = await blob.arrayBuffer();
+    const b64 = btoa(String.fromCharCode(...new Uint8Array(arrayBuf)));
+
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'command', audio: b64, mime: blob.type }));
+    } else {
+      setError('Not connected.');
+      setOrbState('idle');
+      setStatus('Ready');
+    }
+  }
+
+  // ── Orb button click ──────────────────────────────────────────────────────────
+  orbBtn.addEventListener('click', () => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    if (orbState === 'thinking' || orbState === 'transcribing') return;
+
+    if (orbState === 'speaking') {
+      synth.cancel();
+      setOrbState('idle');
+      setStatus('Ready');
+      return;
+    }
+
+    if (isRecording) {
+      stopRecording();
+    } else {
+      startRecording();
+    }
+  });
+
+  // ── Disconnect button ─────────────────────────────────────────────────────────
+  disconnectBtn.addEventListener('click', disconnect);
+
+  // ── Connect button ────────────────────────────────────────────────────────────
+  connectBtn.addEventListener('click', connect);
+  usernameInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') connect(); });
+
+  // ── Wake Jarvis button (sleep screen) ─────────────────────────────────────────
+  wakeBtn.addEventListener('click', () => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      // WS not open yet — reconnect first, then we'll send wake after auth_ok (handled in sleeping message)
+      return;
+    }
+    ws.send(JSON.stringify({ type: 'wake' }));
+    wakeBtn.disabled = true;
+    wakeBtn.textContent = 'Waking…';
+  });
+
+  // ── On load: show login ───────────────────────────────────────────────────────
+  showLogin();
+</script>
+</body>
+</html>
