@@ -26,7 +26,8 @@ Required packages (installed by setup.sh):
 
 ```bash
 pip install anthropic python-dotenv pyautogui pygetwindow Pillow \
-    sounddevice numpy faster-whisper soundfile vosk requests
+    sounddevice numpy faster-whisper soundfile vosk requests \
+    flask flask-cors webrtcvad
 ```
 
 Optional (for image upscaling): download `realesrgan-ncnn-vulkan.exe` from the Real-ESRGAN-ncnn-vulkan releases page and update `ESRGAN_EXE` in `jarvis.py`.
@@ -38,18 +39,39 @@ Everything lives in a single file: `jarvis.py`. The flow is:
 1. **Wake word** — Vosk model (`models/vosk-model-small-en-us-0.15/`) listens on a raw audio stream for "jarvis"
 2. **Command recording** — A persistent `sounddevice` stream captures audio until silence; faster-whisper transcribes it
 3. **AI dispatch** — `ask_claude()` sends the transcript + `CHAT_HISTORY` to Claude Haiku and expects a JSON response with `mode` and optional `actions`
-4. **Action execution** — `execute_action()` / `handle_response()` routes the parsed JSON to the appropriate handler (open app, browser, file search, screenshot, image analysis, music, workspace, etc.)
+4. **Action execution** — `execute_action()` / `handle_response()` routes the parsed JSON to the appropriate handler (open app, browser, file search, screenshot, image analysis, workspace, coding mode, etc.)
 5. **TTS** — A background thread drains `_tts_queue` and speaks via PowerShell's SAPI. TTS can be interrupted mid-speech by saying the wake word; `stop_tts()` kills the current subprocess and drains the queue.
 
 **Key globals:**
 - `CHAT_HISTORY` — conversation context sent to Claude on every call; guarded by `_chat_lock`
-- `FILE_INDEX` / `BOOKMARKS` / `HISTORY` — built in background threads at startup from the local filesystem and browser profiles
+- `_workspaces` — workspace config dict; updated live by the `POST /api/workspaces` endpoint so voice triggers reload without restarting
+- `FILE_INDEX` / `BOOKMARKS` — built in background threads at startup from the local filesystem and Chrome/Edge bookmark files
 - `_audio_buffer` / `_capture_active` — shared between the persistent audio callback and `listen_for_command()`
 - `_tts_suppressed` — set when TTS is interrupted; cleared at the start of each new activation cycle so subsequent `speak()` calls work normally
 
+## Dashboard
+
+A React app lives in `jarvis-dashboard/`. It is built with Create React App and served by the embedded Flask server at `http://localhost:5151`.
+
+- `/` — live status orb, transcript display, generated-files panel
+- `/workspaces` — React workspace manager; reads/writes `workspaces.json` via the Flask API
+- `/phone` — tap-to-speak mobile page (served as plain HTML, not from the React build)
+
+To rebuild after frontend changes:
+```bash
+cd jarvis-dashboard && npm run build
+```
+
+Flask API routes relevant to the dashboard:
+- `GET /status` — returns current state, transcript, speech beat, and file list
+- `GET /api/workspaces` — returns the contents of `workspaces.json`
+- `POST /api/workspaces` — writes `workspaces.json`, updates `_workspaces`, and re-initializes `CHAT_HISTORY`
+
 ## Workspaces
 
-Workspaces are defined in `workspaces.json`. Each workspace is a named list of items with types `url`, `vscode`, `file`, or `app`. The `workspace_manager.html` file is a browser-based UI for editing this file.
+Workspaces are defined in `workspaces.json`. Each workspace is a named object with an optional `description` and an `items` array. Each item has a `type` (`url`, `vscode`, `file`, or `app`) and a `path`.
+
+Edit them at `http://localhost:5151/workspaces`. Changes save instantly and hot-reload the running assistant's voice triggers.
 
 ## Configuration (top of jarvis.py)
 
@@ -57,7 +79,6 @@ Workspaces are defined in `workspaces.json`. Each workspace is a named list of i
 |---|---|
 | `VOICE_NAME` | SAPI voice name fragment (empty = system default) |
 | `SPEECH_RATE` | TTS rate, -10 to 10 |
-| `DEFAULT_PLAYLIST_URL` | Amazon Music fallback playlist |
 | `WAKE_WORD` | Defaults to `"jarvis"` |
 
 ## Claude API usage

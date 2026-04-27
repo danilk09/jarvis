@@ -63,6 +63,19 @@
 
 .statusItem { display: flex; align-items: center; gap: 7px; }
 
+.wsLink {
+  font-family: 'Share Tech Mono', monospace;
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  color: var(--text-dim);
+  text-decoration: none;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 3px 8px;
+  transition: color 0.15s, border-color 0.15s;
+}
+.wsLink:hover { color: var(--green); border-color: var(--green); }
+
 .dot {
   width: 7px;
   height: 7px;

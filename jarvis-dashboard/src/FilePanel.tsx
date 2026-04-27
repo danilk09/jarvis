@@ -123,41 +123,18 @@ function downloadRaw(file: JarvisFile) {
   a.click();
 }
 
-function FileViewer({ file, onClose }: { file: JarvisFile; onClose: () => void }) {
-  const md = isMarkdown(file.name);
-
-  return (
-    <div className={styles.overlay} onClick={onClose}>
-      <div className={styles.modal} onClick={e => e.stopPropagation()}>
-        <div className={styles.modalHeader}>
-          <span className={styles.modalTitle}>{file.name}</span>
-          <div className={styles.modalActions}>
-            {md && (
-              <button className={styles.btn} onClick={() => downloadWord(file.name, file.content)}>
-                ↓ WORD
-              </button>
-            )}
-            <button className={styles.btn} onClick={() => downloadRaw(file)}>
-              ↓ {md ? 'MARKDOWN' : 'EXPORT'}
-            </button>
-            <button className={styles.btn} onClick={onClose}>✕ CLOSE</button>
-          </div>
-        </div>
-
-        {md ? (
-          <div className={styles.markdownContent}>
-            <ReactMarkdown>{file.content}</ReactMarkdown>
-          </div>
-        ) : (
-          <pre className={styles.modalContent}>{file.content}</pre>
-        )}
-      </div>
-    </div>
-  );
-}
 
 export default function FilePanel({ files, style }: Props) {
-  const [selected, setSelected] = useState<JarvisFile | null>(null);
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+
+  function toggle(key: string) {
+    setExpanded(prev => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }
 
   return (
     <aside className={styles.panel} style={style}>
@@ -174,24 +151,53 @@ export default function FilePanel({ files, style }: Props) {
             <div className={styles.emptyHint}>Ask JARVIS to write or code something</div>
           </div>
         ) : (
-          [...files].reverse().map((f, i) => (
-            <div
-              key={`${f.name}-${i}`}
-              className={`${styles.card} ${i === 0 ? styles.cardNew : ''}`}
-              onClick={() => setSelected(f)}
-            >
-              <div className={styles.cardName}>{f.name}</div>
-              <div className={styles.cardMeta}>
-                <span className={styles.badge}>{ext(f.name)}</span>
-                <span>{f.time}</span>
-                <span>{f.size}</span>
+          [...files].reverse().map((f, i) => {
+            const key = `${f.name}-${i}`;
+            const open = expanded.has(key);
+            const md = isMarkdown(f.name);
+            return (
+              <div
+                key={key}
+                className={`${styles.card} ${i === 0 ? styles.cardNew : ''} ${open ? styles.cardOpen : ''}`}
+              >
+                <div className={styles.cardHeader} onClick={() => toggle(key)}>
+                  <div>
+                    <div className={styles.cardName}>{f.name}</div>
+                    <div className={styles.cardMeta}>
+                      <span className={styles.badge}>{ext(f.name)}</span>
+                      <span>{f.time}</span>
+                      <span>{f.size}</span>
+                    </div>
+                  </div>
+                  <span className={`${styles.expandIcon} ${open ? styles.expandIconOpen : ''}`}>›</span>
+                </div>
+
+                {open && (
+                  <div className={styles.cardBody}>
+                    {md ? (
+                      <div className={styles.cardMarkdown}>
+                        <ReactMarkdown>{f.content}</ReactMarkdown>
+                      </div>
+                    ) : (
+                      <pre className={styles.cardContent}>{f.content}</pre>
+                    )}
+                    <div className={styles.cardActions}>
+                      {md && (
+                        <button className={styles.btn} onClick={() => downloadWord(f.name, f.content)}>
+                          ↓ WORD
+                        </button>
+                      )}
+                      <button className={styles.btn} onClick={() => downloadRaw(f)}>
+                        ↓ {md ? 'MARKDOWN' : 'EXPORT'}
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
-            </div>
-          ))
+            );
+          })
         )}
       </div>
-
-      {selected && <FileViewer file={selected} onClose={() => setSelected(null)} />}
     </aside>
   );
 }
