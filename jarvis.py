@@ -150,6 +150,8 @@ JARVIS_INPUT_DIR  = os.path.join(os.path.dirname(__file__), "jarvis_input")
 JARVIS_OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "jarvis_output")
 CODING_DIR        = os.path.join(os.path.expanduser("~"), "OneDrive", "Desktop", "jarvis_coding")
 
+_workspaces: dict = {}
+
 # ── Embedded dashboard server ─────────────────────────────────────────────────
 _DASH_BUILD = os.path.join(os.path.dirname(__file__), "jarvis-dashboard", "build")
 _dash_lock  = threading.Lock()
@@ -227,6 +229,24 @@ def _setup_tailscale_https(fqdn):
 def _route_status():
     with _dash_lock:
         return _jsonify(dict(_dash_state))
+
+@_flask.route("/api/workspaces")
+def _api_get_workspaces():
+    try:
+        with open(WORKSPACES_FILE) as f:
+            return _jsonify(json.load(f))
+    except FileNotFoundError:
+        return _jsonify({})
+
+@_flask.route("/api/workspaces", methods=["POST"])
+def _api_save_workspaces():
+    global _workspaces
+    data = _freq.get_json(force=True)
+    with open(WORKSPACES_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+    _workspaces = data
+    init_chat_history(_workspaces)
+    return _jsonify({"ok": True})
 
 @_flask.route("/", defaults={"path": ""})
 @_flask.route("/<path:path>")
@@ -469,68 +489,6 @@ def build_bookmark_index():
     BOOKMARKS = get_chrome_bookmarks() + get_edge_bookmarks()
     print(f"  Bookmark index built: {len(BOOKMARKS)} bookmarks found.")
 
-# ── Browser History ───────────────────────────────────────────────────────────
-HISTORY = []
-
-def read_browser_history(db_path, limit=5000):
-    entries = []
-    if not os.path.exists(db_path):
-        return entries
-    tmp = os.path.join(tempfile.gettempdir(), "jarvis_history_tmp.db")
-    try:
-        shutil.copy2(db_path, tmp)
-        conn = sqlite3.connect(tmp)
-        cur  = conn.cursor()
-        cur.execute("""
-            SELECT title, url, last_visit_time
-            FROM urls
-            ORDER BY last_visit_time DESC
-            LIMIT ?
-        """, (limit,))
-        epoch_offset = 11644473600
-        for title, url, ts in cur.fetchall():
-            try:
-                secs = ts / 1_000_000 - epoch_offset
-                visited = time.strftime("%Y-%m-%d %H:%M", time.localtime(secs))
-            except Exception:
-                visited = "unknown"
-            entries.append({"title": title or "", "url": url, "visited": visited})
-        conn.close()
-    except Exception as e:
-        print(f"  Could not read history from {db_path}: {e}")
-    finally:
-        try:
-            os.remove(tmp)
-        except Exception:
-            pass
-    return entries
-
-def build_history_index():
-    global HISTORY
-    paths = [
-        os.path.expanduser("~/AppData/Local/Google/Chrome/User Data/Default/History"),
-        os.path.expanduser("~/AppData/Local/Microsoft/Edge/User Data/Default/History"),
-    ]
-    all_entries = []
-    for p in paths:
-        all_entries.extend(read_browser_history(p))
-    seen = {}
-    for e in all_entries:
-        url = e["url"]
-        if url not in seen or e["visited"] > seen[url]["visited"]:
-            seen[url] = e
-    HISTORY = sorted(seen.values(), key=lambda x: x["visited"], reverse=True)
-    print(f"  History index built: {len(HISTORY)} unique pages found.")
-
-def search_history(keyword=None, days_ago=None, limit=5):
-    results = HISTORY
-    if days_ago is not None:
-        cutoff = time.strftime("%Y-%m-%d", time.localtime(time.time() - days_ago * 86400))
-        results = [e for e in results if e["visited"] >= cutoff]
-    if keyword:
-        kw = keyword.lower()
-        results = [e for e in results if kw in e["title"].lower() or kw in e["url"].lower()]
-    return results[:limit]
 
 # ── Workspaces ────────────────────────────────────────────────────────────────
 def load_workspaces():
@@ -1042,21 +1000,6 @@ def execute_action(action, workspaces, activated_event=None):
             return f"Opened bookmark: {matches[0]['name']}"
         return f"No bookmark found matching '{target}'"
 
-    elif kind == "history":
-        keyword  = action.get("keyword", target)
-        days_ago = action.get("days_ago", None)
-        results  = search_history(keyword=keyword, days_ago=days_ago)
-        if results:
-            print("\n  ── History matches ──────────────────")
-            for i, e in enumerate(results):
-                print(f"  {i+1}. [{e['visited']}] {e['title']}\n     {e['url']}")
-            print("  ─────────────────────────────────────\n")
-            webbrowser.open(results[0]["url"])
-            reply = f"Found {len(results)} match. Opening: {results[0]['title'] or results[0]['url']}"
-            speak(reply)
-            return reply
-        return f"No history found matching '{keyword}'"
-
     elif kind == "screenshot":
         prompt = action.get("prompt", "")
         speak("Taking a screenshot.")
@@ -1185,7 +1128,6 @@ def build_system_prompt(workspaces):
 WORKSPACES (use type "workspace"): {workspace_list}
 BOOKMARKS searchable by keyword (use type "bookmark").
 FILES searchable by keyword (use type "find_files").
-HISTORY searchable by keyword (use type "history").
 
 ACTION TYPES (pick one):
 {{"mode":"action","actions":[{{"type":"workspace","target":"<n>"}}]}}
@@ -1195,7 +1137,6 @@ ACTION TYPES (pick one):
 {{"mode":"action","actions":[{{"type":"vscode","target":"<path>"}}]}}
 {{"mode":"action","actions":[{{"type":"find_files","keyword":"<word>","extension":"<or empty>"}}]}}
 {{"mode":"action","actions":[{{"type":"bookmark","target":"<keyword>"}}]}}
-{{"mode":"action","actions":[{{"type":"history","keyword":"<word>","days_ago":null}}]}}
 {{"mode":"action","actions":[{{"type":"screenshot","prompt":"<what to analyze or do with the screenshot>"}}]}}
 {{"mode":"action","actions":[{{"type":"analyze_image","prompt":"<what to do with the image in the input folder>"}}]}}
 {{"mode":"action","actions":[{{"type":"web_search","query":"<search query>"}}]}}
@@ -1523,7 +1464,7 @@ def listen_for_command(max_duration=8):
 # ── Handle AI Response ─────────────────────────────────────────────────────────
 def handle_response(response, workspaces, activated_event=None):
     # Normalise bare action dicts (model sometimes skips the wrapper)
-    if response.get("mode") in ("find_files", "file", "bookmark", "history", "url",
+    if response.get("mode") in ("find_files", "file", "bookmark", "url",
                                  "app", "search", "workspace", "vscode",
                                  "screenshot", "analyze_image", "web_search",
                                  "coding_mode"):
@@ -1557,7 +1498,8 @@ def handle_response(response, workspaces, activated_event=None):
 LISTENING_FOR_ACTIVATION = True
 
 def main():
-    workspaces = load_workspaces()
+    global _workspaces
+    _workspaces = load_workspaces()
 
     # Ensure I/O folders exist
     os.makedirs(JARVIS_INPUT_DIR, exist_ok=True)
@@ -1587,9 +1529,9 @@ def main():
     # Build indexes in background so startup isn't slow
     threading.Thread(target=build_file_index,     daemon=True).start()
     threading.Thread(target=build_bookmark_index,  daemon=True).start()
-    threading.Thread(target=build_history_index,   daemon=True).start()
 
-    init_claude(workspaces)
+
+    init_claude(_workspaces)
     start_persistent_stream()
 
 
@@ -1603,7 +1545,7 @@ def main():
         print(f"  Phone mic:  {_tailscale_url}{tls_note}")
     else:
         print(f"  Phone mic:  Tailscale not detected — install Tailscale for remote phone access")
-    print(f"  Workspaces: {list(workspaces.keys()) or 'none'}")
+    print(f"  Workspaces: {list(_workspaces.keys()) or 'none'}")
     print(f"  AI: Claude Haiku 4.5")
     print(f"  OS: {OS}")
     print(f"  Input folder:  {JARVIS_INPUT_DIR}")
@@ -1664,7 +1606,7 @@ def main():
                 _push_state("idle")
                 continue
 
-            future = ask_claude_async(command, workspaces)
+            future = ask_claude_async(command, _workspaces)
             try:
                 response = future.result(timeout=15)
             except Exception as e:
@@ -1677,7 +1619,7 @@ def main():
             # Re-enable wake word so user can interrupt Jarvis mid-response
             LISTENING_FOR_ACTIVATION = True
             try:
-                handle_response(response, workspaces, activated_event)
+                handle_response(response, _workspaces, activated_event)
             except Exception as e:
                 print(f"  Error in handle_response: {e}")
             _tts_queue.join()

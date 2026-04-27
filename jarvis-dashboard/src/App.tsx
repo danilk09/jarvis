@@ -1,6 +1,8 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { Routes, Route, Link } from 'react-router-dom';
 import ParticleOrb from './ParticleOrb';
 import FilePanel, { JarvisFile } from './FilePanel';
+import WorkspaceManager from './WorkspaceManager';
 import './App.css';
 
 type OrbState = 'idle' | 'activated' | 'thinking' | 'speaking' | 'error';
@@ -141,7 +143,7 @@ export default function App() {
   };
   const stateColor = STATE_COLORS[orbState];
 
-  return (
+  const dashboard = (
     <div className="shell">
       <div className="scanlines" />
 
@@ -161,6 +163,7 @@ export default function App() {
           <StatusDot active label="AI ONLINE" />
           <span className="mono dimmed">{hex}</span>
           <span className="mono">{clock}</span>
+          <Link to="/workspaces" className="wsLink">Workspaces</Link>
         </div>
       </header>
 
@@ -192,5 +195,12 @@ export default function App() {
         <FilePanel files={files} />
       </div>
     </div>
+  );
+
+  return (
+    <Routes>
+      <Route path="/" element={dashboard} />
+      <Route path="/workspaces" element={<WorkspaceManager />} />
+    </Routes>
   );
 }
