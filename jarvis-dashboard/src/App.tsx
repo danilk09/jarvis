@@ -66,6 +66,50 @@ function StatusDot({ active, pulsing, error, label }: {
   );
 }
 
+type MusicState = {
+  playing: boolean;
+  paused: boolean;
+  currentSong: string;
+  history: string[];
+};
+
+function MusicPlayer({ music }: { music: MusicState }) {
+  const sendControl = async (command: string, extra?: object) => {
+    await fetch('/api/music/control', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command, ...extra }),
+    });
+  };
+
+  const visible = music.playing || music.paused || !!music.currentSong;
+  if (!visible) return null;
+
+  return (
+    <div className="musicBar">
+      <button
+        className="musicBtn"
+        title="Previous"
+        disabled={music.history.length === 0}
+        onClick={() => sendControl('prev', { n: 1 })}
+      >⏮</button>
+      <button
+        className="musicBtn"
+        title={music.paused ? 'Resume' : 'Pause'}
+        onClick={() => sendControl('toggle_pause')}
+      >{music.paused ? '▶' : '⏸'}</button>
+      <button
+        className="musicBtn"
+        title="Skip"
+        onClick={() => sendControl('skip')}
+      >⏭</button>
+      <span className="musicBarTitle" title={music.currentSong}>
+        {music.currentSong || '—'}
+      </span>
+    </div>
+  );
+}
+
 export default function App() {
   const [orbState,   setOrbState]   = useState<OrbState>('idle');
   const [transcript, setTranscript] = useState('—');
@@ -74,6 +118,7 @@ export default function App() {
   const [fileCount,  setFileCount]  = useState(0);
   const [speechBeat, setSpeechBeat] = useState(0);
   const [panelWidth, setPanelWidth] = useState(360);
+  const [music,      setMusic]      = useState<MusicState>({ playing: false, paused: false, currentSong: '', history: [] });
   const demoRef    = useRef<ReturnType<typeof setTimeout> | null>(null);
   const demoIdx    = useRef(0);
   const dragging   = useRef(false);
@@ -119,6 +164,12 @@ export default function App() {
           setFiles(data.files ?? []);
           setFileCount(data.files?.length ?? 0);
         }
+        setMusic({
+          playing:     !!data.music_playing,
+          paused:      !!data.music_paused,
+          currentSong: data.current_song ?? '',
+          history:     data.song_history ?? [],
+        });
       } catch {
         setServerOk(false);
       }
@@ -152,6 +203,7 @@ export default function App() {
           <span className="logoMain">JARVIS</span>
           <span className="logoSub">ADVANCED AI INTERFACE</span>
         </div>
+        <MusicPlayer music={music} />
         <div className="statusBar">
           <StatusDot active={serverOk} label="SERVER" />
           <StatusDot

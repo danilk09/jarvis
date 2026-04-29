@@ -232,6 +232,46 @@
   line-height: 1.55;
 }
 
+/* ── Music bar (header) ───────────────────────────────────────────────── */
+.musicBar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 4px 10px;
+  background: rgba(61,255,143,0.03);
+  max-width: 340px;
+  overflow: hidden;
+}
+
+.musicBtn {
+  background: none;
+  border: none;
+  color: var(--text);
+  font-size: 14px;
+  padding: 2px 4px;
+  cursor: pointer;
+  line-height: 1;
+  flex-shrink: 0;
+  transition: color 0.15s;
+}
+.musicBtn:hover:not(:disabled) { color: var(--green); }
+.musicBtn:disabled { opacity: 0.3; cursor: default; }
+
+.musicBarTitle {
+  font-family: 'Share Tech Mono', monospace;
+  font-size: 11px;
+  color: var(--green-bright);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+  flex: 1;
+  padding-left: 4px;
+  border-left: 1px solid var(--border);
+}
+
 /* ── Data strip ───────────────────────────────────────────────────────── */
 .dataStrip {
   display: flex;

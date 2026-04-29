@@ -7,7 +7,7 @@ echo "Installing JARVIS dependencies..."
 
 pip install anthropic python-dotenv pyautogui pygetwindow Pillow \
     sounddevice numpy faster-whisper soundfile vosk requests \
-    flask flask-cors webrtcvad resemblyzer
+    flask flask-cors webrtcvad yt-dlp pycaw
 
 echo ""
 echo "Downloading Vosk speech model..."
@@ -37,6 +37,11 @@ else
     echo ".env already exists, skipping."
 fi
 
+echo ""
+echo "Optional — music playback:"
+echo "  Download mpv (shinchiro Windows build) from https://mpv.io/installation/"
+echo "  Extract mpv-x86_64-*.7z and add the folder to PATH,"
+echo "  or set MPV_EXE in jarvis.py to the full path of mpv.exe."
 echo ""
 echo "Setup complete. Run with:"
 echo "  python jarvis.py"

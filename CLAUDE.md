@@ -27,10 +27,12 @@ Required packages (installed by setup.sh):
 ```bash
 pip install anthropic python-dotenv pyautogui pygetwindow Pillow \
     sounddevice numpy faster-whisper soundfile vosk requests \
-    flask flask-cors webrtcvad
+    flask flask-cors webrtcvad yt-dlp pycaw
 ```
 
 Optional (for image upscaling): download `realesrgan-ncnn-vulkan.exe` from the Real-ESRGAN-ncnn-vulkan releases page and update `ESRGAN_EXE` in `jarvis.py`.
+
+Optional (for music playback): download mpv from mpv.io (shinchiro Windows build, `mpv-x86_64-*.7z`) and add the folder to PATH, or set `MPV_EXE` in `jarvis.py` to the full path.
 
 ## Architecture
 
@@ -39,8 +41,9 @@ Everything lives in a single file: `jarvis.py`. The flow is:
 1. **Wake word** — Vosk model (`models/vosk-model-small-en-us-0.15/`) listens on a raw audio stream for "jarvis"
 2. **Command recording** — A persistent `sounddevice` stream captures audio until silence; faster-whisper transcribes it
 3. **AI dispatch** — `ask_claude()` sends the transcript + `CHAT_HISTORY` to Claude Haiku and expects a JSON response with `mode` and optional `actions`
-4. **Action execution** — `execute_action()` / `handle_response()` routes the parsed JSON to the appropriate handler (open app, browser, file search, screenshot, image analysis, workspace, coding mode, etc.)
+4. **Action execution** — `execute_action()` / `handle_response()` routes the parsed JSON to the appropriate handler (open app, browser, file search, screenshot, image analysis, workspace, coding mode, music, etc.)
 5. **TTS** — A background thread drains `_tts_queue` and speaks via PowerShell's SAPI. TTS can be interrupted mid-speech by saying the wake word; `stop_tts()` kills the current subprocess and drains the queue.
+6. **Music** — `play_music()` uses yt-dlp to resolve a YouTube audio stream URL and passes it to mpv. Volume is controlled via mpv's named-pipe IPC (`\\.\pipe\jarvis_mpv`) using ctypes. When the wake word fires, `music_duck()` fades volume to 8% over 0.5s; after Jarvis finishes speaking, `music_unduck()` fades back to 100% over 1.5s. Concurrent fades are cancelled safely using a generation counter (`_fade_gen`).
 
 **Key globals:**
 - `CHAT_HISTORY` — conversation context sent to Claude on every call; guarded by `_chat_lock`
@@ -48,6 +51,7 @@ Everything lives in a single file: `jarvis.py`. The flow is:
 - `FILE_INDEX` / `BOOKMARKS` — built in background threads at startup from the local filesystem and Chrome/Edge bookmark files
 - `_audio_buffer` / `_capture_active` — shared between the persistent audio callback and `listen_for_command()`
 - `_tts_suppressed` — set when TTS is interrupted; cleared at the start of each new activation cycle so subsequent `speak()` calls work normally
+- `_music_proc` / `_music_vol` / `_fade_gen` — current mpv subprocess, tracked volume level, and fade generation counter for the music subsystem
 
 ## Dashboard
 
@@ -80,6 +84,7 @@ Edit them at `http://localhost:5151/workspaces`. Changes save instantly and hot-
 | `VOICE_NAME` | SAPI voice name fragment (empty = system default) |
 | `SPEECH_RATE` | TTS rate, -10 to 10 |
 | `WAKE_WORD` | Defaults to `"jarvis"` |
+| `MPV_EXE` | Path to mpv executable (default `"mpv"` — must be on PATH or set to full path) |
 
 ## Claude API usage
 
