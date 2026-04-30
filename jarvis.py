@@ -1669,13 +1669,13 @@ def start_persistent_stream():
     )
     _persistent_stream.start()
 
-def listen_for_command(max_duration=8):
+def listen_for_command(max_duration=8, silence_duration=0.8):
     """Record a command using WebRTC VAD for end-of-speech, then verify speaker identity."""
-    time.sleep(0.05)
+    time.sleep(0.3)  # let TTS echo and room reverb die down before capture starts
 
     # 20 ms frames at 16 kHz → 50 frames/sec
-    SPEECH_ONSET = 4   # consecutive speech frames to confirm speech started (~80 ms)
-    SILENCE_END  = 40  # consecutive silence frames to stop recording (~800 ms)
+    SPEECH_ONSET = 4                          # consecutive speech frames to confirm speech started (~80 ms)
+    SILENCE_END  = int(silence_duration * 50) # consecutive silence frames to stop recording
     MAX_FRAMES   = max_duration * 50
 
     vad = _webrtcvad.Vad(3) if _WEBRTCVAD_OK else None
