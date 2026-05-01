@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { Routes, Route, Link } from 'react-router-dom';
 import ParticleOrb from './ParticleOrb';
 import FilePanel, { JarvisFile } from './FilePanel';
+import InputPanel from './InputPanel';
 import WorkspaceManager from './WorkspaceManager';
 import './App.css';
 
@@ -118,6 +119,7 @@ export default function App() {
   const [fileCount,  setFileCount]  = useState(0);
   const [speechBeat, setSpeechBeat] = useState(0);
   const [panelWidth, setPanelWidth] = useState(360);
+  const [rightTab,   setRightTab]   = useState<'output' | 'input'>('output');
   const [music,      setMusic]      = useState<MusicState>({ playing: false, paused: false, currentSong: '', history: [] });
   const demoRef    = useRef<ReturnType<typeof setTimeout> | null>(null);
   const demoIdx    = useRef(0);
@@ -244,7 +246,22 @@ export default function App() {
           className="resizeHandle"
           onMouseDown={() => { dragging.current = true; document.body.style.cursor = 'col-resize'; }}
         />
-        <FilePanel files={files} />
+        <div className="rightPanel">
+          <div className="panelTabs">
+            <button
+              className={`panelTab ${rightTab === 'output' ? 'panelTabActive' : ''}`}
+              onClick={() => setRightTab('output')}
+            >OUTPUT</button>
+            <button
+              className={`panelTab ${rightTab === 'input' ? 'panelTabActive' : ''}`}
+              onClick={() => setRightTab('input')}
+            >INPUT</button>
+          </div>
+          {rightTab === 'output'
+            ? <FilePanel files={files} style={{ borderLeft: 'none', flex: 1, minHeight: 0 }} />
+            : <InputPanel />
+          }
+        </div>
       </div>
     </div>
   );

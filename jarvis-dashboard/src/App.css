@@ -290,3 +290,43 @@
   padding: 3px 8px;
   background: rgba(61,255,143,0.03);
 }
+
+/* ── Right panel with tabs ────────────────────────────────────────────── */
+.rightPanel {
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--border);
+  overflow: hidden;
+  height: 100%;
+}
+
+.panelTabs {
+  display: flex;
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--border);
+  background: rgba(2,8,4,0.8);
+}
+
+.panelTab {
+  flex: 1;
+  padding: 9px 0;
+  background: none;
+  border: none;
+  border-right: 1px solid var(--border);
+  color: var(--text-dim);
+  font-family: 'Share Tech Mono', monospace;
+  font-size: 9px;
+  letter-spacing: 0.35em;
+  cursor: pointer;
+  transition: color 0.15s, background 0.15s;
+}
+
+.panelTab:last-child { border-right: none; }
+
+.panelTab:hover { color: var(--text); background: rgba(61,255,143,0.03); }
+
+.panelTabActive {
+  color: var(--green);
+  background: rgba(61,255,143,0.06);
+  border-bottom: 2px solid var(--green-dim);
+}

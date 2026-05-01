@@ -383,7 +383,10 @@ OS              = platform.system()
 # Folders for image I/O — created at startup if missing
 JARVIS_INPUT_DIR  = os.path.join(os.path.dirname(__file__), "jarvis_input")
 JARVIS_OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "jarvis_output")
+INPUT_ARCHIVE_DIR = os.path.join(JARVIS_INPUT_DIR, "archive")
 CODING_DIR        = os.path.join(os.path.expanduser("~"), "OneDrive", "Desktop", "jarvis_coding")
+
+_session_archive: str = ""  # set at startup to INPUT_ARCHIVE_DIR/session_YYYYMMDD_HHMMSS/
 
 _workspaces: dict = {}
 
@@ -511,6 +514,70 @@ def _api_save_workspaces():
         json.dump(data, f, indent=2)
     _workspaces = data
     init_chat_history(_workspaces)
+    return _jsonify({"ok": True})
+
+@_flask.route("/api/input")
+def _api_input_list():
+    os.makedirs(JARVIS_INPUT_DIR, exist_ok=True)
+    files = []
+    for fname in os.listdir(JARVIS_INPUT_DIR):
+        fpath = os.path.join(JARVIS_INPUT_DIR, fname)
+        if os.path.isfile(fpath):
+            stat = os.stat(fpath)
+            files.append({
+                "name":     fname,
+                "size":     stat.st_size,
+                "modified": stat.st_mtime,
+                "type":     _guess_file_type(fname),
+            })
+    files.sort(key=lambda f: f["modified"], reverse=True)
+    return _jsonify({"files": files})
+
+@_flask.route("/api/input/upload", methods=["POST"])
+def _api_input_upload():
+    if "file" not in _freq.files:
+        return _jsonify({"error": "No file provided"}), 400
+    f = _freq.files["file"]
+    if not f.filename:
+        return _jsonify({"error": "No filename"}), 400
+    safe_name = re.sub(r"[^\w\-. ]", "_", os.path.basename(f.filename))
+    os.makedirs(JARVIS_INPUT_DIR, exist_ok=True)
+    f.save(os.path.join(JARVIS_INPUT_DIR, safe_name))
+    return _jsonify({"ok": True, "filename": safe_name})
+
+@_flask.route("/api/input/archive")
+def _api_input_archive():
+    sessions = []
+    if os.path.isdir(INPUT_ARCHIVE_DIR):
+        for sess in sorted(os.listdir(INPUT_ARCHIVE_DIR), reverse=True):
+            sess_path = os.path.join(INPUT_ARCHIVE_DIR, sess)
+            if os.path.isdir(sess_path):
+                files = []
+                for fname in os.listdir(sess_path):
+                    fpath = os.path.join(sess_path, fname)
+                    if os.path.isfile(fpath):
+                        stat = os.stat(fpath)
+                        files.append({"name": fname, "size": stat.st_size,
+                                      "type": _guess_file_type(fname)})
+                sessions.append({"session": sess, "files": files})
+    return _jsonify({"sessions": sessions})
+
+@_flask.route("/api/input/restore", methods=["POST"])
+def _api_input_restore():
+    data     = _freq.get_json(force=True) or {}
+    session  = data.get("session", "")
+    filename = data.get("filename", "")
+    if not session or not filename:
+        return _jsonify({"error": "Missing session or filename"}), 400
+    src = os.path.join(INPUT_ARCHIVE_DIR, session, filename)
+    if not os.path.exists(src):
+        return _jsonify({"error": "File not found"}), 404
+    os.makedirs(JARVIS_INPUT_DIR, exist_ok=True)
+    dest = os.path.join(JARVIS_INPUT_DIR, filename)
+    if os.path.exists(dest):
+        base, ext = os.path.splitext(filename)
+        dest = os.path.join(JARVIS_INPUT_DIR, f"{base}_{int(time.time())}{ext}")
+    shutil.move(src, dest)
     return _jsonify({"ok": True})
 
 @_flask.route("/", defaults={"path": ""})
@@ -993,6 +1060,204 @@ def analyze_input_image(prompt):
     return result
 
 
+# ── Input Folder Processing ────────────────────────────────────────────────────
+
+def _archive_input_file(src_path):
+    """Move a processed input file into the session archive instead of deleting it."""
+    if not _session_archive:
+        try:
+            os.remove(src_path)
+        except Exception:
+            pass
+        return
+    os.makedirs(_session_archive, exist_ok=True)
+    filename = os.path.basename(src_path)
+    dest = os.path.join(_session_archive, filename)
+    if os.path.exists(dest):
+        base, ext = os.path.splitext(filename)
+        dest = os.path.join(_session_archive, f"{base}_{int(time.time())}{ext}")
+    try:
+        shutil.move(src_path, dest)
+    except Exception as e:
+        print(f"  Could not archive {filename}: {e}")
+
+
+def _guess_file_type(name):
+    ext = os.path.splitext(name)[1].lower()
+    if ext in ('.jpg', '.jpeg', '.png', '.webp', '.gif'):
+        return 'image'
+    if ext == '.pdf':
+        return 'pdf'
+    if ext in ('.py', '.js', '.ts', '.jsx', '.tsx', '.java', '.c', '.cpp',
+               '.h', '.rs', '.go', '.rb', '.php', '.sql'):
+        return 'code'
+    if ext in ('.txt', '.md', '.csv', '.json', '.xml', '.yaml', '.yml',
+               '.toml', '.ini', '.cfg', '.sh', '.bat', '.html', '.css'):
+        return 'text'
+    return 'file'
+
+
+def _enhance_image(image_path, prompt):
+    """Run ESRGAN upscaling (or Pillow fallback) and return a result string."""
+    ESRGAN_EXE = r"C:\Users\paten\OneDrive\Desktop\Tools\ESRGAN\realesrgan-ncnn-vulkan.exe"
+    if not os.path.exists(ESRGAN_EXE):
+        result = _pillow_enhance(image_path, prompt)
+    else:
+        os.makedirs(JARVIS_OUTPUT_DIR, exist_ok=True)
+        out_path = os.path.join(JARVIS_OUTPUT_DIR, f"upscaled_{time.strftime('%Y%m%d_%H%M%S')}.png")
+        speak("Upscaling image, this may take a moment.")
+        try:
+            subprocess.run(
+                [ESRGAN_EXE, "-i", image_path, "-o", out_path, "-s", "4", "-n", "realesrgan-x4plus"],
+                check=True, timeout=120
+            )
+            os.startfile(out_path)
+            result = "Image upscaled 4x and saved to jarvis_output."
+        except subprocess.TimeoutExpired:
+            result = "Upscaling timed out. Try a smaller image."
+        except subprocess.CalledProcessError as e:
+            result = f"Upscaling failed: {e}"
+        except Exception as e:
+            result = f"Upscaling error: {e}"
+    with _chat_lock:
+        CHAT_HISTORY.append({"role": "user",      "content": f"[Image enhancement request] {prompt}"})
+        CHAT_HISTORY.append({"role": "assistant",  "content": f"[Enhancement result] {result}"})
+    return result
+
+
+def _read_pdf(path):
+    """Extract text from a PDF using pypdf or PyPDF2 as fallback."""
+    try:
+        import importlib
+        pypdf = importlib.import_module("pypdf")
+        with open(path, "rb") as f:
+            reader = pypdf.PdfReader(f)
+            return "\n".join(p.extract_text() or "" for p in reader.pages[:10])[:4000]
+    except Exception:
+        try:
+            import PyPDF2
+            with open(path, "rb") as f:
+                reader = PyPDF2.PdfReader(f)
+                return "\n".join(p.extract_text() or "" for p in reader.pages[:10])[:4000]
+        except Exception as e:
+            return f"(could not read PDF: {e})"
+
+
+def process_input_folder(prompt):
+    """
+    Read every file in JARVIS_INPUT_DIR, build a context string for chaining,
+    add it to CHAT_HISTORY, archive processed files, and return
+    {"speech": <spoken summary>, "context": <raw combined text>}.
+    Images that need enhancement are run in background threads.
+    """
+    os.makedirs(JARVIS_INPUT_DIR, exist_ok=True)
+
+    all_items = [
+        os.path.join(JARVIS_INPUT_DIR, fn)
+        for fn in os.listdir(JARVIS_INPUT_DIR)
+        if os.path.isfile(os.path.join(JARVIS_INPUT_DIR, fn))
+    ]
+    if not all_items:
+        return {"speech": "No files found in the input folder.", "context": ""}
+
+    IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+    TEXT_EXTS  = {".txt", ".md", ".py", ".js", ".ts", ".jsx", ".tsx",
+                  ".html", ".css", ".json", ".csv", ".xml", ".yaml", ".yml",
+                  ".sh", ".bat", ".java", ".c", ".cpp", ".h", ".rs", ".go",
+                  ".rb", ".php", ".sql", ".toml", ".ini", ".cfg"}
+
+    enhance_kw = ["enhance", "improve", "fix", "sharpen", "brighten",
+                  "denoise", "clean up", "make better", "increase contrast", "upscale"]
+    wants_enhancement = any(kw in (prompt or "").lower() for kw in enhance_kw)
+
+    context_parts = []
+    archived      = []
+    bg_threads    = []
+
+    for fpath in all_items:
+        fname = os.path.basename(fpath)
+        ext   = os.path.splitext(fname)[1].lower()
+
+        if ext in IMAGE_EXTS:
+            if wants_enhancement:
+                def _bg(p=fpath, pr=prompt):
+                    res = _enhance_image(p, pr)
+                    speak(res)
+                    _archive_input_file(p)
+                bg_threads.append(threading.Thread(target=_bg, daemon=True))
+                context_parts.append(f"[Image: {fname}] (enhancement queued in background)")
+            else:
+                res = analyze_image_with_claude(fpath, prompt or "Describe this image.")
+                context_parts.append(f"[Image: {fname}] {res}")
+                archived.append(fpath)
+
+        elif ext == ".txt":
+            try:
+                raw = open(fpath, encoding="utf-8", errors="ignore").read().strip()
+                urls = re.findall(r"https?://\S+", raw)
+                if urls and len(raw.split()) <= 15:
+                    for url in urls[:3]:
+                        try:
+                            r = requests.get(url, timeout=10,
+                                             headers={"User-Agent": "Mozilla/5.0"})
+                            clean = re.sub(r"<[^>]+>", " ", r.text)
+                            clean = re.sub(r"\s+", " ", clean).strip()[:4000]
+                            context_parts.append(f"[URL: {url}]\n{clean}")
+                        except Exception as e:
+                            context_parts.append(f"[URL: {url}] (fetch failed: {e})")
+                else:
+                    context_parts.append(f"[File: {fname}]\n{raw[:4000]}")
+                archived.append(fpath)
+            except Exception as e:
+                context_parts.append(f"[File: {fname}] (read error: {e})")
+
+        elif ext in TEXT_EXTS:
+            try:
+                content = open(fpath, encoding="utf-8", errors="ignore").read()
+                context_parts.append(f"[File: {fname}]\n{content[:4000]}")
+                archived.append(fpath)
+            except Exception as e:
+                context_parts.append(f"[File: {fname}] (read error: {e})")
+
+        elif ext == ".pdf":
+            context_parts.append(f"[PDF: {fname}]\n{_read_pdf(fpath)}")
+            archived.append(fpath)
+
+        else:
+            context_parts.append(f"[File: {fname}] (unsupported type — skipped)")
+
+    for t in bg_threads:
+        t.start()
+    for fpath in archived:
+        _archive_input_file(fpath)
+
+    all_context = "\n\n".join(context_parts)
+    if not all_context.strip():
+        return {"speech": "Could not read any content from the input folder.", "context": ""}
+
+    with _chat_lock:
+        CHAT_HISTORY.append({"role": "user", "content": f"[Input folder contents]\n{all_context}"})
+
+    summary_prompt = prompt or "Briefly describe what's in these files in 2-3 spoken sentences."
+    try:
+        resp = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=250,
+            system="You are a voice assistant. Answer in 1-3 concise spoken sentences. No markdown, no lists.",
+            messages=[{"role": "user", "content": f"Context:\n{all_context[:5000]}\n\nRequest: {summary_prompt}"}],
+        )
+        speech = resp.content[0].text.strip()
+        with _chat_lock:
+            CHAT_HISTORY.append({"role": "assistant", "content": speech})
+    except Exception:
+        speech = f"Processed {len(archived)} item(s) from the input folder."
+
+    if bg_threads:
+        speech += " Enhancement is running in the background."
+
+    return {"speech": speech, "context": all_context}
+
+
 # ── Web Search ────────────────────────────────────────────────────────────────
 def brave_search(query, count=5):
     """Call Brave Search API and return a list of {title, description, url} dicts."""
@@ -1176,7 +1441,9 @@ def _start_word_beats(text):
 def _stop_word_beats():
     _beat_stop.set()
 
-def execute_action(action, workspaces, activated_event=None):
+def execute_action(action, workspaces, activated_event=None, chain_ctx=None):
+    if chain_ctx is None:
+        chain_ctx = {}
     kind   = action.get("type", "")
     target = action.get("target", "")
     query  = action.get("query", "")
@@ -1269,34 +1536,19 @@ def execute_action(action, workspaces, activated_event=None):
         prompt = action.get("prompt", "")
         speak("Taking a screenshot.")
         result = take_screenshot(prompt)
+        chain_ctx["image_context"] = result
         print(f"\n  ── Screenshot Analysis ──────────────\n  {result}\n  ────────────────────────────────────\n")
         speak(result)
         return result
 
-    elif kind == "analyze_image":
+    elif kind == "input_folder":
         prompt = action.get("prompt", "")
-        wants_enhancement = any(
-            kw in (prompt or "").lower()
-            for kw in ["enhance", "improve", "fix", "sharpen", "brighten",
-                       "denoise", "clean up", "make better", "increase contrast", "upscale"]
-        )
-
-        if wants_enhancement:
-            # Run in background thread — Jarvis stays responsive
-            def _enhance_bg():
-                result = analyze_input_image(prompt)
-                speak(result)  # speak() is thread-safe
-
-            threading.Thread(target=_enhance_bg, daemon=True).start()
-            speak("Enhancement started in the background. I'll let you know when it's done.")
-            return "Enhancement running in background."
-        else:
-            # Plain analysis is fast — run inline as before
-            speak("Analyzing image.")
-            result = analyze_input_image(prompt)
-            print(f"\n  ── Image Analysis ───────────────────\n  {result}\n  ────────────────────────────────────\n")
-            speak(result)
-            return result
+        speak("Processing input folder.")
+        output = process_input_folder(prompt)
+        chain_ctx["file_context"] = output["context"]
+        print(f"\n  ── Input Folder ─────────────────────\n  {output['speech']}\n  ────────────────────────────────────\n")
+        speak(output["speech"])
+        return f"Input folder processed."
 
     elif kind == "web_search":
         if not BRAVE_API_KEY:
@@ -1319,14 +1571,14 @@ def execute_action(action, workspaces, activated_event=None):
         prompt_text  = action.get("prompt", "")
         search_query = action.get("search_query", "")
         speak(f"Generating {filename}.")
-        context = ""
+        context = chain_ctx.get("file_context", "") or chain_ctx.get("image_context", "")
         if search_query and BRAVE_API_KEY:
             speak("Looking up current data first.")
             results = brave_search(search_query, count=6)
             if results:
                 context = "\n".join(
                     f"{r['title']}: {r['description']} ({r['url']})" for r in results
-                )
+                ) + ("\n\n" + context if context else "")
         elif search_query and not BRAVE_API_KEY:
             speak("Note: no Brave API key, so current data unavailable.")
         content = _generate_file_content(prompt_text, filename, context)
@@ -1342,13 +1594,12 @@ def execute_action(action, workspaces, activated_event=None):
     elif kind == "coding_mode":
         prompt_text = action.get("prompt", "")
         speak("Starting coding mode. Generating project skeleton.")
-        context = ""
+        context = chain_ctx.get("file_context", "") or chain_ctx.get("image_context", "")
         if BRAVE_API_KEY:
             results = brave_search(prompt_text[:200], count=4)
             if results:
-                context = "\n".join(
-                    f"{r['title']}: {r['description']}" for r in results
-                )
+                web_ctx = "\n".join(f"{r['title']}: {r['description']}" for r in results)
+                context = web_ctx + ("\n\n" + context if context else "")
         skeleton = _generate_coding_skeleton(prompt_text, context)
         if not skeleton:
             speak("Skeleton generation failed. Try again.")
@@ -1447,7 +1698,7 @@ ACTION TYPES (pick one):
 {{"mode":"action","actions":[{{"type":"find_files","keyword":"<word>","extension":"<or empty>"}}]}}
 {{"mode":"action","actions":[{{"type":"bookmark","target":"<keyword>"}}]}}
 {{"mode":"action","actions":[{{"type":"screenshot","prompt":"<what to analyze or do with the screenshot>"}}]}}
-{{"mode":"action","actions":[{{"type":"analyze_image","prompt":"<what to do with the image in the input folder>"}}]}}
+{{"mode":"action","actions":[{{"type":"input_folder","prompt":"<what to do with the files in the input folder>"}}]}}
 {{"mode":"action","actions":[{{"type":"web_search","query":"<search query>"}}]}}
 {{"mode":"action","actions":[{{"type":"generate_file","filename":"<name.ext>","prompt":"<full description of what to write in the file>","search_query":"<targeted web search query, or empty string if no current data needed>"}}]}}
 {{"mode":"action","actions":[{{"type":"coding_mode","prompt":"<full description of the project/feature to scaffold>"}}]}}
@@ -1463,8 +1714,8 @@ RULES:
 - "find files" or "open file" → type "find_files" with keyword
 - "open [workspace]" → type "workspace". Fuzzy match (Example: "311","three eleven","3-11" all match workspace "311")
 - Words like "open","find","search","launch","show" → ALWAYS mode "action"
-- "screenshot","take a screenshot","capture screen" → type "screenshot"; put intent in "prompt"
-- "analyze image","look at this","what's in the image", "enhance image" → type "analyze_image"; put intent in "prompt"
+- "screenshot","take a screenshot","capture screen","look at my screen","what's on my screen","look at this" → type "screenshot"; put intent in "prompt". Screenshots can be chained with generate_file or coding_mode to use the image as context.
+- "process input folder","check input folder","analyze input","look at input files","enhance image","what's in the input folder","summarize input" → type "input_folder"; put intent in "prompt". Can be chained with generate_file or coding_mode to use folder contents as context.
 - Anything needing current/real-time info WITHOUT file generation: news, weather, sports scores, prices, recent events → type "web_search"
 - "write a [file]", "create a [file]", "generate [file]", "make a [file]" → type "generate_file"; filename must include an extension (.py, .txt, .md, .html, etc.); put the full description of what to write in "prompt"; if the file content requires current/real-time data (e.g. today's news, current prices, recent stats, live standings), set "search_query" to a targeted search query — otherwise leave it as an empty string ""
 - "code [thing]", "coding mode [thing]", "build a project for [thing]", "start a project", "scaffold [thing]" → type "coding_mode"; put the full description in "prompt"
@@ -1781,7 +2032,7 @@ def handle_response(response, workspaces, activated_event=None):
     # Normalise bare action dicts (model sometimes skips the wrapper)
     if response.get("mode") in ("find_files", "file", "bookmark", "url",
                                  "app", "search", "workspace", "vscode",
-                                 "screenshot", "analyze_image", "web_search",
+                                 "screenshot", "input_folder", "web_search",
                                  "coding_mode", "music"):
         response = {"mode": "action", "actions": [response]}
 
@@ -1793,8 +2044,9 @@ def handle_response(response, workspaces, activated_event=None):
         if not actions:
             speak("I'm not sure what to do with that.")
             return
+        chain_ctx = {}
         for action in actions:
-            result = execute_action(action, workspaces, activated_event)
+            result = execute_action(action, workspaces, activated_event, chain_ctx)
             print(f"  Done: {result}")
 
     elif mode == "chat":
@@ -1813,12 +2065,14 @@ def handle_response(response, workspaces, activated_event=None):
 LISTENING_FOR_ACTIVATION = True
 
 def main():
-    global _workspaces
+    global _workspaces, _session_archive
     _workspaces = load_workspaces()
 
-    # Ensure I/O folders exist
+    # Ensure I/O folders exist and create a per-session archive folder
     os.makedirs(JARVIS_INPUT_DIR, exist_ok=True)
     os.makedirs(JARVIS_OUTPUT_DIR, exist_ok=True)
+    _session_archive = os.path.join(INPUT_ARCHIVE_DIR, f"session_{time.strftime('%Y%m%d_%H%M%S')}")
+    os.makedirs(_session_archive, exist_ok=True)
 
     # Detect Tailscale and obtain HTTPS cert before starting server
     global _TAILSCALE_CERT_PATH, _TAILSCALE_KEY_PATH, _tailscale_url
@@ -1902,9 +2156,6 @@ def main():
             else:
                 _push_state("activated")
                 print("\n  Activated!")
-                speak("Yes sir.")
-                _tts_queue.join()
-                _push_state("activated")
 
                 command = listen_for_command()
                 if not command:
