@@ -2156,6 +2156,9 @@ def main():
             else:
                 _push_state("activated")
                 print("\n  Activated!")
+                speak("Yes sir.")
+                _tts_queue.join()
+                _push_state("activated")
 
                 command = listen_for_command()
                 if not command:
