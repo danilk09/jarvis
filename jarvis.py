@@ -7,6 +7,7 @@ Say Jarvis -> speak your command -> local AI figures out what to do
 import anthropic
 from dotenv import load_dotenv
 import concurrent.futures
+import ctypes
 import os
 import sys
 import json
@@ -26,6 +27,11 @@ import base64
 import re
 from flask import Flask as _Flask, jsonify as _jsonify, request as _freq, send_from_directory as _sfd
 from flask_cors import CORS as _CORS
+try:
+    from pycaw.pycaw import AudioUtilities, ISimpleAudioVolume
+    _PYCAW_AVAILABLE = True
+except ImportError:
+    _PYCAW_AVAILABLE = False
 
 try:
     from PIL import ImageGrab
@@ -48,6 +54,12 @@ try:
 except ImportError:
     _WEBRTCVAD_OK = False
     print("  webrtcvad not installed — falling back to amplitude VAD. Run setup.sh to fix.")
+
+try:
+    from pycaw.pycaw import AudioUtilities, ISimpleAudioVolume
+    _PYCAW_OK = True
+except ImportError:
+    _PYCAW_OK = False
 
 
 load_dotenv()
@@ -138,8 +150,231 @@ def speak(text, update_state=True):
     safe = text.replace("'", "''").replace("`", "").replace("$", "").replace(";", ",")
     _tts_queue.put((safe, update_state))
 
+# ── Music ─────────────────────────────────────────────────────────────────────
+_MPV_PIPE      = r'\\.\pipe\jarvis_mpv'
+_music_proc: "subprocess.Popen | None" = None
+_music_lock    = threading.Lock()
+_music_vol     = 1.0   # tracks current volume (0.0–1.0)
+_fade_gen      = 0     # incremented each time a new fade starts; old fades bail out
+_fade_gen_lock = threading.Lock()
+_music_query   = ""    # original search query, used by autoplay
+_music_active  = False # True while music should keep playing; cleared by stop_music()
+_music_paused  = False # True when paused via pause_music()
+_music_title   = ""   # actual YouTube video title of the current track
+_song_history: list = []  # up to 5 previous song queries, oldest first
+_history_lock  = threading.Lock()
+
+def _mpv_send(cmd_list):
+    """Send a JSON command to mpv via its named pipe IPC."""
+    try:
+        handle = ctypes.windll.kernel32.CreateFileW(
+            _MPV_PIPE, 0x40000000, 0, None, 3, 0, None  # GENERIC_WRITE, OPEN_EXISTING
+        )
+        if handle == -1:
+            return
+        msg = (json.dumps({"command": cmd_list}) + "\n").encode()
+        written = ctypes.c_ulong(0)
+        ctypes.windll.kernel32.WriteFile(handle, msg, len(msg), ctypes.byref(written), None)
+        ctypes.windll.kernel32.CloseHandle(handle)
+    except Exception:
+        pass
+
+def _get_mpv_session():
+    """Return the ISimpleAudioVolume for the running mpv process, or None."""
+    if not _PYCAW_AVAILABLE or _music_proc is None:
+        return None
+    try:
+        for s in AudioUtilities.GetAllSessions():
+            if s.Process and s.Process.pid == _music_proc.pid:
+                return s._ctl.QueryInterface(ISimpleAudioVolume)
+    except Exception:
+        pass
+    return None
+
+def _set_music_vol(level: float):
+    global _music_vol
+    _music_vol = max(0.0, min(1.0, level))
+    session = _get_mpv_session()
+    if session:
+        session.SetMasterVolume(_music_vol, None)
+    else:
+        _mpv_send(["set_property", "volume", int(_music_vol * 100)])
+
+def _music_is_playing() -> bool:
+    return _music_proc is not None and _music_proc.poll() is None
+
+def _fade_to(target: float, steps: int = 20, duration: float = 1.0):
+    global _fade_gen
+    with _fade_gen_lock:
+        _fade_gen += 1
+        my_gen = _fade_gen
+    start = _music_vol
+    delay = duration / steps
+    for i in range(steps):
+        if _fade_gen != my_gen:
+            return
+        _set_music_vol(start + (target - start) * (i + 1) / steps)
+        time.sleep(delay)
+
+def music_duck():
+    if _music_is_playing():
+        threading.Thread(target=_fade_to, args=(0.08, 20, 0.5), daemon=True).start()
+
+def music_unduck():
+    if _music_is_playing():
+        threading.Thread(target=_fade_to, args=(1.0, 20, 1.5), daemon=True).start()
+
+def pause_music():
+    global _music_paused
+    if _music_is_playing():
+        _music_paused = True
+        _mpv_send(["set_property", "pause", True])
+
+def resume_music():
+    global _music_paused
+    if _music_is_playing():
+        _music_paused = False
+        _mpv_send(["set_property", "pause", False])
+
+def skip_music():
+    """Kill current track so the monitor picks up the next autoplay track."""
+    global _music_paused
+    _music_paused = False
+    with _music_lock:
+        if _music_proc and _music_proc.poll() is None:
+            try:
+                _music_proc.terminate()
+            except Exception:
+                pass
+        # Leave _music_proc pointing at the terminated proc so monitor can detect
+        # it wasn't replaced by a new explicit play_music() call.
+
+def prev_music(n: int = 1):
+    """Play the nth most recent previous song (1 = last played)."""
+    with _history_lock:
+        if not _song_history:
+            speak("No previous song in history.")
+            return
+        idx = len(_song_history) - n
+        if idx < 0:
+            speak(f"Only {len(_song_history)} song{'s' if len(_song_history) != 1 else ''} in history.")
+            return
+        query = _song_history[idx]
+    speak(f"Playing {query}.")
+    play_music(query)
+
+def replay_music():
+    """Restart the current song from the beginning."""
+    query = _music_query
+    if not query:
+        speak("No song is currently playing.")
+        return
+    play_music(query, push_history=False)
+
+def _fetch_and_play(search_query: str) -> bool:
+    """Resolve a YouTube audio URL and launch mpv. Returns False if nothing found."""
+    global _music_proc, _music_title
+    print(f"  Fetching audio for: {search_query}")
+    result = subprocess.run(
+        [sys.executable, "-m", "yt_dlp", "--no-playlist", "-f", "bestaudio",
+         "--print", "%(title)s", "--print", "%(urls)s", f"ytsearch1:{search_query}"],
+        capture_output=True, text=True, timeout=30
+    )
+    lines = result.stdout.strip().splitlines()
+    if len(lines) < 2:
+        return False
+    url = lines[-1]   # %(urls)s is always last; robustly handles newlines in title
+    _music_title = "\n".join(lines[:-1])
+    if not url or not url.startswith("http"):
+        return False
+    with _music_lock:
+        try:
+            _music_proc = subprocess.Popen(
+                [MPV_EXE, "--no-video", "--volume=100",
+                 f"--input-ipc-server={_MPV_PIPE}", url],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+        except FileNotFoundError:
+            speak("mpv isn't installed. Download it from mpv.io and add it to your PATH.")
+            return False
+    time.sleep(0.3)              # give mpv a moment to open the IPC pipe
+    _set_music_vol(_music_vol)   # sync volume (handles case where music was ducked)
+    return True
+
+_AUTOPLAY_SUFFIXES = ["", " mix", " radio", " similar artists", " playlist"]
+
+def _music_monitor():
+    """Daemon thread: starts next related track whenever the current one ends."""
+    play_count = 0
+    while _music_active:
+        with _music_lock:
+            proc = _music_proc
+        if proc is None:
+            break
+        proc.wait()                  # block until mpv exits
+        if not _music_active:
+            break                    # user called stop_music()
+        with _music_lock:
+            if _music_proc is not proc:
+                break                # a new explicit play_music() started
+        play_count += 1
+        suffix = _AUTOPLAY_SUFFIXES[play_count % len(_AUTOPLAY_SUFFIXES)]
+        try:
+            if not _fetch_and_play(_music_query + suffix):
+                break
+        except Exception:
+            break
+
+def play_music(query: str, push_history: bool = True):
+    global _music_query, _music_active, _music_paused, _music_vol
+    if push_history and _music_query:
+        with _history_lock:
+            _song_history.append(_music_query)
+            if len(_song_history) > 5:
+                _song_history.pop(0)
+    _music_paused = False
+    saved_vol = _music_vol   # preserve duck state across the stop/restart cycle
+    stop_music()             # resets _music_vol to 1.0
+    _music_vol = saved_vol   # restore so _fetch_and_play syncs to the right level
+    _music_active = True
+    _music_query  = query
+    try:
+        ok = _fetch_and_play(query)
+    except FileNotFoundError:
+        speak("yt-dlp isn't installed. Run pip install yt-dlp.")
+        _music_active = False
+        return
+    except Exception as e:
+        speak("Music search failed.")
+        print(f"  yt-dlp error: {e}")
+        _music_active = False
+        return
+    if not ok:
+        speak("Couldn't find that song.")
+        _music_active = False
+        return
+    threading.Thread(target=_music_monitor, daemon=True).start()
+
+def stop_music():
+    global _music_proc, _fade_gen, _music_active, _music_title, _music_paused, _music_vol
+    _music_active  = False
+    _music_title   = ""
+    _music_paused  = False
+    _music_vol     = 1.0   # reset so next fresh play starts at full volume
+    with _fade_gen_lock:
+        _fade_gen += 1  # cancel any active fade
+    with _music_lock:
+        if _music_proc and _music_proc.poll() is None:
+            try:
+                _music_proc.terminate()
+                _music_proc.wait(timeout=2)
+            except Exception:
+                pass
+        _music_proc = None
+
 # ── Config ────────────────────────────────────────────────────────────────────
 WORKSPACES_FILE = os.path.join(os.path.dirname(__file__), "workspaces.json")
+MPV_EXE         = r"C:\Users\paten\OneDrive\Desktop\Tools\mpv\mpv.exe"   # set to full path if mpv.exe is not on PATH
 SAMPLE_RATE     = 16000   # 16 kHz — matches Whisper and WebRTC VAD requirements
 CHUNK           = 320     # 20 ms at 16 kHz — exact frame size required by webrtcvad
 
@@ -148,7 +383,10 @@ OS              = platform.system()
 # Folders for image I/O — created at startup if missing
 JARVIS_INPUT_DIR  = os.path.join(os.path.dirname(__file__), "jarvis_input")
 JARVIS_OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "jarvis_output")
+INPUT_ARCHIVE_DIR = os.path.join(JARVIS_INPUT_DIR, "archive")
 CODING_DIR        = os.path.join(os.path.expanduser("~"), "OneDrive", "Desktop", "jarvis_coding")
+
+_session_archive: str = ""  # set at startup to INPUT_ARCHIVE_DIR/session_YYYYMMDD_HHMMSS/
 
 _workspaces: dict = {}
 
@@ -228,7 +466,37 @@ def _setup_tailscale_https(fqdn):
 @_flask.route("/status")
 def _route_status():
     with _dash_lock:
-        return _jsonify(dict(_dash_state))
+        state = dict(_dash_state)
+    with _history_lock:
+        state["music_playing"] = _music_is_playing()
+        state["music_paused"]  = _music_paused
+        state["current_song"]  = _music_title if (_music_is_playing() or _music_paused) else ""
+        state["song_history"]  = list(_song_history)
+    return _jsonify(state)
+
+@_flask.route("/api/music/control", methods=["POST"])
+def _api_music_control():
+    data = _freq.get_json(force=True) or {}
+    cmd  = data.get("command", "")
+    if cmd == "skip":
+        skip_music()
+    elif cmd == "prev":
+        n = int(data.get("n", 1))
+        threading.Thread(target=prev_music, args=(n,), daemon=True).start()
+    elif cmd == "replay":
+        threading.Thread(target=replay_music, daemon=True).start()
+    elif cmd == "pause":
+        pause_music()
+    elif cmd == "resume":
+        resume_music()
+    elif cmd == "toggle_pause":
+        if _music_paused:
+            resume_music()
+        else:
+            pause_music()
+    elif cmd == "stop":
+        stop_music()
+    return _jsonify({"ok": True})
 
 @_flask.route("/api/workspaces")
 def _api_get_workspaces():
@@ -246,6 +514,70 @@ def _api_save_workspaces():
         json.dump(data, f, indent=2)
     _workspaces = data
     init_chat_history(_workspaces)
+    return _jsonify({"ok": True})
+
+@_flask.route("/api/input")
+def _api_input_list():
+    os.makedirs(JARVIS_INPUT_DIR, exist_ok=True)
+    files = []
+    for fname in os.listdir(JARVIS_INPUT_DIR):
+        fpath = os.path.join(JARVIS_INPUT_DIR, fname)
+        if os.path.isfile(fpath):
+            stat = os.stat(fpath)
+            files.append({
+                "name":     fname,
+                "size":     stat.st_size,
+                "modified": stat.st_mtime,
+                "type":     _guess_file_type(fname),
+            })
+    files.sort(key=lambda f: f["modified"], reverse=True)
+    return _jsonify({"files": files})
+
+@_flask.route("/api/input/upload", methods=["POST"])
+def _api_input_upload():
+    if "file" not in _freq.files:
+        return _jsonify({"error": "No file provided"}), 400
+    f = _freq.files["file"]
+    if not f.filename:
+        return _jsonify({"error": "No filename"}), 400
+    safe_name = re.sub(r"[^\w\-. ]", "_", os.path.basename(f.filename))
+    os.makedirs(JARVIS_INPUT_DIR, exist_ok=True)
+    f.save(os.path.join(JARVIS_INPUT_DIR, safe_name))
+    return _jsonify({"ok": True, "filename": safe_name})
+
+@_flask.route("/api/input/archive")
+def _api_input_archive():
+    sessions = []
+    if os.path.isdir(INPUT_ARCHIVE_DIR):
+        for sess in sorted(os.listdir(INPUT_ARCHIVE_DIR), reverse=True):
+            sess_path = os.path.join(INPUT_ARCHIVE_DIR, sess)
+            if os.path.isdir(sess_path):
+                files = []
+                for fname in os.listdir(sess_path):
+                    fpath = os.path.join(sess_path, fname)
+                    if os.path.isfile(fpath):
+                        stat = os.stat(fpath)
+                        files.append({"name": fname, "size": stat.st_size,
+                                      "type": _guess_file_type(fname)})
+                sessions.append({"session": sess, "files": files})
+    return _jsonify({"sessions": sessions})
+
+@_flask.route("/api/input/restore", methods=["POST"])
+def _api_input_restore():
+    data     = _freq.get_json(force=True) or {}
+    session  = data.get("session", "")
+    filename = data.get("filename", "")
+    if not session or not filename:
+        return _jsonify({"error": "Missing session or filename"}), 400
+    src = os.path.join(INPUT_ARCHIVE_DIR, session, filename)
+    if not os.path.exists(src):
+        return _jsonify({"error": "File not found"}), 404
+    os.makedirs(JARVIS_INPUT_DIR, exist_ok=True)
+    dest = os.path.join(JARVIS_INPUT_DIR, filename)
+    if os.path.exists(dest):
+        base, ext = os.path.splitext(filename)
+        dest = os.path.join(JARVIS_INPUT_DIR, f"{base}_{int(time.time())}{ext}")
+    shutil.move(src, dest)
     return _jsonify({"ok": True})
 
 @_flask.route("/", defaults={"path": ""})
@@ -687,7 +1019,7 @@ def analyze_input_image(prompt):
     if wants_enhancement:
         # Use realesrgan-ncnn-vulkan exe (runs on integrated GPU via Vulkan — no NVIDIA needed)
         # Download from: https://github.com/xinntao/Real-ESRGAN-ncnn-vulkan/releases
-        ESRGAN_EXE = r"C:\Users\paten\OneDrive\Desktop\Tools\realesrgan-ncnn-vulkan.exe"  # ← update this path
+        ESRGAN_EXE = r"C:\Users\paten\OneDrive\Desktop\Tools\ESRGAN\realesrgan-ncnn-vulkan.exe"  # ← update this path
 
         if not os.path.exists(ESRGAN_EXE):
             # Graceful fallback to Pillow if exe not found
@@ -726,6 +1058,204 @@ def analyze_input_image(prompt):
         print(f"  Could not delete image: {e}")
 
     return result
+
+
+# ── Input Folder Processing ────────────────────────────────────────────────────
+
+def _archive_input_file(src_path):
+    """Move a processed input file into the session archive instead of deleting it."""
+    if not _session_archive:
+        try:
+            os.remove(src_path)
+        except Exception:
+            pass
+        return
+    os.makedirs(_session_archive, exist_ok=True)
+    filename = os.path.basename(src_path)
+    dest = os.path.join(_session_archive, filename)
+    if os.path.exists(dest):
+        base, ext = os.path.splitext(filename)
+        dest = os.path.join(_session_archive, f"{base}_{int(time.time())}{ext}")
+    try:
+        shutil.move(src_path, dest)
+    except Exception as e:
+        print(f"  Could not archive {filename}: {e}")
+
+
+def _guess_file_type(name):
+    ext = os.path.splitext(name)[1].lower()
+    if ext in ('.jpg', '.jpeg', '.png', '.webp', '.gif'):
+        return 'image'
+    if ext == '.pdf':
+        return 'pdf'
+    if ext in ('.py', '.js', '.ts', '.jsx', '.tsx', '.java', '.c', '.cpp',
+               '.h', '.rs', '.go', '.rb', '.php', '.sql'):
+        return 'code'
+    if ext in ('.txt', '.md', '.csv', '.json', '.xml', '.yaml', '.yml',
+               '.toml', '.ini', '.cfg', '.sh', '.bat', '.html', '.css'):
+        return 'text'
+    return 'file'
+
+
+def _enhance_image(image_path, prompt):
+    """Run ESRGAN upscaling (or Pillow fallback) and return a result string."""
+    ESRGAN_EXE = r"C:\Users\paten\OneDrive\Desktop\Tools\ESRGAN\realesrgan-ncnn-vulkan.exe"
+    if not os.path.exists(ESRGAN_EXE):
+        result = _pillow_enhance(image_path, prompt)
+    else:
+        os.makedirs(JARVIS_OUTPUT_DIR, exist_ok=True)
+        out_path = os.path.join(JARVIS_OUTPUT_DIR, f"upscaled_{time.strftime('%Y%m%d_%H%M%S')}.png")
+        speak("Upscaling image, this may take a moment.")
+        try:
+            subprocess.run(
+                [ESRGAN_EXE, "-i", image_path, "-o", out_path, "-s", "4", "-n", "realesrgan-x4plus"],
+                check=True, timeout=120
+            )
+            os.startfile(out_path)
+            result = "Image upscaled 4x and saved to jarvis_output."
+        except subprocess.TimeoutExpired:
+            result = "Upscaling timed out. Try a smaller image."
+        except subprocess.CalledProcessError as e:
+            result = f"Upscaling failed: {e}"
+        except Exception as e:
+            result = f"Upscaling error: {e}"
+    with _chat_lock:
+        CHAT_HISTORY.append({"role": "user",      "content": f"[Image enhancement request] {prompt}"})
+        CHAT_HISTORY.append({"role": "assistant",  "content": f"[Enhancement result] {result}"})
+    return result
+
+
+def _read_pdf(path):
+    """Extract text from a PDF using pypdf or PyPDF2 as fallback."""
+    try:
+        import importlib
+        pypdf = importlib.import_module("pypdf")
+        with open(path, "rb") as f:
+            reader = pypdf.PdfReader(f)
+            return "\n".join(p.extract_text() or "" for p in reader.pages[:10])[:4000]
+    except Exception:
+        try:
+            import PyPDF2
+            with open(path, "rb") as f:
+                reader = PyPDF2.PdfReader(f)
+                return "\n".join(p.extract_text() or "" for p in reader.pages[:10])[:4000]
+        except Exception as e:
+            return f"(could not read PDF: {e})"
+
+
+def process_input_folder(prompt):
+    """
+    Read every file in JARVIS_INPUT_DIR, build a context string for chaining,
+    add it to CHAT_HISTORY, archive processed files, and return
+    {"speech": <spoken summary>, "context": <raw combined text>}.
+    Images that need enhancement are run in background threads.
+    """
+    os.makedirs(JARVIS_INPUT_DIR, exist_ok=True)
+
+    all_items = [
+        os.path.join(JARVIS_INPUT_DIR, fn)
+        for fn in os.listdir(JARVIS_INPUT_DIR)
+        if os.path.isfile(os.path.join(JARVIS_INPUT_DIR, fn))
+    ]
+    if not all_items:
+        return {"speech": "No files found in the input folder.", "context": ""}
+
+    IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+    TEXT_EXTS  = {".txt", ".md", ".py", ".js", ".ts", ".jsx", ".tsx",
+                  ".html", ".css", ".json", ".csv", ".xml", ".yaml", ".yml",
+                  ".sh", ".bat", ".java", ".c", ".cpp", ".h", ".rs", ".go",
+                  ".rb", ".php", ".sql", ".toml", ".ini", ".cfg"}
+
+    enhance_kw = ["enhance", "improve", "fix", "sharpen", "brighten",
+                  "denoise", "clean up", "make better", "increase contrast", "upscale"]
+    wants_enhancement = any(kw in (prompt or "").lower() for kw in enhance_kw)
+
+    context_parts = []
+    archived      = []
+    bg_threads    = []
+
+    for fpath in all_items:
+        fname = os.path.basename(fpath)
+        ext   = os.path.splitext(fname)[1].lower()
+
+        if ext in IMAGE_EXTS:
+            if wants_enhancement:
+                def _bg(p=fpath, pr=prompt):
+                    res = _enhance_image(p, pr)
+                    speak(res)
+                    _archive_input_file(p)
+                bg_threads.append(threading.Thread(target=_bg, daemon=True))
+                context_parts.append(f"[Image: {fname}] (enhancement queued in background)")
+            else:
+                res = analyze_image_with_claude(fpath, prompt or "Describe this image.")
+                context_parts.append(f"[Image: {fname}] {res}")
+                archived.append(fpath)
+
+        elif ext == ".txt":
+            try:
+                raw = open(fpath, encoding="utf-8", errors="ignore").read().strip()
+                urls = re.findall(r"https?://\S+", raw)
+                if urls and len(raw.split()) <= 15:
+                    for url in urls[:3]:
+                        try:
+                            r = requests.get(url, timeout=10,
+                                             headers={"User-Agent": "Mozilla/5.0"})
+                            clean = re.sub(r"<[^>]+>", " ", r.text)
+                            clean = re.sub(r"\s+", " ", clean).strip()[:4000]
+                            context_parts.append(f"[URL: {url}]\n{clean}")
+                        except Exception as e:
+                            context_parts.append(f"[URL: {url}] (fetch failed: {e})")
+                else:
+                    context_parts.append(f"[File: {fname}]\n{raw[:4000]}")
+                archived.append(fpath)
+            except Exception as e:
+                context_parts.append(f"[File: {fname}] (read error: {e})")
+
+        elif ext in TEXT_EXTS:
+            try:
+                content = open(fpath, encoding="utf-8", errors="ignore").read()
+                context_parts.append(f"[File: {fname}]\n{content[:4000]}")
+                archived.append(fpath)
+            except Exception as e:
+                context_parts.append(f"[File: {fname}] (read error: {e})")
+
+        elif ext == ".pdf":
+            context_parts.append(f"[PDF: {fname}]\n{_read_pdf(fpath)}")
+            archived.append(fpath)
+
+        else:
+            context_parts.append(f"[File: {fname}] (unsupported type — skipped)")
+
+    for t in bg_threads:
+        t.start()
+    for fpath in archived:
+        _archive_input_file(fpath)
+
+    all_context = "\n\n".join(context_parts)
+    if not all_context.strip():
+        return {"speech": "Could not read any content from the input folder.", "context": ""}
+
+    with _chat_lock:
+        CHAT_HISTORY.append({"role": "user", "content": f"[Input folder contents]\n{all_context}"})
+
+    summary_prompt = prompt or "Briefly describe what's in these files in 2-3 spoken sentences."
+    try:
+        resp = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=250,
+            system="You are a voice assistant. Answer in 1-3 concise spoken sentences. No markdown, no lists.",
+            messages=[{"role": "user", "content": f"Context:\n{all_context[:5000]}\n\nRequest: {summary_prompt}"}],
+        )
+        speech = resp.content[0].text.strip()
+        with _chat_lock:
+            CHAT_HISTORY.append({"role": "assistant", "content": speech})
+    except Exception:
+        speech = f"Processed {len(archived)} item(s) from the input folder."
+
+    if bg_threads:
+        speech += " Enhancement is running in the background."
+
+    return {"speech": speech, "context": all_context}
 
 
 # ── Web Search ────────────────────────────────────────────────────────────────
@@ -911,7 +1441,9 @@ def _start_word_beats(text):
 def _stop_word_beats():
     _beat_stop.set()
 
-def execute_action(action, workspaces, activated_event=None):
+def execute_action(action, workspaces, activated_event=None, chain_ctx=None):
+    if chain_ctx is None:
+        chain_ctx = {}
     kind   = action.get("type", "")
     target = action.get("target", "")
     query  = action.get("query", "")
@@ -1004,34 +1536,19 @@ def execute_action(action, workspaces, activated_event=None):
         prompt = action.get("prompt", "")
         speak("Taking a screenshot.")
         result = take_screenshot(prompt)
+        chain_ctx["image_context"] = result
         print(f"\n  ── Screenshot Analysis ──────────────\n  {result}\n  ────────────────────────────────────\n")
         speak(result)
         return result
 
-    elif kind == "analyze_image":
+    elif kind == "input_folder":
         prompt = action.get("prompt", "")
-        wants_enhancement = any(
-            kw in (prompt or "").lower()
-            for kw in ["enhance", "improve", "fix", "sharpen", "brighten",
-                       "denoise", "clean up", "make better", "increase contrast", "upscale"]
-        )
-
-        if wants_enhancement:
-            # Run in background thread — Jarvis stays responsive
-            def _enhance_bg():
-                result = analyze_input_image(prompt)
-                speak(result)  # speak() is thread-safe
-
-            threading.Thread(target=_enhance_bg, daemon=True).start()
-            speak("Enhancement started in the background. I'll let you know when it's done.")
-            return "Enhancement running in background."
-        else:
-            # Plain analysis is fast — run inline as before
-            speak("Analyzing image.")
-            result = analyze_input_image(prompt)
-            print(f"\n  ── Image Analysis ───────────────────\n  {result}\n  ────────────────────────────────────\n")
-            speak(result)
-            return result
+        speak("Processing input folder.")
+        output = process_input_folder(prompt)
+        chain_ctx["file_context"] = output["context"]
+        print(f"\n  ── Input Folder ─────────────────────\n  {output['speech']}\n  ────────────────────────────────────\n")
+        speak(output["speech"])
+        return f"Input folder processed."
 
     elif kind == "web_search":
         if not BRAVE_API_KEY:
@@ -1054,14 +1571,14 @@ def execute_action(action, workspaces, activated_event=None):
         prompt_text  = action.get("prompt", "")
         search_query = action.get("search_query", "")
         speak(f"Generating {filename}.")
-        context = ""
+        context = chain_ctx.get("file_context", "") or chain_ctx.get("image_context", "")
         if search_query and BRAVE_API_KEY:
             speak("Looking up current data first.")
             results = brave_search(search_query, count=6)
             if results:
                 context = "\n".join(
                     f"{r['title']}: {r['description']} ({r['url']})" for r in results
-                )
+                ) + ("\n\n" + context if context else "")
         elif search_query and not BRAVE_API_KEY:
             speak("Note: no Brave API key, so current data unavailable.")
         content = _generate_file_content(prompt_text, filename, context)
@@ -1077,13 +1594,12 @@ def execute_action(action, workspaces, activated_event=None):
     elif kind == "coding_mode":
         prompt_text = action.get("prompt", "")
         speak("Starting coding mode. Generating project skeleton.")
-        context = ""
+        context = chain_ctx.get("file_context", "") or chain_ctx.get("image_context", "")
         if BRAVE_API_KEY:
             results = brave_search(prompt_text[:200], count=4)
             if results:
-                context = "\n".join(
-                    f"{r['title']}: {r['description']}" for r in results
-                )
+                web_ctx = "\n".join(f"{r['title']}: {r['description']}" for r in results)
+                context = web_ctx + ("\n\n" + context if context else "")
         skeleton = _generate_coding_skeleton(prompt_text, context)
         if not skeleton:
             speak("Skeleton generation failed. Try again.")
@@ -1110,6 +1626,50 @@ def execute_action(action, workspaces, activated_event=None):
         summary = skeleton.get("summary", f"Project {project_name} is ready.")
         speak(summary)
         return f"Coding mode: {project_name} at {project_dir}"
+
+    elif kind == "music":
+        command = action.get("command", "play")
+        if command == "play":
+            q = action.get("query", "")
+            if not q:
+                speak("What would you like to play?")
+                return "Music: no query"
+            speak(f"Playing {q}.")
+            threading.Thread(target=play_music, args=(q,), daemon=True).start()
+            return f"Music: playing {q}"
+        elif command == "stop":
+            stop_music()
+            speak("Stopping music.")
+            return "Music: stopped"
+        elif command == "pause":
+            if _music_is_playing():
+                pause_music()
+                speak("Pausing music.")
+            return "Music: paused"
+        elif command == "resume":
+            if _music_is_playing() or _music_paused:
+                resume_music()
+                speak("Resuming music.")
+            return "Music: resumed"
+        elif command == "skip":
+            if _music_is_playing() or _music_paused:
+                skip_music()
+                speak("Skipping to next track.")
+            else:
+                speak("No music is playing.")
+            return "Music: skipped"
+        elif command == "prev":
+            n = int(action.get("n", 1))
+            threading.Thread(target=prev_music, args=(n,), daemon=True).start()
+            return f"Music: previous {n}"
+        elif command == "replay":
+            if _music_query:
+                speak("Replaying current song.")
+                threading.Thread(target=replay_music, daemon=True).start()
+            else:
+                speak("No song is currently playing.")
+            return "Music: replay"
+        return "Music: unknown command"
 
     elif kind == "none":
         return "No action"
@@ -1138,10 +1698,13 @@ ACTION TYPES (pick one):
 {{"mode":"action","actions":[{{"type":"find_files","keyword":"<word>","extension":"<or empty>"}}]}}
 {{"mode":"action","actions":[{{"type":"bookmark","target":"<keyword>"}}]}}
 {{"mode":"action","actions":[{{"type":"screenshot","prompt":"<what to analyze or do with the screenshot>"}}]}}
-{{"mode":"action","actions":[{{"type":"analyze_image","prompt":"<what to do with the image in the input folder>"}}]}}
+{{"mode":"action","actions":[{{"type":"input_folder","prompt":"<what to do with the files in the input folder>"}}]}}
 {{"mode":"action","actions":[{{"type":"web_search","query":"<search query>"}}]}}
 {{"mode":"action","actions":[{{"type":"generate_file","filename":"<name.ext>","prompt":"<full description of what to write in the file>","search_query":"<targeted web search query, or empty string if no current data needed>"}}]}}
 {{"mode":"action","actions":[{{"type":"coding_mode","prompt":"<full description of the project/feature to scaffold>"}}]}}
+{{"mode":"action","actions":[{{"type":"music","query":"<song, artist, or genre>","command":"play"}}]}}
+{{"mode":"action","actions":[{{"type":"music","command":"stop|pause|resume|skip|replay"}}]}}
+{{"mode":"action","actions":[{{"type":"music","command":"prev","n":<1-5>}}]}}
 {{"mode":"chat","reply":"<your answer>"}}
 {{"mode":"none"}}
 
@@ -1151,11 +1714,19 @@ RULES:
 - "find files" or "open file" → type "find_files" with keyword
 - "open [workspace]" → type "workspace". Fuzzy match (Example: "311","three eleven","3-11" all match workspace "311")
 - Words like "open","find","search","launch","show" → ALWAYS mode "action"
-- "screenshot","take a screenshot","capture screen" → type "screenshot"; put intent in "prompt"
-- "analyze image","look at this","what's in the image", "enhance image" → type "analyze_image"; put intent in "prompt"
+- "screenshot","take a screenshot","capture screen","look at my screen","what's on my screen","look at this" → type "screenshot"; put intent in "prompt". Screenshots can be chained with generate_file or coding_mode to use the image as context.
+- "process input folder","check input folder","analyze input","look at input files","enhance image","what's in the input folder","summarize input" → type "input_folder"; put intent in "prompt". Can be chained with generate_file or coding_mode to use folder contents as context.
 - Anything needing current/real-time info WITHOUT file generation: news, weather, sports scores, prices, recent events → type "web_search"
 - "write a [file]", "create a [file]", "generate [file]", "make a [file]" → type "generate_file"; filename must include an extension (.py, .txt, .md, .html, etc.); put the full description of what to write in "prompt"; if the file content requires current/real-time data (e.g. today's news, current prices, recent stats, live standings), set "search_query" to a targeted search query — otherwise leave it as an empty string ""
 - "code [thing]", "coding mode [thing]", "build a project for [thing]", "start a project", "scaffold [thing]" → type "coding_mode"; put the full description in "prompt"
+- "play [song/artist/genre]", "play some music", "play something" → type "music", command "play", query = what to play
+- "stop music", "turn off music" → type "music", command "stop"
+- "pause music", "pause" → type "music", command "pause"
+- "resume music", "unpause music", "resume" → type "music", command "resume"
+- "skip", "next song", "skip this song" → type "music", command "skip"
+- "previous song", "go back", "last song", "play the previous song" → type "music", command "prev", n=1
+- "play the previous [N]th song", "play the [N]th previous song", e.g. "play the previous 3rd song" → command "prev", n=N (1–5)
+- "replay", "replay this", "play it again", "restart the song" → type "music", command "replay"
 - Any question or request for information that doesn't need real-time data → mode "chat" with a concise spoken reply
 - Unclear/filler → mode "none"
 - Keep chat replies SHORT: 1-2 sentences max. No markdown, no lists. Plain spoken sentences only. Answer only what was asked — no extra context unless the user asks to go in depth.
@@ -1292,21 +1863,16 @@ def listen_for_wake_word(activated_event):
         rec = vosk.KaldiRecognizer(model, 16000)
         while True:
             data = q.get()
-            arr = np.frombuffer(data, dtype=np.int16)
-            rms = float(np.sqrt(np.mean(arr.astype(np.float32) ** 2)))
-            threshold = max(_ambient_rms[0] * 4.0, 100.0)
-            if rms < threshold:
-                # quiet chunk — slowly pull the noise floor toward current level
-                _ambient_rms[0] = 0.95 * _ambient_rms[0] + 0.05 * rms
-                continue
             if rec.AcceptWaveform(data):
-                result = json.loads(rec.Result())
-                text = result.get("text", "")
-                if WAKE_WORD in text.lower():
-                    print("Wake word detected!")
-                    stop_tts()
-                    activated_event.set()
-                    return
+                text = json.loads(rec.Result()).get("text", "")
+            else:
+                text = json.loads(rec.PartialResult()).get("partial", "")
+            if WAKE_WORD in text.lower():
+                print("Wake word detected!")
+                stop_tts()
+                music_duck()
+                activated_event.set()
+                return
 
 # ── Voice Recording For File Selection ──────────────────────────────────────────
 def listen_for_selection(activated_event):
@@ -1354,13 +1920,13 @@ def start_persistent_stream():
     )
     _persistent_stream.start()
 
-def listen_for_command(max_duration=8):
+def listen_for_command(max_duration=8, silence_duration=0.8):
     """Record a command using WebRTC VAD for end-of-speech, then verify speaker identity."""
-    time.sleep(0.05)
+    time.sleep(0.3)  # let TTS echo and room reverb die down before capture starts
 
     # 20 ms frames at 16 kHz → 50 frames/sec
-    SPEECH_ONSET = 4   # consecutive speech frames to confirm speech started (~80 ms)
-    SILENCE_END  = 40  # consecutive silence frames to stop recording (~800 ms)
+    SPEECH_ONSET = 4                          # consecutive speech frames to confirm speech started (~80 ms)
+    SILENCE_END  = int(silence_duration * 50) # consecutive silence frames to stop recording
     MAX_FRAMES   = max_duration * 50
 
     vad = _webrtcvad.Vad(3) if _WEBRTCVAD_OK else None
@@ -1439,7 +2005,7 @@ def listen_for_command(max_duration=8):
                 tmp_path,
                 language="en",
                 vad_filter=True,
-                initial_prompt="Open Discord, search YouTube for, open workspace, never mind, stop, yes, no, cancel, open file, find files, take a screenshot, analyze image, what's on screen",
+                initial_prompt="Open Discord, search YouTube for, open workspace, never mind, stop, yes, no, cancel, open file, find files, take a screenshot, analyze image, what's on screen, play, pause, resume, stop",
                 vad_parameters=dict(
                     min_silence_duration_ms=500,
                     speech_pad_ms=200,
@@ -1466,8 +2032,8 @@ def handle_response(response, workspaces, activated_event=None):
     # Normalise bare action dicts (model sometimes skips the wrapper)
     if response.get("mode") in ("find_files", "file", "bookmark", "url",
                                  "app", "search", "workspace", "vscode",
-                                 "screenshot", "analyze_image", "web_search",
-                                 "coding_mode"):
+                                 "screenshot", "input_folder", "web_search",
+                                 "coding_mode", "music"):
         response = {"mode": "action", "actions": [response]}
 
     mode = response.get("mode", "none")
@@ -1478,8 +2044,9 @@ def handle_response(response, workspaces, activated_event=None):
         if not actions:
             speak("I'm not sure what to do with that.")
             return
+        chain_ctx = {}
         for action in actions:
-            result = execute_action(action, workspaces, activated_event)
+            result = execute_action(action, workspaces, activated_event, chain_ctx)
             print(f"  Done: {result}")
 
     elif mode == "chat":
@@ -1498,12 +2065,14 @@ def handle_response(response, workspaces, activated_event=None):
 LISTENING_FOR_ACTIVATION = True
 
 def main():
-    global _workspaces
+    global _workspaces, _session_archive
     _workspaces = load_workspaces()
 
-    # Ensure I/O folders exist
+    # Ensure I/O folders exist and create a per-session archive folder
     os.makedirs(JARVIS_INPUT_DIR, exist_ok=True)
     os.makedirs(JARVIS_OUTPUT_DIR, exist_ok=True)
+    _session_archive = os.path.join(INPUT_ARCHIVE_DIR, f"session_{time.strftime('%Y%m%d_%H%M%S')}")
+    os.makedirs(_session_archive, exist_ok=True)
 
     # Detect Tailscale and obtain HTTPS cert before starting server
     global _TAILSCALE_CERT_PATH, _TAILSCALE_KEY_PATH, _tailscale_url
@@ -1596,6 +2165,7 @@ def main():
                     print("  No command heard. Say 'Jarvis' again.\n")
                     speak("I didn't catch that. Try again.")
                     _tts_queue.join()
+                    music_unduck()
                     _push_state("idle")
                     continue
 
@@ -1603,6 +2173,7 @@ def main():
             _push_state("thinking", transcript=command)
             if should_bypass_ai(command):
                 print("  Bypassed AI (dismissal command).")
+                music_unduck()
                 _push_state("idle")
                 continue
 
@@ -1613,6 +2184,7 @@ def main():
                 print(f"  AI error: {e}")
                 speak("Something went wrong. Please try again.")
                 _tts_queue.join()
+                music_unduck()
                 _push_state("error")
                 continue
 
@@ -1623,11 +2195,13 @@ def main():
             except Exception as e:
                 print(f"  Error in handle_response: {e}")
             _tts_queue.join()
+            music_unduck()
             _push_state("idle")
             print("\n  Say 'Jarvis' to activate...\n")
 
         except KeyboardInterrupt:
             speak("Shutting down. Goodbye.")
+            stop_music()
             _tts_queue.join()
             print("\n  JARVIS shutting down. Goodbye.")
             break

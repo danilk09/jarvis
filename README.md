@@ -46,6 +46,8 @@ python jarvis.py
 | Web search (live) | "What's the weather in New York?" |
 | Generate a file | "Create a file about the history of programming" |
 | Scaffold a project | "Code hello world" |
+| Play music | "Play Bohemian Rhapsody" / "Play some lo-fi beats" |
+| Stop / pause music | "Stop the music" / "Pause music" |
 | Chat | "What is the difference between a thread and process?" |
 
 ## Features
@@ -54,6 +56,11 @@ python jarvis.py
 - Offline wake word detection with Vosk (no cloud round-trip)
 - WebRTC VAD for noise-resistant silence detection
 - Interrupt TTS mid-sentence by saying the wake word again
+
+**Music**
+- Play any song or artist by voice — yt-dlp resolves a YouTube audio stream, mpv plays it with no download
+- Music automatically ducks (fades to ~8%) when the wake word is heard and fades back to full volume after Jarvis finishes speaking
+- Supports play, pause, resume, and stop commands
 
 **Dashboard**
 - React UI at `http://localhost:5151` showing live state, transcript, and generated files
@@ -78,7 +85,9 @@ python jarvis.py
 ```
 anthropic python-dotenv pyautogui pygetwindow Pillow
 sounddevice numpy faster-whisper soundfile vosk
-requests flask flask-cors webrtcvad
+requests flask flask-cors webrtcvad yt-dlp
 ```
 
 Optional: `realesrgan-ncnn-vulkan.exe` for image upscaling (update `ESRGAN_EXE` in `jarvis.py`).
+
+Optional (music): [mpv](https://mpv.io) — download the shinchiro Windows build (`mpv-x86_64-*.7z`), extract it, and add the folder to PATH (or set `MPV_EXE` in `jarvis.py`).
