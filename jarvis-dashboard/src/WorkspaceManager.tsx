@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { Link } from 'react-router-dom';
+import { authedFetch } from './auth';
 import './WorkspaceManager.css';
 
 type ItemType = 'url' | 'vscode' | 'file' | 'app';
@@ -23,7 +24,7 @@ export default function WorkspaceManager() {
   const saveTimer  = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
-    fetch('/api/workspaces')
+    authedFetch('/api/workspaces')
       .then(r => r.json())
       .then((d: Data) => {
         setData(d);
@@ -41,7 +42,7 @@ export default function WorkspaceManager() {
 
   const persist = useCallback(async (d: Data, silent = false) => {
     try {
-      const res = await fetch('/api/workspaces', {
+      const res = await authedFetch('/api/workspaces', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(d),
