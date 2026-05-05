@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback, DragEvent } from 'react';
+import { authedFetch } from './auth';
 import styles from './InputPanel.module.css';
 
 interface InputFile {
@@ -48,7 +49,7 @@ export default function InputPanel() {
 
   const fetchFiles = useCallback(async () => {
     try {
-      const res  = await fetch('/api/input');
+      const res  = await authedFetch('/api/input');
       const data = await res.json();
       setFiles(data.files ?? []);
     } catch { /* server not ready */ }
@@ -56,7 +57,7 @@ export default function InputPanel() {
 
   const fetchArchive = useCallback(async () => {
     try {
-      const res  = await fetch('/api/input/archive');
+      const res  = await authedFetch('/api/input/archive');
       const data = await res.json();
       setSessions(data.sessions ?? []);
     } catch { /* ignore */ }
@@ -74,7 +75,7 @@ export default function InputPanel() {
     const fd = new FormData();
     fd.append('file', file);
     try {
-      await fetch('/api/input/upload', { method: 'POST', body: fd });
+      await authedFetch('/api/input/upload', { method: 'POST', body: fd });
       await fetchFiles();
     } catch { /* ignore */ }
   }
@@ -92,7 +93,7 @@ export default function InputPanel() {
   }
 
   async function restore(session: string, filename: string) {
-    await fetch('/api/input/restore', {
+    await authedFetch('/api/input/restore', {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify({ session, filename }),

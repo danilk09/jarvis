@@ -330,3 +330,208 @@
   background: rgba(61,255,143,0.06);
   border-bottom: 2px solid var(--green-dim);
 }
+
+/* ── Mic button ───────────────────────────────────────────────────────── */
+.micBtn {
+  margin-bottom: 18px;
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  border: 2px solid var(--border);
+  background: rgba(2,8,4,0.8);
+  color: var(--text);
+  font-size: 22px;
+  cursor: pointer;
+  transition: all 0.2s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  z-index: 3;
+}
+.micBtn:hover { border-color: var(--green-dim); transform: scale(1.06); }
+.micBtnActive {
+  border-color: var(--green);
+  background: rgba(20,60,35,0.8);
+  box-shadow: 0 0 20px rgba(61,255,143,0.35);
+  animation: micPulse 0.9s ease-in-out infinite;
+}
+@keyframes micPulse {
+  0%, 100% { box-shadow: 0 0 12px rgba(61,255,143,0.25); }
+  50%       { box-shadow: 0 0 26px rgba(61,255,143,0.55); }
+}
+
+.wakeFlash {
+  color: var(--green);
+  font-size: 13px;
+  animation: fadeOut 2s forwards;
+}
+@keyframes fadeOut { 0% { opacity:1; } 80% { opacity:1; } 100% { opacity:0; } }
+
+/* ── Logout button ────────────────────────────────────────────────────── */
+.logoutBtn {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  font-size: 14px;
+  padding: 3px 8px;
+  cursor: pointer;
+  opacity: 0.6;
+  transition: opacity 0.15s, border-color 0.15s;
+}
+.logoutBtn:hover { opacity: 1; border-color: #e74c3c; color: #e74c3c; }
+
+/* ── Login screen ─────────────────────────────────────────────────────── */
+.loginWrap {
+  min-height: 100dvh;
+  background: var(--bg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px 16px;
+}
+
+.loginCard {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 36px 28px;
+  width: 100%;
+  max-width: 360px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+
+.loginLogo {
+  font-family: 'Share Tech Mono', monospace;
+  font-size: 20px;
+  letter-spacing: 0.5em;
+  color: var(--green);
+  text-shadow: 0 0 18px rgba(61,255,143,0.5);
+  margin-bottom: 2px;
+}
+
+.loginSubtitle {
+  font-family: 'Share Tech Mono', monospace;
+  font-size: 9px;
+  letter-spacing: 0.4em;
+  color: var(--text);
+  opacity: 0.55;
+  margin-bottom: 20px;
+}
+
+.loginTabs {
+  display: flex;
+  gap: 0;
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+  margin-bottom: 18px;
+}
+
+.loginTab {
+  flex: 1;
+  background: none;
+  border: none;
+  padding: 9px 0;
+  color: var(--text);
+  font-size: 13px;
+  cursor: pointer;
+  opacity: 0.55;
+  transition: opacity 0.15s, background 0.15s;
+}
+.loginTab.active { opacity: 1; background: rgba(61,255,143,0.07); color: var(--green); }
+.loginTab:first-child { border-right: 1px solid var(--border); }
+
+.loginForm { display: flex; flex-direction: column; gap: 12px; width: 100%; }
+
+.loginInput {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 15px;
+  padding: 13px 14px;
+  width: 100%;
+  outline: none;
+  transition: border-color 0.2s;
+}
+.loginInput:focus { border-color: var(--green-dim); }
+.loginInput::placeholder { color: var(--text); opacity: 0.35; }
+
+.loginError {
+  font-size: 13px;
+  color: #e74c3c;
+  padding: 6px 10px;
+  background: rgba(231,76,60,0.08);
+  border-radius: 6px;
+  text-align: center;
+}
+
+.loginBtn {
+  background: rgba(61,255,143,0.08);
+  border: 1px solid var(--green-dim);
+  border-radius: 8px;
+  color: var(--green);
+  font-size: 14px;
+  letter-spacing: 0.08em;
+  padding: 13px;
+  cursor: pointer;
+  transition: background 0.15s, opacity 0.15s;
+  margin-top: 4px;
+}
+.loginBtn:hover:not(:disabled) { background: rgba(61,255,143,0.14); }
+.loginBtn:disabled { opacity: 0.4; cursor: default; }
+
+/* ── Sleep overlay ────────────────────────────────────────────────────── */
+.sleepOverlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(2,4,2,0.88);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 200;
+  backdrop-filter: blur(6px);
+}
+
+.sleepCard {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 40px 36px;
+  max-width: 340px;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+}
+
+.sleepIcon {
+  font-size: 40px;
+  opacity: 0.5;
+}
+
+.sleepMessage {
+  color: var(--text);
+  font-size: 14px;
+  opacity: 0.7;
+  line-height: 1.5;
+}
+
+.sleepWakeBtn {
+  background: rgba(61,255,143,0.08);
+  border: 1px solid var(--green-dim);
+  border-radius: 8px;
+  color: var(--green);
+  font-size: 14px;
+  padding: 11px 28px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.sleepWakeBtn:hover { background: rgba(61,255,143,0.14); }
