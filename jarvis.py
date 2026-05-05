@@ -81,6 +81,8 @@ _tts_ready = threading.Event()
 _current_tts_proc = None
 _tts_proc_lock = threading.Lock()
 _tts_suppressed = threading.Event()
+_ack_audio: "np.ndarray | None" = None
+_ack_samplerate: int = 22050
 _phone_command_queue = _queue.Queue()
 _whisper_lock = threading.Lock()
 
@@ -122,6 +124,43 @@ def _tts_worker():
 _tts_thread = threading.Thread(target=_tts_worker, daemon=True)
 _tts_thread.start()
 _tts_ready.wait()
+
+def _prerender_ack():
+    global _ack_audio, _ack_samplerate
+    tmp = tempfile.mktemp(suffix=".wav")
+    voice_line = (
+        f"$s.Voice = $s.GetVoices() | Where-Object {{$_.GetAttribute('Name') -like '*{VOICE_NAME}*'}} | Select-Object -First 1;"
+        if VOICE_NAME else ""
+    )
+    ps = (
+        "Add-Type -AssemblyName System.Speech;"
+        "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer;"
+        f"{voice_line}"
+        f"$s.Rate = {SPEECH_RATE};"
+        f"$s.SetOutputToWaveFile('{tmp}');"
+        "$s.Speak('Yes sir.');"
+        "$s.Dispose()"
+    )
+    subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if os.path.exists(tmp):
+        data, sr = sf.read(tmp, dtype="float32")
+        _ack_audio = data
+        _ack_samplerate = sr
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+def play_ack():
+    if _ack_audio is not None:
+        sd.play(_ack_audio, _ack_samplerate)
+        sd.wait()
+    else:
+        speak("Yes sir.")
+        _tts_queue.join()
+
+threading.Thread(target=_prerender_ack, daemon=True).start()
 
 def stop_tts():
     """Kill the current TTS subprocess and drain the queue."""
@@ -1922,7 +1961,7 @@ def start_persistent_stream():
 
 def listen_for_command(max_duration=8, silence_duration=0.8):
     """Record a command using WebRTC VAD for end-of-speech, then verify speaker identity."""
-    time.sleep(0.3)  # let TTS echo and room reverb die down before capture starts
+    time.sleep(0.1)  # let TTS echo and room reverb die down before capture starts
 
     # 20 ms frames at 16 kHz → 50 frames/sec
     SPEECH_ONSET = 4                          # consecutive speech frames to confirm speech started (~80 ms)
@@ -2156,8 +2195,7 @@ def main():
             else:
                 _push_state("activated")
                 print("\n  Activated!")
-                speak("Yes sir.")
-                _tts_queue.join()
+                play_ack()
                 _push_state("activated")
 
                 command = listen_for_command()
