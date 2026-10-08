@@ -28,8 +28,10 @@ Required packages (installed by setup.sh):
 ```bash
 pip install anthropic python-dotenv Pillow \
     sounddevice numpy faster-whisper vosk requests \
-    flask flask-cors webrtcvad "yt-dlp[default]" pycaw comtypes pypdf
+    flask flask-cors webrtcvad "yt-dlp[default]" pycaw comtypes pypdf trafilatura
 ```
+
+The desktop app (needs Node.js): `cd desktop && npm install` — if `node_modules/electron/dist/electron.exe` is missing afterwards, run `node node_modules/electron/install.js`. Without it Jarvis opens the dashboard in the browser and Stage pages fall back to a reader view.
 
 Optional (for image upscaling): download `realesrgan-ncnn-vulkan.exe` from the Real-ESRGAN-ncnn-vulkan releases page and update `ESRGAN_EXE` in `core/config.py`.
 
@@ -46,18 +48,22 @@ Optional (for music playback): download mpv from mpv.io (shinchiro Windows build
 | `config.py` | All settings, paths, the Anthropic client. Edit settings here. |
 | `state.py` | Shared state: dashboard status (`dash_state`), `workspaces` (mutated in place for hot-reload), session archive path |
 | `tts.py` | In-process SAPI speech via `comtypes` on one dedicated thread. `speak()`, `stop_tts()`, `wait_tts()`, `suppressed` |
-| `audio.py` | One shared 16 kHz mic stream → 1 s pre-roll ring, wake-word thread (Vosk, grammar-limited to "jarvis"), and the command recorder (WebRTC VAD). Whisper transcription. |
+| `audio.py` | One shared 16 kHz mic stream → 2 s pre-roll ring + 3 s level history (noise floor), wake-word thread (Vosk, grammar: "jarvis" + decoys), and the command recorder (WebRTC VAD gated by loudness over the room). Whisper transcription; the false-wake check looks for "Jarvis" anywhere in the transcript. |
 | `router.py` | Local fast path: music controls, "play X", "open <app>", time/date, timers — handled without calling Claude |
 | `brain.py` | `ask_claude()` — system prompt (built from the registry) + `CHAT_HISTORY` → one JSON object |
 | `registry.py` | `@action(name, schema, rules)` decorator; schemas/rules are compiled into the system prompt |
 | `actions.py` | All built-in action handlers + `handle_response()` |
-| `agent.py` | "Do anything" fallback: tool-use loop (PowerShell, files, web, Claude Code hand-off) with spoken confirmation for anything non-read-only |
+| `agent.py` | "Do anything" fallback: tool-use loop (PowerShell, files, web, Claude Code hand-off via `coding.start`) with spoken confirmation for anything non-read-only |
 | `music.py` | yt-dlp (in-process) resolves, audio is fetched in range chunks and piped to mpv's stdin; YouTube Mix autoplay with next-track prefetch; ducking via mpv IPC / pycaw |
 | `files.py` | File index, bookmarks, Start-menu app index, workspaces |
 | `media.py` | Screenshots, image analysis/enhancement, `jarvis_input/` processing |
-| `generate.py` | `generate_file` content and `coding_mode` project skeletons |
+| `generate.py` | `generate_file` content |
+| `coding.py` | Coding projects via Claude Code: `code` action (new / run / switch / stop / approve / remember …), headless `claude -p --output-format stream-json` runs streamed onto a Stage `code` panel, per-project session resume, voice approval of refused commands, preferences in `jarvis_coding/CLAUDE.md` |
 | `web.py` | Brave search + spoken summary, page fetching |
-| `server.py` | Flask: dashboard, JSON API, `/phone` page (`core/static/phone.html`), Tailscale HTTPS |
+| `server.py` | Flask: dashboard, JSON API, Stage API + event stream, `/phone` page (`core/static/phone.html`), Tailscale HTTPS |
+| `stage.py` | Stage state (panels, 12×12 layout, highlights) in memory; pushes every change to dashboards over SSE. Auto-tiling, voice references ("panel 2", "the map"), content helpers (`add_image`, `open_file`, `show_places`) |
+| `stage_actions.py` | Stage actions: `show_page`, `read_article` (live page + key points, narrated with highlights), `point_out`, `show_file` / `edit_file` / `file_changes`, `show_image`, `show_note`, `show_map` (Nominatim geocoding), `stage` (layout by voice) |
+| `desktop.py` | Opens the dashboard in the Electron app (`desktop/`), or the browser if it isn't installed |
 | `background.py` | `--background` only: log file, periodic index refresh |
 
 Flow of one command:
@@ -75,6 +81,7 @@ Flow of one command:
 A React app lives in `jarvis-dashboard/`. It is built with Create React App and served by the embedded Flask server at `http://localhost:5151`.
 
 - `/` — live status orb, transcript display, generated-files panel
+- `/stage` — the Stage (see below); always mounted so live pages keep their state on other tabs
 - `/workspaces` — React workspace manager; reads/writes `workspaces.json` via the Flask API
 - `/phone` — tap-to-speak mobile page (`core/static/phone.html`, not part of the React build)
 
@@ -90,6 +97,30 @@ Flask API routes relevant to the dashboard:
 - `GET /api/workspaces` — returns the contents of `workspaces.json`
 - `POST /api/workspaces` — writes `workspaces.json`, updates `state.workspaces`, and rebuilds the system prompt
 
+## Stage
+
+`/stage` is a live canvas Jarvis fills while it works; the dashboard switches to it automatically when a panel opens (and opens the desktop app if no window is connected).
+
+- **Saved between runs** — every change is written (debounced) to `stage_state.json` (`config.STAGE_STATE_FILE`, git-ignored) and `stage.load()` restores it at startup: file panels reload their contents from disk, image/file panels whose file is gone are dropped. "Clear the stage" resets it. Closing panels, clearing, and auto-closing past `MAX_PANELS` are undoable (`stage.restore_removed()`, voice "restore the stage", the Undo button), and the undo survives restarts too.
+
+- **Panel kinds** — `page` (live web page: an Electron `<webview>` in the desktop app, reader view in a browser), `summary` (key points, each linked to a quote in its page), `file` (Monaco editor, autosaves to `jarvis_output/`; Jarvis's edits arrive as a diff to accept/reject), `image`, `note` (Markdown), `map` (CesiumJS globe, loaded from the jsDelivr CDN on first use).
+- **Layout** — 12×12 grid filling the screen. `auto` splits the screen recursively by each kind's weight (`stage.KIND_WEIGHT`); `focus`, `columns`, `rows` too. Drag by the header (drop on another panel to swap), resize from edges, or by voice. Manual edits make the layout `custom` until the next arrange.
+- **Highlights** — `stage.highlight(panel, target, label)`: `{"quote"}` (page/note/summary, found and marked inside the page by `pageScripts.ts`), `{"region": [x,y,w,h]}` (image, fractions), `{"lines": [a,b]}` (file), `{"place": i}` (map). `speak(text, on_start=...)` fires a highlight the moment that sentence starts, and a beam is drawn from the Stage orb to the mark.
+- **Frontend** — `jarvis-dashboard/src/stage/`: `StageContext.tsx` (SSE), `StagePage.tsx` (react-grid-layout), `panels/*`, `StageBeam.tsx`, `anchors.ts`. `pageScripts.ts` functions are injected into live pages via `toString()`, so they must stay plain ES5 with no outside references.
+- **Desktop app** — `desktop/main.js`: loads the dashboard, enables `<webview>` (locked down: no preload, sandboxed, http(s) only), blocks ads/cookie banners in Stage pages, denies location and other permissions, opens dashboard links externally. Dev aid: `JARVIS_CAPTURE=out.png JARVIS_CAPTURE_DELAY=ms [JARVIS_CAPTURE_EVAL=js]` screenshots (and prints the JS result) and exits.
+
+Flask API: `GET /api/stage/events` (SSE), `POST /api/stage/layout | arrange | clear | restore | highlight | highlights/clear`, `POST /api/stage/panel/<id>/close`, `GET /api/stage/media/<id>` (image panels only — files Jarvis put there), `POST /api/stage/file/<id>` (save / accept / reject), `POST /api/stage/page/<id>` (live page navigated), `POST /api/stage/extract/<request>` (text of a live page), `GET /api/stage/config`.
+
+## Coding projects (Claude Code)
+
+`core/coding.py`. "Code me X" creates `jarvis_coding/<name>/` and Claude Code builds it; later requests ("add dark mode") go straight to Claude Code in the **current project**, resuming that project's session (`--resume <session id>`) so it keeps context. State (current project, session ids, pending approvals) is in `coding_state.json` (git-ignored).
+
+- **Runs headless** (`claude -p --output-format stream-json --verbose`), prompt on stdin, launched via the real `claude.exe` (npm's `.cmd` shim is unwrapped by `coding.claude_exe()`). Events stream onto a Stage `code` panel; Claude Code's closing summary is spoken (it's told to end with one via `--append-system-prompt`).
+- **Permissions** — `CODE_PERMISSION_MODE = "acceptEdits"`: file edits and file operations inside the project are automatic; shell commands must match `CODE_ALLOWED_TOOLS` (`PowerShell(...)` and `Bash(...)` prefix rules — Claude Code's shell tool on this machine is PowerShell). Refused commands come back as `permission_denials`; Jarvis asks, and "allow it" (`coding.approve()`) resumes with each part of the command allowed. Claude Code's PowerShell permission parser can time out and refuse a command that then succeeds on retry, so only denials that never succeeded are reported.
+- **Voice → settings** — the `code` action carries `effort` (`--effort`), `model` (`--model`) and `plan_only` (`--permission-mode plan`; "go ahead" afterwards runs "Implement the plan you proposed."). Subagents aren't a flag: the user's wording stays in the request. Defaults: `CODE_EFFORT`, `CODE_MODEL` in `config.py`.
+- **Preferences** — `jarvis_coding/CLAUDE.md`. Claude Code loads CLAUDE.md from the project folder and every parent, so this applies to every project. "Remember I prefer X" appends a line (`coding.remember_pref`); "show my coding preferences" opens it on the Stage.
+- **Billing** — `CODE_USE_API_KEY = False` strips `ANTHROPIC_API_KEY` from Claude Code's environment so it uses the user's Claude login (the `.env` key would otherwise take precedence).
+
 ## Workspaces
 
 Workspaces are defined in `workspaces.json`. Each workspace is a named object with an optional `description` and an `items` array. Each item has a `type` (`url`, `vscode`, `file`, or `app`) and a `path`.
@@ -103,10 +134,17 @@ Edit them at `http://localhost:5151/workspaces`. Changes save instantly and hot-
 | `VOICE_NAME` | SAPI voice name fragment, e.g. `"Zira"` (empty = system default) |
 | `SPEECH_RATE` | TTS rate, -10 to 10 |
 | `WAKE_WORD` | Defaults to `"jarvis"` |
-| `WAKE_GRAMMAR` | Restrict Vosk to the wake word (less CPU, fewer false hits). Set `False` if detection gets unreliable |
+| `WAKE_GRAMMAR` / `WAKE_DECOYS` | Vosk listens only for the wake word plus sound-alike decoy words (default). Full-vocabulary mode (`False`) falls behind real time in loud rooms; it's capped to 4 s utterances and a 1 s backlog guard skips ahead |
+| `SPEECH_OVER_NOISE` | How much louder than the room (median of the last 3 s) speech must be, over a 0.4 s window, for end-of-speech detection. Raise if recordings run on in noise, lower if quiet speech gets cut off |
+| `WHISPER_MODEL` | faster-whisper model (`base.en`). Transcription runs with no temperature fallback (noisy audio otherwise took 20-40 s) and strips echoes of the hint prompt (`audio._strip_prompt_echo`) |
 | `INPUT_DEVICE` | Mic name fragment to pin (e.g. `"AirPods"`); empty = follow the Windows default, switching automatically when it changes |
-| `FOLLOWUP_WINDOW` | Seconds to wait after the wake word for a one-breath command before saying "Yes sir" |
+| `FOLLOWUP_WINDOW` | Seconds to wait after the wake word for a one-breath command before saying "Yes sir" (0.9 — a natural pause after "Jarvis," is ~0.3 s) |
 | `MPV_EXE` / `ESRGAN_EXE` | Paths to optional external tools |
+| `USE_DESKTOP_APP` | Open the dashboard in the Electron app (`desktop/`) instead of a browser tab |
+| `CESIUM_ION_TOKEN` (`.env`) | Optional: 3-D terrain and holographic buildings on the Stage globe |
+| `CODE_PERMISSION_MODE` / `CODE_ALLOWED_TOOLS` | What background Claude Code may do without asking |
+| `CODE_MODEL` / `CODE_EFFORT` | Default Claude Code model and thinking effort (voice overrides per request) |
+| `CODE_USE_API_KEY` | `False` = Claude Code uses your Claude login, `True` = bills the `.env` API key |
 
 ## Background mode
 

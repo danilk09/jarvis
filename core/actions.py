@@ -4,15 +4,15 @@ that go into Claude's system prompt (see registry.py).
 """
 
 import os
-import re
 import subprocess
 import threading
 import time
 import webbrowser
 from urllib.parse import quote_plus
 
-from . import agent, audio, brain, config, files, media, music, state
-from .generate import generate_coding_skeleton, generate_file_content, summarize_for_speech
+from . import agent, audio, brain, config, files, media, music, stage, state
+from . import coding, stage_actions  # noqa: F401  (register the Claude Code and Stage actions)
+from .generate import generate_file_content, summarize_for_speech
 from .registry import ACTIONS, action
 from .tts import speak
 from .web import brave_search, synthesize_search_answer
@@ -126,11 +126,13 @@ def _bookmark(a, chain):
 # ── Seeing and reading ────────────────────────────────────────────────────────
 @action("screenshot",
         schema='{"type":"screenshot","prompt":"<what to analyze or do with the screenshot>"}',
-        rules=['"screenshot","take a screenshot","capture screen","look at my screen","what\'s on my screen","look at this" → type "screenshot"; put intent in "prompt". Screenshots can be chained with generate_file or coding_mode to use the image as context.'])
+        rules=['"screenshot","take a screenshot","capture screen","look at my screen","what\'s on my screen","look at this" → type "screenshot"; put intent in "prompt". Screenshots can be chained with generate_file or code to use the image as context.'])
 def _screenshot(a, chain):
     speak("Taking a screenshot.")
     result = media.take_screenshot(a.get("prompt", ""))
     chain["image_context"] = result
+    if media.last_screenshot:
+        stage.add_image(media.last_screenshot, caption=result, title="Screenshot")
     print(f"\n  ── Screenshot Analysis ──────────────\n  {result}\n  ────────────────────────────────────\n")
     speak(result)
     return result
@@ -138,7 +140,7 @@ def _screenshot(a, chain):
 
 @action("input_folder",
         schema='{"type":"input_folder","prompt":"<what to do with the files in the input folder>"}',
-        rules=['"process input folder","check input folder","analyze input","look at input files","enhance image","what\'s in the input folder","summarize input" → type "input_folder"; put intent in "prompt". Can be chained with generate_file or coding_mode to use folder contents as context. Only for reading files dropped into jarvis_input — renaming/moving/deleting files anywhere is "agent".'])
+        rules=['"process input folder","check input folder","analyze input","look at input files","enhance image","what\'s in the input folder","summarize input" → type "input_folder"; put intent in "prompt". Can be chained with generate_file or code to use folder contents as context. Only for reading files dropped into jarvis_input — renaming/moving/deleting files anywhere is "agent".'])
 def _input_folder(a, chain):
     speak("Processing input folder.")
     output = media.process_input_folder(a.get("prompt", ""))
@@ -189,48 +191,13 @@ def _generate_file(a, chain):
         speak("Note: no Brave API key, so current data unavailable.")
     content = generate_file_content(a.get("prompt", ""), filename, context)
     os.makedirs(config.JARVIS_OUTPUT_DIR, exist_ok=True)
-    with open(os.path.join(config.JARVIS_OUTPUT_DIR, filename), "w", encoding="utf-8") as f:
+    path = os.path.join(config.JARVIS_OUTPUT_DIR, filename)
+    with open(path, "w", encoding="utf-8") as f:
         f.write(content)
     state.push_file(filename, content)
+    stage.open_file(path)
     speak(summarize_for_speech(content, filename))
     return f"Generated {filename}"
-
-
-@action("coding_mode",
-        schema='{"type":"coding_mode","prompt":"<full description of the project/feature to scaffold>"}',
-        rules=['"code [thing]", "coding mode [thing]", "build a project for [thing]", "start a project", "scaffold [thing]" → type "coding_mode"; put the full description in "prompt"'])
-def _coding_mode(a, chain):
-    prompt_text = a.get("prompt", "")
-    speak("Starting coding mode. Generating project skeleton.")
-    context = _chain_context(chain)
-    if config.BRAVE_API_KEY:
-        results = brave_search(prompt_text[:200], count=4)
-        if results:
-            web = "\n".join(f"{r['title']}: {r['description']}" for r in results)
-            context = web + ("\n\n" + context if context else "")
-    skeleton = generate_coding_skeleton(prompt_text, context)
-    if not skeleton:
-        speak("Skeleton generation failed. Try again.")
-        return "Coding mode: generation failed"
-    project_name = re.sub(r"[^\w-]", "_", skeleton.get("project_name", "project")).strip("_") or "project"
-    project_dir  = os.path.join(config.CODING_DIR, project_name)
-    os.makedirs(project_dir, exist_ok=True)
-    for f in skeleton.get("files", []):
-        rel = f.get("path", "").lstrip("/\\")
-        if not rel:
-            continue
-        full_path = os.path.normpath(os.path.join(project_dir, rel))
-        if os.path.commonpath([full_path, project_dir]) != project_dir:
-            print(f"  Skipping unsafe path from skeleton: {rel}")
-            continue
-        os.makedirs(os.path.dirname(full_path), exist_ok=True)
-        with open(full_path, "w", encoding="utf-8") as fh:
-            fh.write(f.get("content", ""))
-        state.push_file(rel, f.get("content", ""))
-    subprocess.Popen(["code", project_dir], shell=True)
-    subprocess.Popen(f'start "Claude Code – {project_name}" cmd /k "cd /d "{project_dir}" && claude"', shell=True)
-    speak(skeleton.get("summary", f"Project {project_name} is ready."))
-    return f"Coding mode: {project_name} at {project_dir}"
 
 
 # ── Music ─────────────────────────────────────────────────────────────────────
@@ -322,7 +289,7 @@ def _timer(a, chain):
 
 @action("agent",
         schema='{"type":"agent","task":"<complete description of what to do>"}',
-        rules=['Anything to DO on the computer that no other action covers — change a setting, run a command, move/rename/organise files, check system info, changes to an existing code project → type "agent" with the full task in "task". Never reply that you cannot do something on the PC; use "agent" instead. Prefer a specific action when one fits, and never use "agent" for questions you can answer in chat.'])
+        rules=['Anything to DO on the computer that no other action covers — change a setting, run a command, move/rename/organise files, check system info → type "agent" with the full task in "task". (Coding projects use type "code".) Never reply that you cannot do something on the PC; use "agent" instead. Prefer a specific action when one fits, and never use "agent" for questions you can answer in chat.'])
 def _agent(a, chain):
     speak("On it.")
     try:

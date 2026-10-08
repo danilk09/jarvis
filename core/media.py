@@ -13,7 +13,7 @@ import time
 
 from PIL import Image, ImageEnhance, ImageGrab
 
-from . import brain, config, state
+from . import brain, config, stage, state
 from .tts import speak
 from .web import fetch_text
 
@@ -22,6 +22,8 @@ CODE_EXTS  = {".py", ".js", ".ts", ".jsx", ".tsx", ".java", ".c", ".cpp",
               ".h", ".rs", ".go", ".rb", ".php", ".sql"}
 TEXT_EXTS  = {".txt", ".md", ".csv", ".json", ".xml", ".yaml", ".yml",
               ".toml", ".ini", ".cfg", ".sh", ".bat", ".html", ".css"}
+last_screenshot = ""     # path of the most recent screenshot, for the Stage
+
 _ENHANCE_WORDS = ["enhance", "improve", "fix", "sharpen", "brighten",
                   "denoise", "clean up", "make better", "increase contrast", "upscale"]
 
@@ -74,10 +76,12 @@ def analyze_image(image_path, prompt):
 
 def take_screenshot(prompt):
     """Capture the full screen, save it to jarvis_output/, and analyze it."""
+    global last_screenshot
     os.makedirs(config.JARVIS_OUTPUT_DIR, exist_ok=True)
     path = os.path.join(config.JARVIS_OUTPUT_DIR, f"screenshot_{time.strftime('%Y%m%d_%H%M%S')}.png")
     try:
         ImageGrab.grab().save(path)
+        last_screenshot = path
         print(f"  Screenshot saved: {path}")
     except Exception as e:
         return f"Screenshot failed: {e}"
@@ -111,7 +115,7 @@ def _pillow_enhance(image_path, prompt):
         os.makedirs(config.JARVIS_OUTPUT_DIR, exist_ok=True)
         out_path = os.path.join(config.JARVIS_OUTPUT_DIR, f"enhanced_{time.strftime('%Y%m%d_%H%M%S')}.png")
         img.save(out_path)
-        os.startfile(out_path)
+        stage.add_image(out_path, params.get("description", ""), title="Enhanced image")
         return params.get("description", "Enhancement applied.")
     except Exception as e:
         return f"Pillow enhancement failed: {e}"
@@ -130,7 +134,7 @@ def enhance_image(image_path, prompt):
                 [config.ESRGAN_EXE, "-i", image_path, "-o", out_path, "-s", "4", "-n", "realesrgan-x4plus"],
                 check=True, timeout=120,
             )
-            os.startfile(out_path)
+            stage.add_image(out_path, "Upscaled 4x with Real-ESRGAN", title="Upscaled image")
             result = "Image upscaled 4x and saved to jarvis_output."
         except subprocess.TimeoutExpired:
             result = "Upscaling timed out. Try a smaller image."
@@ -161,13 +165,13 @@ def read_pdf(path):
 
 
 def archive_input_file(src_path):
-    """Move a processed input file into this session's archive folder."""
+    """Move a processed input file into this session's archive folder. Returns its new path."""
     if not state.session_archive:
         try:
             os.remove(src_path)
         except Exception:
             pass
-        return
+        return None
     os.makedirs(state.session_archive, exist_ok=True)
     filename = os.path.basename(src_path)
     dest = os.path.join(state.session_archive, filename)
@@ -176,8 +180,10 @@ def archive_input_file(src_path):
         dest = os.path.join(state.session_archive, f"{base}_{int(time.time())}{ext}")
     try:
         shutil.move(src_path, dest)
+        return dest
     except Exception as e:
         print(f"  Could not archive {filename}: {e}")
+        return src_path
 
 
 def _read_text(path):
@@ -199,6 +205,7 @@ def process_input_folder(prompt):
 
     wants_enhancement = any(kw in (prompt or "").lower() for kw in _ENHANCE_WORDS)
     context_parts, archived, bg_threads = [], [], []
+    captions = {}    # image path -> analysis, shown on the Stage once archived
 
     for fpath in all_items:
         fname = os.path.basename(fpath)
@@ -212,7 +219,8 @@ def process_input_folder(prompt):
                     bg_threads.append(threading.Thread(target=_bg, daemon=True))
                     context_parts.append(f"[Image: {fname}] (enhancement queued in background)")
                 else:
-                    context_parts.append(f"[Image: {fname}] {analyze_image(fpath, prompt or 'Describe this image.')}")
+                    captions[fpath] = analyze_image(fpath, prompt or 'Describe this image.')
+                    context_parts.append(f"[Image: {fname}] {captions[fpath]}")
                     archived.append(fpath)
             elif ext == ".txt":
                 raw  = _read_text(fpath).strip()
@@ -240,7 +248,9 @@ def process_input_folder(prompt):
     for t in bg_threads:
         t.start()
     for fpath in archived:
-        archive_input_file(fpath)
+        new_path = archive_input_file(fpath)
+        if fpath in captions and new_path:
+            stage.add_image(new_path, captions[fpath])
 
     all_context = "\n\n".join(context_parts)
     if not all_context.strip():

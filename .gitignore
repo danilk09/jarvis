@@ -5,4 +5,8 @@ jarvis_output
 *.crt
 *.key
 logs
+stage_state.json
+coding_state.json
+coding_state.json.tmp
+stage_state.json.tmp
 __pycache__/

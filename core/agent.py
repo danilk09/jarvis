@@ -10,7 +10,6 @@ runs after a spoken "yes".
 import os
 import re
 import subprocess
-import time
 import webbrowser
 
 from . import audio, config
@@ -24,7 +23,7 @@ _SYSTEM = f"""You are JARVIS, a voice assistant that controls the user's Windows
 Complete the task with the tools, in as few steps as possible.
 - Shell is Windows PowerShell 5.1: no "&&", no "??". User home: {_HOME}. Desktop: {os.path.join(_HOME, "OneDrive", "Desktop")}.
 - Look before you change things (list/read first) and never guess paths.
-- For writing or fixing code in a project, use delegate_to_claude_code instead of editing code yourself.
+- For writing or fixing code in a project, use delegate_to_claude_code instead of editing code yourself. It runs in the background and reports back by itself, so finish right after starting it.
 - If the user declines a confirmation, stop and say so.
 - When done, reply with 1-2 plain spoken sentences describing the outcome. No markdown, no lists."""
 
@@ -79,8 +78,8 @@ TOOLS = [
     },
     {
         "name": "delegate_to_claude_code",
-        "description": "Hand a coding task to Claude Code (an AI coding agent) in a new terminal window, "
-                       "working in the given project directory.",
+        "description": "Hand a coding task to Claude Code (an AI coding agent), working in the given project "
+                       "directory. It runs in the background; Jarvis announces the result when it finishes.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -150,22 +149,15 @@ def _write_file(path, content):
 
 
 def _delegate(task, directory=""):
-    directory = os.path.expanduser(directory) if directory else config.CODING_DIR
-    if not os.path.isdir(directory):
-        return f"Directory not found: {directory}", True
-    # Pass the task through a file so quotes/newlines survive the shell untouched
-    task_dir = os.path.join(config.JARVIS_OUTPUT_DIR, "claude_tasks")
-    os.makedirs(task_dir, exist_ok=True)
-    task_file = os.path.join(task_dir, f"task_{time.strftime('%Y%m%d_%H%M%S')}.md")
-    with open(task_file, "w", encoding="utf-8") as f:
-        f.write(task)
-    q = lambda p: p.replace("'", "''")
-    subprocess.Popen(
-        ["powershell", "-NoExit", "-Command",
-         f"Set-Location -LiteralPath '{q(directory)}'; claude (Get-Content -Raw -LiteralPath '{q(task_file)}')"],
-        creationflags=subprocess.CREATE_NEW_CONSOLE,
-    )
-    return f"Claude Code started in {directory}.", False
+    """Background Claude Code run via core/coding.py (progress on the Stage, spoken result)."""
+    from . import coding
+    if directory:
+        if not coding.use_path(directory):
+            return f"Directory not found: {directory}", True
+    elif not coding.current()[0]:
+        return "No current coding project. Ask the user which project, or start one with the code action.", True
+    status = coding.start(task, quiet=False)
+    return f"{status}. It reports back by itself when done.", status.startswith(("Busy", "Claude Code not", "No current"))
 
 
 def _run_tool(name, args):

@@ -15,13 +15,15 @@ import tempfile
 import threading
 import time
 
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, Response, jsonify, request, send_file, send_from_directory
 from flask_cors import CORS
 
-from . import audio, brain, config, music, state
+from . import audio, brain, config, music, stage, state
 from .media import guess_file_type
 
-app = Flask(__name__, static_folder=config.DASH_BUILD, static_url_path="")
+# No built-in static route: it would claim every path and 404 client-side routes such as
+# /stage on reload. _dashboard() below serves build files and falls back to index.html.
+app = Flask(__name__, static_folder=None)
 CORS(app)
 
 phone_commands = queue.Queue()   # transcribed phone commands for the main loop
@@ -122,6 +124,153 @@ def _speech(speech_id):
     with state.dash_lock:
         env = state.speech_envelopes.get(speech_id)
     return (jsonify(env), 200) if env else (jsonify({"error": "unknown speech id"}), 404)
+
+
+# ── Stage ─────────────────────────────────────────────────────────────────────
+@app.route("/api/stage/events")
+def _stage_events():
+    """Server-Sent Events: the full Stage state on every change, plus navigate/extract requests."""
+    q = stage.subscribe(desktop=request.args.get("client") == "desktop")
+
+    def stream():
+        try:
+            yield f"data: {json.dumps({'type': 'state', 'state': stage.snapshot()})}\n\n"
+            while True:
+                try:
+                    event = q.get(timeout=15)
+                except queue.Empty:
+                    yield ": keep-alive\n\n"
+                    continue
+                yield f"data: {json.dumps(event)}\n\n"
+        finally:
+            stage.unsubscribe(q)
+
+    return Response(stream(), mimetype="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+def _body():
+    return request.get_json(force=True, silent=True) or {}
+
+
+@app.route("/api/stage/layout", methods=["POST"])
+def _stage_layout():
+    stage.set_client_layout(_body().get("layout", []))
+    return jsonify({"ok": True})
+
+
+@app.route("/api/stage/arrange", methods=["POST"])
+def _stage_arrange():
+    b = _body()
+    return jsonify({"ok": stage.arrange(b.get("mode", "auto"), b.get("panel"))})
+
+
+@app.route("/api/stage/panel/<pid>/close", methods=["POST"])
+def _stage_close(pid):
+    return jsonify({"ok": stage.close(pid)})
+
+
+@app.route("/api/stage/clear", methods=["POST"])
+def _stage_clear():
+    stage.clear()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/stage/route", methods=["POST"])
+def _stage_route():
+    stage.set_route(_body().get("to", ""))
+    return jsonify({"ok": True})
+
+
+@app.route("/api/stage/restore", methods=["POST"])
+def _stage_restore():
+    return jsonify({"restored": stage.restore_removed()})
+
+
+@app.route("/api/stage/highlight", methods=["POST"])
+def _stage_highlight():
+    b = _body()
+    return jsonify({"ok": bool(stage.highlight(b.get("panel"), b.get("target") or {}, b.get("label", "")))})
+
+
+@app.route("/api/stage/highlights/clear", methods=["POST"])
+def _stage_clear_highlights():
+    stage.clear_highlights()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/stage/media/<pid>")
+def _stage_media(pid):
+    path = stage.private(pid).get("path")       # only files Jarvis itself put on the Stage
+    if not path or not os.path.isfile(path):
+        return jsonify({"error": "not found"}), 404
+    return send_file(path, max_age=0)
+
+
+@app.route("/api/stage/file/<pid>", methods=["POST"])
+def _stage_file(pid):
+    b = _body()
+    if "decision" in b:
+        return jsonify({"ok": stage.resolve_proposal(pid, b["decision"] == "accept")})
+    if not isinstance(b.get("content"), str):
+        return jsonify({"error": "content required"}), 400
+    ok = stage.save_file(pid, b["content"])
+    if ok:
+        state.update_file(stage.get(pid)["title"], b["content"])
+    return jsonify({"ok": ok})
+
+
+@app.route("/api/stage/page/<pid>", methods=["POST"])
+def _stage_page(pid):
+    """The desktop app's live page navigated (link click, back/forward)."""
+    b = _body()
+    p = stage.get(pid)
+    if p and b.get("url") and b["url"] != p["data"].get("url"):
+        stage.private(pid).pop("paragraphs", None)     # text belongs to the old page
+        stage.update(pid, title=b.get("title") or None, url=b["url"], reader=None)
+    elif p and b.get("title") and b["title"] != p["title"]:
+        stage.update(pid, title=b["title"])
+    return jsonify({"ok": bool(p)})
+
+
+@app.route("/api/stage/extract/<rid>", methods=["POST"])
+def _stage_extract(rid):
+    stage.deliver_extract(rid, _body())
+    return jsonify({"ok": True})
+
+
+@app.route("/api/stage/config")
+def _stage_config():
+    return jsonify({"cesiumToken": config.CESIUM_ION_TOKEN})
+
+
+# ── Claude Code ───────────────────────────────────────────────────────────────
+@app.route("/api/coding/<command>", methods=["POST"])
+def _coding(command):
+    from . import coding
+    if command == "stop":
+        return jsonify({"ok": coding.stop()})
+    if command == "approve":
+        threading.Thread(target=coding.approve, daemon=True).start()
+        return jsonify({"ok": True})
+    if command == "vscode":
+        return jsonify({"ok": coding.open_vscode()})
+    if command == "terminal":
+        return jsonify({"ok": coding.open_terminal()})
+    if command == "file":
+        # Open a file Claude Code touched in the Stage editor — only inside a known project folder
+        path = os.path.abspath(_body().get("path", ""))
+        roots = [os.path.abspath(p["path"]) for p in coding._state["projects"].values()] + [config.CODING_DIR]
+        def inside(root):
+            try:
+                return os.path.commonpath([path, root]) == root
+            except ValueError:
+                return False
+        if os.path.isfile(path) and any(inside(r) for r in roots):
+            stage.open_file(path)
+            return jsonify({"ok": True})
+        return jsonify({"error": "not a project file"}), 400
+    return jsonify({"error": "unknown command"}), 404
 
 
 @app.route("/api/activate", methods=["POST"])

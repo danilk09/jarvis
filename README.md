@@ -85,7 +85,7 @@ python jarvis.py
 ```
 anthropic python-dotenv Pillow
 sounddevice numpy faster-whisper vosk
-requests flask flask-cors webrtcvad "yt-dlp[default]" pycaw comtypes pypdf
+requests flask flask-cors webrtcvad "yt-dlp[default]" pycaw comtypes pypdf trafilatura
 ```
 
 Optional: `realesrgan-ncnn-vulkan.exe` for image upscaling (update `ESRGAN_EXE` in `core/config.py`).

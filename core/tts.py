@@ -85,13 +85,18 @@ def _worker():
     meter = _make_voice()     # silent twin that renders to memory for the orb's envelope
     _ready.set()
     while True:
-        text, update_state = _queue.get()
+        text, update_state, on_start = _queue.get()
         try:
             if suppressed.is_set():   # interrupted between queueing and playback
                 continue
             _interrupt.clear()
             if update_state:
                 push_state("speaking")
+            if on_start:
+                try:
+                    on_start()
+                except Exception as e:
+                    print(f"  on_start callback error: {e}")
             voice.Speak(text, _ASYNC | _IS_NOT_XML)
             started = time.time()
             if update_state:
@@ -125,7 +130,9 @@ threading.Thread(target=_worker, daemon=True, name="tts").start()
 _ready.wait(timeout=10)
 
 
-def speak(text, update_state=True):
+def speak(text, update_state=True, on_start=None):
+    """Queue text to be spoken. on_start runs the moment this sentence starts playing
+    (the Stage uses it to highlight what Jarvis is talking about)."""
     if not text:
         return
     if suppressed.is_set():
@@ -134,7 +141,7 @@ def speak(text, update_state=True):
     print(f"  JARVIS: {text}")
     if update_state:
         push_log("jarvis", str(text))
-    _queue.put((str(text), update_state))
+    _queue.put((str(text), update_state, on_start))
 
 
 def stop_tts():

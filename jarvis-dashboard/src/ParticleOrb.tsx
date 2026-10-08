@@ -31,6 +31,10 @@ interface Props {
   beat?: number;
   speech?: SpeechEnvelope | null;
   onActivate?: () => void;
+  /** Small toolbar orb: fewer particles, no HUD arcs. */
+  compact?: boolean;
+  /** Stop drawing (e.g. while its page is hidden). */
+  paused?: boolean;
 }
 
 const NB          = 16;     // spectral bands
@@ -115,7 +119,7 @@ function bandAt(lvl: Float32Array, u: number) {
   return lvl[i] + (lvl[i + 1] - lvl[i]) * (f - i);
 }
 
-export default function ParticleOrb({ state, beat = 0, speech = null, onActivate }: Props) {
+export default function ParticleOrb({ state, beat = 0, speech = null, onActivate, compact = false, paused = false }: Props) {
   const wrapRef     = useRef<HTMLDivElement>(null);
   const canvasRef   = useRef<HTMLCanvasElement>(null);
   const stateRef    = useRef(state);
@@ -125,10 +129,13 @@ export default function ParticleOrb({ state, beat = 0, speech = null, onActivate
   const prevBeatRef = useRef(beat);
   const pointer     = useRef({ x: 0, y: 0, inside: false });
   const shocks      = useRef<Shock[]>([]);
+  const pausedRef   = useRef(paused);
+  const compactRef  = useRef(compact);
 
   useEffect(() => { stateRef.current = state; }, [state]);
   useEffect(() => { speechRef.current = speech; }, [speech]);
   useEffect(() => { activateRef.current = onActivate; }, [onActivate]);
+  useEffect(() => { pausedRef.current = paused; }, [paused]);
 
   useEffect(() => {
     const delta = Math.min(beat - prevBeatRef.current, 4);
@@ -145,7 +152,7 @@ export default function ParticleOrb({ state, beat = 0, speech = null, onActivate
 
     const resize = () => {
       const r = wrap.getBoundingClientRect();
-      size = Math.max(160, Math.min(r.width, r.height, 720));
+      size = Math.max(compactRef.current ? 40 : 160, Math.min(r.width, r.height, 720));
       dpr  = Math.min(window.devicePixelRatio || 1, 2);
       canvas.style.width = canvas.style.height = `${size}px`;
       canvas.width = canvas.height = Math.round(size * dpr);
@@ -154,7 +161,7 @@ export default function ParticleOrb({ state, beat = 0, speech = null, onActivate
     const ro = new ResizeObserver(resize);
     ro.observe(wrap);
 
-    const TOTAL = 1_500;
+    const TOTAL = compactRef.current ? 520 : 1_500;
     const pts: P[] = [];
     for (let i = 0; i < TOTAL; i++) {
       const layer: 0 | 1 = i < TOTAL * 0.72 ? 0 : 1;
@@ -197,6 +204,7 @@ export default function ParticleOrb({ state, beat = 0, speech = null, onActivate
       raf = requestAnimationFrame(frame);
       const dt = Math.min((now - prev) / 1000, 0.05);
       prev = now;
+      if (pausedRef.current) return;
       t += dt;
 
       const S  = size / REF;
@@ -384,7 +392,7 @@ export default function ParticleOrb({ state, beat = 0, speech = null, onActivate
       ctx.lineWidth = 1;
       ctx.strokeStyle = `rgb(${cr},${cg},${cb})`;
       const hudR = (R0 + 104) * S;
-      for (let i = 0; i < 3; i++) {
+      for (let i = 0; i < (compactRef.current ? 0 : 3); i++) {
         const a0 = ringRot * (i % 2 ? -1 : 1.4) + i * 2.1;
         ctx.globalAlpha = .16 + e * .14 + hover * .1;
         ctx.beginPath(); ctx.arc(CX, CY, hudR + i * 7 * S, a0, a0 + 0.9 + i * 0.35); ctx.stroke();

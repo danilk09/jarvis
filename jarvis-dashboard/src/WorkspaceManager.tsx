@@ -1,5 +1,4 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { Link } from 'react-router-dom';
 import './WorkspaceManager.css';
 
 type ItemType = 'url' | 'vscode' | 'file' | 'app';
@@ -108,15 +107,13 @@ export default function WorkspaceManager() {
 
   return (
     <div className="wm-shell">
-      <header className="wm-header">
-        <div className="wm-logo">J</div>
-        <h1 className="wm-title">JARVIS <span>Workspace Manager</span></h1>
+      <div className="wm-header">
+        <h1 className="wm-title">Workspaces <span>Say “Jarvis, open [workspace]” to launch one</span></h1>
         <nav className="wm-header-nav">
-          <Link to="/" className="wm-btn wm-btn-ghost">← Dashboard</Link>
           <button className="wm-btn wm-btn-ghost" onClick={() => copyJSON(data)}>⬇ Copy JSON</button>
           <button className="wm-btn wm-btn-primary" onClick={() => persist(data)}>✓ Save</button>
         </nav>
-      </header>
+      </div>
 
       <div className="wm-layout">
         <aside className="wm-sidebar">

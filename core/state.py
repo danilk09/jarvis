@@ -27,6 +27,9 @@ workspaces: dict = {}
 # Set at startup to jarvis_input/archive/session_YYYYMMDD_HHMMSS/
 session_archive = ""
 
+# Dashboard URL (http://localhost:5151, or the Tailscale HTTPS address)
+dash_url = ""
+
 
 def push_state(state, transcript=""):
     with dash_lock:
@@ -48,6 +51,15 @@ def push_file(name, content):
              "time": time.strftime("%H:%M:%S"), "size": f"{len(content):,} chars"}
     with dash_lock:
         dash_state["files"].append(entry)
+
+
+def update_file(name, content):
+    """Keep the dashboard's file list in sync with edits saved from the Stage."""
+    with dash_lock:
+        for entry in reversed(dash_state["files"]):
+            if entry["name"] == name:
+                entry.update(content=content, size=f"{len(content):,} chars")
+                break
 
 
 def speech_beat():

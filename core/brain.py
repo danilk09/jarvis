@@ -6,7 +6,7 @@ the single JSON object it returns ({"mode": "action"|"chat"|"none", ...}).
 import json
 import threading
 
-from . import config, registry
+from . import config, registry, stage
 
 CHAT_HISTORY: list = []   # user/assistant turns only; the system prompt is kept separately
 _system_prompt = ""
@@ -94,11 +94,25 @@ def _parse(text):
     return None
 
 
+parse_json = _parse
+
+# Extra context for the system prompt, computed per call (e.g. the current coding project)
+context_providers: list = []
+
+
+def _stage_context():
+    panels = stage.describe()
+    if not panels:
+        return ""
+    return ("\n\nSTAGE — panels on screen now (refer to them by number, kind or title in "
+            "\"panel\" fields):\n" + panels)
+
+
 def ask_claude(command, workspaces):
     global _ai_error_count
     with _lock:
         messages = CHAT_HISTORY + [{"role": "user", "content": command}]
-        system   = _system_prompt
+        system   = _system_prompt + _stage_context() + "".join(p() for p in context_providers)
     try:
         response = config.client.messages.create(
             model=config.MODEL,

@@ -19,9 +19,8 @@ import os
 import queue
 import threading
 import time
-import webbrowser
 
-from core import actions, audio, brain, files, music, router, server, state
+from core import actions, audio, brain, coding, desktop, files, music, router, server, stage, state
 from core.tts import speak, stop_tts, suppressed, wait_tts
 
 # Dismissals and filler that never need the AI
@@ -58,10 +57,16 @@ def _startup():
     dash_url = (f"https://{ts_fqdn}:{config.PORT}" if server.tls["cert"]
                 else f"http://localhost:{config.PORT}")
 
+    state.dash_url = dash_url
+    restored = stage.load(config.STAGE_STATE_FILE)   # pick up where the last run left off
+    if restored:
+        print(f"  Stage: restored {restored} panel{'s' if restored != 1 else ''} from last time")
+    coding.init()                                     # Claude Code projects + preferences file
+    stage.open_dashboard = lambda: desktop.open_dashboard(dash_url)   # Stage content with no window open
     server.start()
     if not config.BACKGROUND_MODE:
-        time.sleep(0.6)   # give Flask a moment to bind before opening the browser
-        webbrowser.open(dash_url)
+        time.sleep(0.6)   # give Flask a moment to bind before opening the window
+        desktop.open_dashboard(dash_url)
 
     # Indexes build in the background so startup isn't slow
     for build in (files.build_file_index, files.build_bookmark_index, files.build_app_index):
@@ -167,6 +172,7 @@ def main():
         except KeyboardInterrupt:
             speak("Shutting down. Goodbye.")
             music.stop()
+            stage.flush()
             wait_tts()
             print("\n  JARVIS shutting down. Goodbye.")
             break

@@ -31,15 +31,19 @@ except ImportError:
 vosk.SetLogLevel(-1)
 
 print("  Loading Whisper model (first run may take a moment)...")
-WHISPER_MODEL = WhisperModel("base", device="cpu", compute_type="int8")
+WHISPER_MODEL = WhisperModel(config.WHISPER_MODEL, device="cpu", compute_type="int8")
 whisper_lock  = threading.Lock()
-_WHISPER_PROMPT = ("Jarvis, open Discord, search YouTube for, open workspace, never mind, stop, yes, no, "
-                   "cancel, open file, find files, take a screenshot, analyze image, what's on screen, "
-                   "play, pause, resume, stop")
+# Phrase order matters: noisy audio can make Whisper repeat this list, and _strip_prompt_echo
+# cuts runs of neighbouring phrases, so phrases you'd say together must not be neighbours.
+_WHISPER_PROMPT = ("Jarvis, open Discord, search YouTube for, open workspace, never mind, take a screenshot, "
+                   "find files, yes, analyze image, cancel, what's on screen, open file, play, no, pause, "
+                   "resume, stop")
 
 FRAMES_PER_SEC = config.SAMPLE_RATE // config.FRAME   # 50
 
-_ring       = collections.deque(maxlen=FRAMES_PER_SEC)   # last 1 s of audio
+_ring       = collections.deque(maxlen=FRAMES_PER_SEC * 2)   # last 2 s of audio (pre-roll)
+_levels     = collections.deque(maxlen=FRAMES_PER_SEC * 3)   # RMS of the last 3 s, for the noise floor
+_noise      = {"floor": 0.0}                                 # frozen when a recording starts
 _wake_q     = queue.Queue()
 _capture_q  = queue.Queue()
 _wake_on    = threading.Event()
@@ -62,6 +66,7 @@ def _callback(indata, frames, time_info, status):
     _last_frame = time.monotonic()
     data = bytes(indata)
     _ring.append(data)
+    _levels.append(float(np.sqrt(np.mean(np.frombuffer(data, dtype=np.int16).astype(np.float32) ** 2))))
     if _wake_on.is_set():
         _wake_q.put(data)
     if _capturing.is_set():
@@ -163,9 +168,14 @@ def disable_wake():
     _wake_on.clear()
 
 
+_MAX_UTTERANCE = 4.0       # seconds: full-vocabulary mode never ends an "utterance" in constant noise
+_MAX_BACKLOG   = FRAMES_PER_SEC     # 1 s of queued audio means detection has fallen behind
+
+
 def _wake_loop():
     model   = vosk.Model(config.VOSK_MODEL_DIR)
-    grammar = json.dumps([config.WAKE_WORD, "[unk]"]) if config.WAKE_GRAMMAR else None
+    words   = [config.WAKE_WORD] + [w for w in getattr(config, "WAKE_DECOYS", []) if w != config.WAKE_WORD]
+    grammar = json.dumps(words + ["[unk]"]) if config.WAKE_GRAMMAR else None
 
     def new_recognizer():
         if grammar:
@@ -173,24 +183,38 @@ def _wake_loop():
         return vosk.KaldiRecognizer(model, config.SAMPLE_RATE)
 
     rec = new_recognizer()
-    batch = []
+    batch, utt_frames = [], 0
     while True:
         data = _wake_q.get()
         if _wake_reset.is_set():
             _wake_reset.clear()
-            rec = new_recognizer()
+            rec, utt_frames = new_recognizer(), 0
             batch.clear()
+        if _wake_q.qsize() > _MAX_BACKLOG:
+            # Fallen behind real time: skip to now rather than drift ever further behind
+            # (the pre-roll would no longer contain the wake word anyway)
+            _drain(_wake_q)
+            rec, utt_frames = new_recognizer(), 0
+            batch.clear()
+            print("  Wake-word detector fell behind; skipped ahead.")
+            continue
         batch.append(data)
         if len(batch) < 5:           # feed Vosk 100 ms at a time
             continue
         chunk = b"".join(batch)
         batch.clear()
+        utt_frames += 5
         if rec.AcceptWaveform(chunk):
             text = json.loads(rec.Result()).get("text", "")
+            utt_frames = 0
         else:
             text = json.loads(rec.PartialResult()).get("partial", "")
-        if config.WAKE_WORD in text.lower() and _wake_on.is_set():
-            rec = new_recognizer()
+            # (grammar mode is cheap; resetting it mid-word would split "Jarvis" in two)
+            if not grammar and utt_frames > _MAX_UTTERANCE * FRAMES_PER_SEC:
+                text += " " + json.loads(rec.FinalResult()).get("text", "")
+                rec, utt_frames = new_recognizer(), 0
+        if config.WAKE_WORD in text.lower().split() and _wake_on.is_set():
+            rec, utt_frames = new_recognizer(), 0
             _fire_wake()
 
 
@@ -200,6 +224,7 @@ def _fire_wake():
     # command follows the wake word without a pause.
     _wake_info["preroll"] = list(_ring)
     _wake_info["time"] = time.monotonic()
+    _measure_noise()
     _drain(_capture_q)
     _capturing.set()
     for cb in on_wake:
@@ -226,13 +251,35 @@ def trigger_wake() -> bool:
 
 
 # ── Recording ─────────────────────────────────────────────────────────────────
+def _measure_noise():
+    """Background level right now: the median of the last 3 s (a short command barely moves it)."""
+    levels = list(_levels)
+    _noise["floor"] = float(np.median(levels)) if levels else 0.0
+    _loud.clear()
+
+
+_GATE_WINDOW = FRAMES_PER_SEC * 2 // 5      # judge loudness over the last 0.4 s...
+_GATE_MIN    = _GATE_WINDOW // 5            # ...speech if ≥20% of it is clearly above the room
+_loud        = collections.deque(maxlen=_GATE_WINDOW)
+
+
 def _is_speech(frame: bytes) -> bool:
+    """
+    Speech = the VAD says so AND enough of the last 0.4 s is clearly louder than the room's
+    background. In a loud place the VAD hears the background as speech too, so without the
+    level check a recording never ends until it times out. A single frame is too jumpy to
+    judge (crowd noise has loud moments too), hence the short window.
+    """
+    level = float(np.sqrt(np.mean(np.frombuffer(frame, dtype=np.int16).astype(np.float32) ** 2)))
+    _loud.append(level > max(_noise["floor"] * config.SPEECH_OVER_NOISE, 120.0))
+    if sum(_loud) < min(_GATE_MIN, len(_loud)):
+        return False
     if _vad is not None:
         try:
             return _vad.is_speech(frame, config.SAMPLE_RATE)
         except Exception:
             return True
-    return int(np.abs(np.frombuffer(frame, dtype=np.int16)).max()) > 650   # ~0.02 full scale
+    return True
 
 
 def _record(max_duration, silence_duration, preroll=(), onset_deadline=None, ignore_first=0):
@@ -277,6 +324,25 @@ def _record(max_duration, silence_duration, preroll=(), onset_deadline=None, ign
     return frames[speech_start:len(frames) - consec_silence]
 
 
+_PROMPT_PHRASES = [p.strip().lower() for p in _WHISPER_PROMPT.split(",") if p.strip()]
+
+
+def _strip_prompt_echo(text):
+    """
+    On noisy audio Whisper sometimes repeats its hint prompt ("…open Discord, search YouTube
+    for, open workspace, never mind"). Cut the text where two or more prompt phrases follow
+    each other in prompt order; a real "search YouTube for cats" is left alone.
+    """
+    parts = [p.strip() for p in text.split(",")]
+    for i in range(len(parts) - 1):
+        a, b = parts[i].lower().rstrip(".!?"), parts[i + 1].lower().rstrip(".!?")
+        # start at the 3rd phrase: "Jarvis, open Discord" is how real commands begin too
+        for k in range(2, len(_PROMPT_PHRASES) - 1):
+            if a == _PROMPT_PHRASES[k] and b and _PROMPT_PHRASES[k + 1].startswith(b):
+                return ", ".join(parts[:i]).strip(" ,")
+    return text
+
+
 def transcribe(audio) -> str:
     """Transcribe a file path or a list of int16 PCM frames."""
     if isinstance(audio, list):
@@ -286,17 +352,26 @@ def transcribe(audio) -> str:
             audio,
             language="en",
             beam_size=1,               # greedy decoding: noticeably faster on CPU for short commands
+            # No temperature fallback: on noisy audio Whisper otherwise re-decodes up to 6 times,
+            # running off into repeated text — 20-40 s per command in a loud room, in testing
+            temperature=0.0,
+            condition_on_previous_text=False,
+            no_repeat_ngram_size=3,
+            max_new_tokens=80,
             without_timestamps=True,
             vad_filter=True,
             initial_prompt=_WHISPER_PROMPT,
             vad_parameters=dict(min_silence_duration_ms=500, speech_pad_ms=200),
         )
         # segments is a lazy generator — decoding happens here, so keep it inside the lock
-        return " ".join(s.text.strip() for s in segments).strip()
+        return _strip_prompt_echo(" ".join(s.text.strip() for s in segments).strip())
 
 
-# The wake word near the start of a transcript (allowing up to two filler words before it)
-_WAKE_PREFIX = re.compile(rf"^\W*(?:\w+\W+){{0,2}}?{config.WAKE_WORD}\b\W*", re.IGNORECASE)
+# The wake word anywhere in the transcript (Whisper sometimes spells it differently). The
+# pre-roll can hold background chatter from before you said it, so anything before is dropped.
+_WAKE_VARIANTS = {"jarvis": r"j[ae]rv[ie]s|javis|jarvas|jarvi's|jervis|charvis"}
+_WAKE_ANYWHERE = re.compile(rf"\b(?:{_WAKE_VARIANTS.get(config.WAKE_WORD, re.escape(config.WAKE_WORD))})\b\W*",
+                            re.IGNORECASE)
 
 
 def capture_followup():
@@ -317,10 +392,11 @@ def capture_followup():
         return ""
     print("  Processing speech...")
     heard = transcribe(frames)
-    if not _WAKE_PREFIX.search(heard[:40]):
+    match = _WAKE_ANYWHERE.search(heard)
+    if not match:
         print(f'  Ignoring false wake (no "{config.WAKE_WORD}" in: "{heard[:80]}")')
         return None
-    text = _WAKE_PREFIX.sub("", heard).strip()
+    text = heard[match.end():].strip()
     if text:
         print(f'  Heard: "{text}"')
     return text
@@ -329,6 +405,7 @@ def capture_followup():
 def listen_for_command(max_duration=8, silence_duration=0.8) -> str:
     """Record one command (WebRTC VAD end-pointing) and transcribe it."""
     time.sleep(0.3)  # let TTS echo and room reverb die down before capture starts
+    _measure_noise()
     _drain(_capture_q)
     _capturing.set()
     print("  Speak your command...")

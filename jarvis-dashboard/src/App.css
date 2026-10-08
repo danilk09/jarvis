@@ -65,6 +65,19 @@
 .navLink:hover { color: var(--text-bright); }
 .navLinkActive { color: var(--bg); background: var(--green); }
 .navLinkActive:hover { color: var(--bg); }
+.navCount {
+  display: inline-block;
+  margin-left: 6px;
+  min-width: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  font-size: 9px;
+  line-height: 14px;
+  text-align: center;
+  background: rgba(61,255,143,0.16);
+  color: var(--green-bright);
+}
+.navLinkActive .navCount { background: rgba(2,8,6,0.25); color: var(--bg); }
 
 .headerRight { display: flex; align-items: center; justify-content: flex-end; gap: 16px; }
 
@@ -101,8 +114,8 @@
 }
 .resizeHandle:hover { background: var(--green-dim); }
 
-/* ── Stage (orb column) ───────────────────────────────────────────────── */
-.stage {
+/* ── Hero (orb column) ───────────────────────────────────────────────── */
+.hero {
   position: relative;
   display: flex;
   flex-direction: column;
@@ -113,12 +126,12 @@
   overflow: hidden;
   --state: var(--green-dim);
 }
-.stage-activated { --state: #0ac8a8; }
-.stage-thinking  { --state: #6c78f5; }
-.stage-speaking  { --state: var(--green); }
-.stage-error     { --state: var(--danger); }
+.hero-activated { --state: #0ac8a8; }
+.hero-thinking  { --state: #6c78f5; }
+.hero-speaking  { --state: var(--green); }
+.hero-error     { --state: var(--danger); }
 
-.stageGrid {
+.heroGrid {
   position: absolute;
   inset: 0;
   pointer-events: none;
@@ -172,9 +185,9 @@
   background: var(--state);
   box-shadow: 0 0 8px var(--state);
 }
-.stage-activated .stateChipDot,
-.stage-speaking  .stateChipDot,
-.stage-thinking  .stateChipDot { animation: pulse 0.7s ease-in-out infinite alternate; }
+.hero-activated .stateChipDot,
+.hero-speaking  .stateChipDot,
+.hero-thinking  .stateChipDot { animation: pulse 0.7s ease-in-out infinite alternate; }
 
 @keyframes pulse { from { opacity: 0.35; } to { opacity: 1; } }
 
@@ -392,7 +405,7 @@
   .header { height: auto; padding-top: 10px; row-gap: 8px; }
   .body { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto auto; }
   .resizeHandle { display: none; }
-  .stage { padding: 16px; }
+  .hero { padding: 16px; }
   .orbArea { flex: none; height: min(92vw, 56vh); }
   .sidebar { height: 70vh; border-top: 1px solid var(--border); }
 }
