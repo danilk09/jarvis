@@ -1,19 +1,19 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { Routes, Route, Link } from 'react-router-dom';
-import ParticleOrb from './ParticleOrb';
+import { Routes, Route, NavLink } from 'react-router-dom';
+import ParticleOrb, { OrbState, SpeechEnvelope } from './ParticleOrb';
 import FilePanel, { JarvisFile } from './FilePanel';
 import InputPanel from './InputPanel';
+import ActivityFeed, { LogEntry } from './ActivityFeed';
+import MusicCard, { MusicState } from './MusicCard';
 import WorkspaceManager from './WorkspaceManager';
 import './App.css';
 
-type OrbState = 'idle' | 'activated' | 'thinking' | 'speaking' | 'error';
-
 const PHRASES: Record<OrbState, string> = {
-  idle:      'Waiting for wake word',
-  activated: 'Listening...',
-  thinking:  'Processing command',
-  speaking:  'Speaking response',
-  error:     'Connection lost',
+  idle:      'Say “Jarvis” or click the orb',
+  activated: 'Listening…',
+  thinking:  'Working on it…',
+  speaking:  'Speaking',
+  error:     'Something went wrong',
 };
 
 const STATE_LABELS: Record<OrbState, string> = {
@@ -24,16 +24,16 @@ const STATE_LABELS: Record<OrbState, string> = {
   error:     'ERROR',
 };
 
-function useHexTicker() {
-  const [hex, setHex] = useState('0x3F8A2C');
-  useEffect(() => {
-    const id = setInterval(() => {
-      setHex('0x' + Math.floor(Math.random() * 0xFFFFFF).toString(16).toUpperCase().padStart(6,'0'));
-    }, 800);
-    return () => clearInterval(id);
-  }, []);
-  return hex;
-}
+type Tab = 'activity' | 'output' | 'input';
+
+// Shown when the backend isn't running (e.g. `npm start` on its own)
+const DEMO_CYCLE: { state: OrbState; duration: number }[] = [
+  { state: 'idle',      duration: 3200 },
+  { state: 'activated', duration: 1800 },
+  { state: 'thinking',  duration: 1400 },
+  { state: 'speaking',  duration: 3600 },
+  { state: 'idle',      duration: 2000 },
+];
 
 function useClock() {
   const [time, setTime] = useState('');
@@ -46,94 +46,69 @@ function useClock() {
   return time;
 }
 
-const DEMO_CYCLE: { state: OrbState; duration: number }[] = [
-  { state: 'idle',      duration: 3200 },
-  { state: 'activated', duration: 1800 },
-  { state: 'thinking',  duration: 1400 },
-  { state: 'speaking',  duration: 3000 },
-  { state: 'idle',      duration: 2000 },
-];
+function loadTab(): Tab {
+  try {
+    const t = localStorage.getItem('jarvis.tab');
+    if (t === 'activity' || t === 'output' || t === 'input') return t;
+  } catch { /* storage unavailable */ }
+  return 'activity';
+}
 
-function StatusDot({ active, pulsing, error, label }: {
-  active?: boolean; pulsing?: boolean; error?: boolean; label: string;
-}) {
-  const cls = ['dot', active && 'dotActive', pulsing && 'dotPulsing', error && 'dotError']
-    .filter(Boolean).join(' ');
+export function Header({ serverOk }: { serverOk: boolean }) {
+  const clock = useClock();
   return (
-    <div className="statusItem">
-      <div className={cls} />
-      <span className="mono dimmed">{label}</span>
-    </div>
+    <header className="header">
+      <div className="brand">
+        <span className="brandMark" />
+        <span className="brandName">J.A.R.V.I.S</span>
+      </div>
+      <nav className="nav">
+        <NavLink to="/" end className={({ isActive }) => `navLink ${isActive ? 'navLinkActive' : ''}`}>Dashboard</NavLink>
+        <NavLink to="/workspaces" className={({ isActive }) => `navLink ${isActive ? 'navLinkActive' : ''}`}>Workspaces</NavLink>
+      </nav>
+      <div className="headerRight">
+        <span className={`pill ${serverOk ? 'pillOk' : 'pillBad'}`}>
+          <span className="pillDot" />{serverOk ? 'ONLINE' : 'OFFLINE'}
+        </span>
+        <span className="clock">{clock}</span>
+      </div>
+    </header>
   );
 }
 
-type MusicState = {
-  playing: boolean;
-  paused: boolean;
-  currentSong: string;
-  history: string[];
-};
-
-function MusicPlayer({ music }: { music: MusicState }) {
-  const sendControl = async (command: string, extra?: object) => {
-    await fetch('/api/music/control', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ command, ...extra }),
-    });
-  };
-
-  const visible = music.playing || music.paused || !!music.currentSong;
-  if (!visible) return null;
-
-  return (
-    <div className="musicBar">
-      <button
-        className="musicBtn"
-        title="Previous"
-        disabled={music.history.length === 0}
-        onClick={() => sendControl('prev', { n: 1 })}
-      >⏮</button>
-      <button
-        className="musicBtn"
-        title={music.paused ? 'Resume' : 'Pause'}
-        onClick={() => sendControl('toggle_pause')}
-      >{music.paused ? '▶' : '⏸'}</button>
-      <button
-        className="musicBtn"
-        title="Skip"
-        onClick={() => sendControl('skip')}
-      >⏭</button>
-      <span className="musicBarTitle" title={music.currentSong}>
-        {music.currentSong || '—'}
-      </span>
-    </div>
-  );
-}
-
-export default function App() {
+function Dashboard() {
   const [orbState,   setOrbState]   = useState<OrbState>('idle');
-  const [transcript, setTranscript] = useState('—');
+  const [transcript, setTranscript] = useState('');
   const [files,      setFiles]      = useState<JarvisFile[]>([]);
+  const [log,        setLog]        = useState<LogEntry[]>([]);
   const [serverOk,   setServerOk]   = useState(false);
-  const [fileCount,  setFileCount]  = useState(0);
   const [speechBeat, setSpeechBeat] = useState(0);
-  const [panelWidth, setPanelWidth] = useState(360);
-  const [rightTab,   setRightTab]   = useState<'output' | 'input'>('output');
+  const [speech,     setSpeech]     = useState<SpeechEnvelope | null>(null);
+  const [panelWidth, setPanelWidth] = useState(380);
+  const [tab,        setTabState]   = useState<Tab>(loadTab);
+  const [busyHint,   setBusyHint]   = useState(false);
   const [music,      setMusic]      = useState<MusicState>({ playing: false, paused: false, currentSong: '', history: [] });
+  // Refs, not state: poll() is created once on mount, so state here would be a stale closure
+  const fileCount  = useRef(-1);
+  const speechId   = useRef(0);
+  const logSig     = useRef('');
+  const musicSig   = useRef('');
   const demoRef    = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const demoBeat   = useRef<ReturnType<typeof setInterval> | null>(null);
   const demoIdx    = useRef(0);
   const dragging   = useRef(false);
-  const clock      = useClock();
-  const hex        = useHexTicker();
+  const bodyRef    = useRef<HTMLDivElement>(null);
+
+  const setTab = (t: Tab) => {
+    setTabState(t);
+    try { localStorage.setItem('jarvis.tab', t); } catch { /* ignore */ }
+  };
 
   useEffect(() => {
     const onMove = (e: MouseEvent) => {
-      if (!dragging.current) return;
-      const shell = document.querySelector('.shell') as HTMLElement;
-      if (!shell) return;
-      const newWidth = shell.getBoundingClientRect().right - e.clientX;
-      setPanelWidth(Math.max(220, Math.min(1200, newWidth)));
+      if (!dragging.current || !bodyRef.current) return;
+      const w = bodyRef.current.getBoundingClientRect().right - e.clientX;
+      setPanelWidth(Math.max(280, Math.min(900, w)));
     };
     const onUp = () => { dragging.current = false; document.body.style.cursor = ''; };
     window.addEventListener('mousemove', onMove);
@@ -141,134 +116,152 @@ export default function App() {
     return () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); };
   }, []);
 
+  const stopDemo = () => {
+    if (demoRef.current)  { clearTimeout(demoRef.current);  demoRef.current = null; }
+    if (demoBeat.current) { clearInterval(demoBeat.current); demoBeat.current = null; }
+  };
+
   const runDemo = useCallback(() => {
     const step = DEMO_CYCLE[demoIdx.current % DEMO_CYCLE.length];
     setOrbState(step.state);
+    if (demoBeat.current) { clearInterval(demoBeat.current); demoBeat.current = null; }
+    if (step.state === 'speaking') demoBeat.current = setInterval(() => setSpeechBeat(b => b + 1), 260);
     demoIdx.current++;
     demoRef.current = setTimeout(runDemo, step.duration);
   }, []);
 
   useEffect(() => {
     let alive = true;
-    const demoTimer = setTimeout(() => { if (alive && !serverOk) runDemo(); }, 2000);
+    let online = false;
+    const demoTimer = setTimeout(() => { if (alive && !online) runDemo(); }, 2000);
+
+    async function loadSpeech(meta: { id: number; start: number; end: number | null; frame_ms: number }) {
+      try {
+        const res = await fetch(`/api/speech/${meta.id}`);
+        if (!res.ok) return;
+        const env = await res.json();
+        setSpeech({ id: meta.id, start: meta.start, end: meta.end, frameMs: meta.frame_ms,
+                    bands: env.bands, level: env.level });
+      } catch { /* the orb falls back to word beats */ }
+    }
 
     async function poll() {
       if (!alive) return;
       try {
-        const res  = await fetch('/status', { signal: AbortSignal.timeout(1800) });
+        const res  = await fetch(`/status?files=${fileCount.current}`, { signal: AbortSignal.timeout(1800) });
         const data = await res.json();
-        if (demoRef.current) { clearTimeout(demoRef.current); demoRef.current = null; }
+        if (!online) { online = true; stopDemo(); }
         setServerOk(true);
         setOrbState(data.state as OrbState);
         if (data.transcript) setTranscript(data.transcript);
         if (data.speech_beat !== undefined) setSpeechBeat(data.speech_beat);
-        if (data.files?.length !== fileCount) {
-          setFiles(data.files ?? []);
-          setFileCount(data.files?.length ?? 0);
+        if (data.files) {
+          setFiles(data.files);
+          fileCount.current = data.files.length;
         }
-        setMusic({
+        const sp = data.speech;
+        if (sp && sp.id !== speechId.current) {
+          speechId.current = sp.id;
+          loadSpeech(sp);
+        } else if (sp?.end) {
+          setSpeech(s => (s && s.id === sp.id && !s.end ? { ...s, end: sp.end } : s));
+        }
+        const lg: LogEntry[] = data.log ?? [];
+        const last = lg[lg.length - 1];
+        const sig = last ? `${lg.length}|${last.time}|${last.text}` : '';
+        if (sig !== logSig.current) { logSig.current = sig; setLog(lg); }
+        const m: MusicState = {
           playing:     !!data.music_playing,
           paused:      !!data.music_paused,
           currentSong: data.current_song ?? '',
           history:     data.song_history ?? [],
-        });
+        };
+        const mSig = JSON.stringify(m);
+        if (mSig !== musicSig.current) { musicSig.current = mSig; setMusic(m); }
       } catch {
         setServerOk(false);
       }
-      if (alive) setTimeout(poll, 300);
+      // Fast enough to pick up speech envelopes promptly; back off when the tab is hidden
+      if (alive) setTimeout(poll, document.hidden ? 3000 : 150);
     }
     poll();
 
     return () => {
       alive = false;
       clearTimeout(demoTimer);
-      if (demoRef.current) clearTimeout(demoRef.current);
+      stopDemo();
     };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [runDemo]);
+
+  const activate = useCallback(async () => {
+    try {
+      const res = await fetch('/api/activate', { method: 'POST' });
+      const data = await res.json();
+      if (!data.ok) {
+        setBusyHint(true);
+        setTimeout(() => setBusyHint(false), 1800);
+      }
+    } catch { /* offline */ }
   }, []);
 
-  const STATE_COLORS: Record<OrbState, string> = {
-    idle:      '#1a5e32',
-    activated: '#0abfa0',
-    thinking:  '#6060eb',
-    speaking:  '#14e65f',
-    error:     '#e63232',
-  };
-  const stateColor = STATE_COLORS[orbState];
+  const lastJarvis = [...log].reverse().find(m => m.role === 'jarvis');
+  const caption = orbState === 'speaking' && lastJarvis ? lastJarvis.text : transcript;
+  const captionLabel = orbState === 'speaking' && lastJarvis ? 'JARVIS' : 'LAST COMMAND';
 
-  const dashboard = (
+  return (
     <div className="shell">
-      <div className="scanlines" />
+      <Header serverOk={serverOk} />
 
-      <header className="header">
-        <div className="logo">
-          <span className="logoMain">JARVIS</span>
-          <span className="logoSub">ADVANCED AI INTERFACE</span>
-        </div>
-        <MusicPlayer music={music} />
-        <div className="statusBar">
-          <StatusDot active={serverOk} label="SERVER" />
-          <StatusDot
-            active={orbState === 'speaking' || orbState === 'activated'}
-            pulsing={orbState === 'speaking'}
-            error={orbState === 'error'}
-            label={STATE_LABELS[orbState]}
-          />
-          <StatusDot active label="AI ONLINE" />
-          <span className="mono dimmed">{hex}</span>
-          <span className="mono">{clock}</span>
-          <Link to="/workspaces" className="wsLink">Workspaces</Link>
-        </div>
-      </header>
-
-      <div className="body" style={{ gridTemplateColumns: `1fr 5px ${panelWidth}px` }}>
-        <main className="orbPanel">
-          <div className="cornerTL" />
-          <div className="cornerBR" />
-          <div className="gridLines" />
-
-          <div className="orbWrap">
-            <ParticleOrb state={orbState} beat={speechBeat} />
+      <div ref={bodyRef} className="body" style={{ ['--panel-w' as string]: `${panelWidth}px` }}>
+        <main className={`stage stage-${orbState}`}>
+          <div className="stageGrid" />
+          <div className="orbArea">
+            <ParticleOrb state={orbState} beat={speechBeat} speech={speech} onActivate={activate} />
           </div>
 
-          <div className="stateLabel" style={{ color: stateColor }}>
-            {STATE_LABELS[orbState]}
+          <div className="stateBlock">
+            <div className="stateChip"><span className="stateChipDot" />{STATE_LABELS[orbState]}</div>
+            <div className="statePhrase">{busyHint ? 'Busy — try again in a moment' : PHRASES[orbState]}</div>
           </div>
-          <div className="statePhrase">{PHRASES[orbState]}</div>
 
-          <div className="transcriptBox">
-            <div className="transcriptLabel">LAST COMMAND</div>
-            <div className="transcriptText">{transcript}</div>
+          <div className="caption">
+            <div className="captionLabel">{captionLabel}</div>
+            <div className="captionText">{caption || '—'}</div>
           </div>
+
+          <MusicCard music={music} />
         </main>
 
         <div
           className="resizeHandle"
           onMouseDown={() => { dragging.current = true; document.body.style.cursor = 'col-resize'; }}
         />
-        <div className="rightPanel">
-          <div className="panelTabs">
-            <button
-              className={`panelTab ${rightTab === 'output' ? 'panelTabActive' : ''}`}
-              onClick={() => setRightTab('output')}
-            >OUTPUT</button>
-            <button
-              className={`panelTab ${rightTab === 'input' ? 'panelTabActive' : ''}`}
-              onClick={() => setRightTab('input')}
-            >INPUT</button>
+
+        <aside className="sidebar">
+          <div className="tabs" role="tablist">
+            {([['activity', 'ACTIVITY', log.length], ['output', 'OUTPUT', files.length], ['input', 'INPUT', null]] as const)
+              .map(([id, label, count]) => (
+                <button key={id} role="tab" aria-selected={tab === id}
+                        className={`tab ${tab === id ? 'tabActive' : ''}`} onClick={() => setTab(id)}>
+                  {label}{count ? <span className="tabCount">{count}</span> : null}
+                </button>
+              ))}
           </div>
-          {rightTab === 'output'
-            ? <FilePanel files={files} style={{ borderLeft: 'none', flex: 1, minHeight: 0 }} />
-            : <InputPanel />
-          }
-        </div>
+          <div className="tabBody">
+            {tab === 'activity' && <ActivityFeed log={log} />}
+            {tab === 'output'   && <FilePanel files={files} />}
+            {tab === 'input'    && <InputPanel />}
+          </div>
+        </aside>
       </div>
     </div>
   );
+}
 
+export default function App() {
   return (
     <Routes>
-      <Route path="/" element={dashboard} />
+      <Route path="/" element={<Dashboard />} />
       <Route path="/workspaces" element={<WorkspaceManager />} />
     </Routes>
   );

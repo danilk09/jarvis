@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <title>Jarvis Mic</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: #0a0a0f; color: #e0e0e0;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      display: flex; flex-direction: column; align-items: center;
+      justify-content: center; min-height: 100vh; padding: 24px;
+      -webkit-tap-highlight-color: transparent;
+    }
+    h1 { font-size: 1.2rem; letter-spacing: 0.3em; color: #5c9ce6; margin-bottom: 40px; font-weight: 300; }
+    #btn {
+      width: 180px; height: 180px; border-radius: 50%;
+      border: 2px solid #1e3a5f; background: #111827;
+      color: #5c9ce6; font-size: 0.8rem; letter-spacing: 0.15em; font-weight: 500;
+      cursor: pointer; transition: all 0.2s; outline: none;
+      -webkit-user-select: none; user-select: none;
+      display: flex; align-items: center; justify-content: center;
+      line-height: 1.6; text-align: center;
+    }
+    #btn:active { transform: scale(0.96); }
+    #btn.recording { background: #1a0a0a; border-color: #c0392b; color: #e74c3c; animation: pulse 1.4s ease-in-out infinite; }
+    #btn.sending   { background: #0a1a0a; border-color: #27ae60; color: #2ecc71; cursor: default; }
+    @keyframes pulse {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(231,76,60,0.3); }
+      50%       { box-shadow: 0 0 0 20px rgba(231,76,60,0); }
+    }
+    #status  { margin-top: 32px; font-size: 0.85rem; color: #666; min-height: 1.4em; text-align: center; letter-spacing: 0.05em; }
+    #command { margin-top: 14px; font-size: 0.9rem; color: #9e9e9e; min-height: 1.2em; max-width: 300px; text-align: center; font-style: italic; line-height: 1.5; }
+    .error   { color: #e74c3c !important; }
+    .success { color: #2ecc71 !important; }
+  </style>
+</head>
+<body>
+  <h1>J A R V I S</h1>
+  <button id="btn">TAP TO<br>SPEAK</button>
+  <div id="status">Ready</div>
+  <div id="command"></div>
+  <script>
+    const btn = document.getElementById('btn');
+    const statusEl = document.getElementById('status');
+    const cmdEl = document.getElementById('command');
+    let recorder = null, chunks = [], recording = false;
+
+    btn.addEventListener('click', async () => {
+      if (btn.classList.contains('sending')) return;
+      if (recording) { stopRecording(); return; }
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1 } });
+        chunks = [];
+        recorder = new MediaRecorder(stream);
+        recorder.ondataavailable = e => { if (e.data.size > 0) chunks.push(e.data); };
+        recorder.onstop = () => { stream.getTracks().forEach(t => t.stop()); sendAudio(); };
+        recorder.start();
+        recording = true;
+        btn.innerHTML = 'TAP TO<br>STOP';
+        btn.classList.add('recording');
+        statusEl.textContent = 'Recording…';
+        statusEl.className = '';
+        cmdEl.textContent = '';
+        cmdEl.className = '';
+      } catch(e) {
+        statusEl.textContent = 'Microphone access denied.';
+        statusEl.className = 'error';
+      }
+    });
+
+    function stopRecording() {
+      if (recorder && recorder.state !== 'inactive') recorder.stop();
+      recording = false;
+      btn.innerHTML = '···';
+      btn.classList.remove('recording');
+      btn.classList.add('sending');
+      statusEl.textContent = 'Sending…';
+    }
+
+    async function sendAudio() {
+      const blob = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' });
+      const form = new FormData();
+      form.append('audio', blob, 'command.webm');
+      try {
+        const res = await fetch('/phone-command', { method: 'POST', body: form });
+        const data = await res.json();
+        if (res.ok) {
+          statusEl.textContent = 'Command sent!';
+          statusEl.className = 'success';
+          cmdEl.textContent = '“' + data.command + '”';
+        } else {
+          statusEl.textContent = 'Error: ' + (data.error || 'Unknown');
+          statusEl.className = 'error';
+        }
+      } catch(e) {
+        statusEl.textContent = 'Network error — same Wi-Fi?';
+        statusEl.className = 'error';
+      }
+      btn.innerHTML = 'TAP TO<br>SPEAK';
+      btn.classList.remove('sending');
+    }
+  </script>
+</body>
+</html>

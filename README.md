@@ -83,11 +83,11 @@ python jarvis.py
 ## Dependencies
 
 ```
-anthropic python-dotenv pyautogui pygetwindow Pillow
-sounddevice numpy faster-whisper soundfile vosk
-requests flask flask-cors webrtcvad yt-dlp
+anthropic python-dotenv Pillow
+sounddevice numpy faster-whisper vosk
+requests flask flask-cors webrtcvad "yt-dlp[default]" pycaw comtypes pypdf
 ```
 
-Optional: `realesrgan-ncnn-vulkan.exe` for image upscaling (update `ESRGAN_EXE` in `jarvis.py`).
+Optional: `realesrgan-ncnn-vulkan.exe` for image upscaling (update `ESRGAN_EXE` in `core/config.py`).
 
-Optional (music): [mpv](https://mpv.io) — download the shinchiro Windows build (`mpv-x86_64-*.7z`), extract it, and add the folder to PATH (or set `MPV_EXE` in `jarvis.py`).
+Optional (music): [mpv](https://mpv.io) — download the shinchiro Windows build (`mpv-x86_64-*.7z`), extract it, and add the folder to PATH (or set `MPV_EXE` in `core/config.py`).
