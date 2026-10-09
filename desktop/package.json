@@ -1,0 +1,16 @@
+{
+  "name": "jarvis-desktop",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Desktop window for the JARVIS dashboard: lets Stage panels show live web pages.",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^44.7.0"
+  },
+  "dependencies": {
+    "@ghostery/adblocker-electron": "^2.18.2"
+  }
+}

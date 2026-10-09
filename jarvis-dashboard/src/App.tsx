@@ -1,16 +1,22 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import ParticleOrb from './ParticleOrb';
-import FilePanel, { JarvisFile } from './FilePanel';
+import { Routes, Route, NavLink, useLocation } from 'react-router-dom';
+import ParticleOrb, { OrbState } from './ParticleOrb';
+import FilePanel from './FilePanel';
+import InputPanel from './InputPanel';
+import ActivityFeed from './ActivityFeed';
+import MusicCard from './MusicCard';
+import WorkspaceManager from './WorkspaceManager';
+import { JarvisStatusProvider, useJarvis } from './JarvisStatus';
+import { StageProvider, useStage } from './stage/StageContext';
+import StagePage from './stage/StagePage';
 import './App.css';
 
-type OrbState = 'idle' | 'activated' | 'thinking' | 'speaking' | 'error';
-
 const PHRASES: Record<OrbState, string> = {
-  idle:      'Waiting for wake word',
-  activated: 'Listening...',
-  thinking:  'Processing command',
-  speaking:  'Speaking response',
-  error:     'Connection lost',
+  idle:      'Say “Jarvis” or click the orb',
+  activated: 'Listening…',
+  thinking:  'Working on it…',
+  speaking:  'Speaking',
+  error:     'Something went wrong',
 };
 
 const STATE_LABELS: Record<OrbState, string> = {
@@ -21,16 +27,7 @@ const STATE_LABELS: Record<OrbState, string> = {
   error:     'ERROR',
 };
 
-function useHexTicker() {
-  const [hex, setHex] = useState('0x3F8A2C');
-  useEffect(() => {
-    const id = setInterval(() => {
-      setHex('0x' + Math.floor(Math.random() * 0xFFFFFF).toString(16).toUpperCase().padStart(6,'0'));
-    }, 800);
-    return () => clearInterval(id);
-  }, []);
-  return hex;
-}
+type Tab = 'activity' | 'output' | 'input';
 
 function useClock() {
   const [time, setTime] = useState('');
@@ -43,48 +40,60 @@ function useClock() {
   return time;
 }
 
-const DEMO_CYCLE: { state: OrbState; duration: number }[] = [
-  { state: 'idle',      duration: 3200 },
-  { state: 'activated', duration: 1800 },
-  { state: 'thinking',  duration: 1400 },
-  { state: 'speaking',  duration: 3000 },
-  { state: 'idle',      duration: 2000 },
-];
+function loadTab(): Tab {
+  try {
+    const t = localStorage.getItem('jarvis.tab');
+    if (t === 'activity' || t === 'output' || t === 'input') return t;
+  } catch { /* storage unavailable */ }
+  return 'activity';
+}
 
-function StatusDot({ active, pulsing, error, label }: {
-  active?: boolean; pulsing?: boolean; error?: boolean; label: string;
-}) {
-  const cls = ['dot', active && 'dotActive', pulsing && 'dotPulsing', error && 'dotError']
-    .filter(Boolean).join(' ');
+function Header() {
+  const clock = useClock();
+  const { serverOk } = useJarvis();
+  const { stage } = useStage();
+  const link = ({ isActive }: { isActive: boolean }) => `navLink ${isActive ? 'navLinkActive' : ''}`;
   return (
-    <div className="statusItem">
-      <div className={cls} />
-      <span className="mono dimmed">{label}</span>
-    </div>
+    <header className="header">
+      <div className="brand">
+        <span className="brandMark" />
+        <span className="brandName">J.A.R.V.I.S</span>
+      </div>
+      <nav className="nav">
+        <NavLink to="/" end className={link}>Dashboard</NavLink>
+        <NavLink to="/stage" className={link}>
+          Stage{stage.panels.length > 0 && <span className="navCount">{stage.panels.length}</span>}
+        </NavLink>
+        <NavLink to="/workspaces" className={link}>Workspaces</NavLink>
+      </nav>
+      <div className="headerRight">
+        <span className={`pill ${serverOk ? 'pillOk' : 'pillBad'}`}>
+          <span className="pillDot" />{serverOk ? 'ONLINE' : 'OFFLINE'}
+        </span>
+        <span className="clock">{clock}</span>
+      </div>
+    </header>
   );
 }
 
-export default function App() {
-  const [orbState,   setOrbState]   = useState<OrbState>('idle');
-  const [transcript, setTranscript] = useState('—');
-  const [files,      setFiles]      = useState<JarvisFile[]>([]);
-  const [serverOk,   setServerOk]   = useState(false);
-  const [fileCount,  setFileCount]  = useState(0);
-  const [speechBeat, setSpeechBeat] = useState(0);
-  const [panelWidth, setPanelWidth] = useState(360);
-  const demoRef    = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const demoIdx    = useRef(0);
-  const dragging   = useRef(false);
-  const clock      = useClock();
-  const hex        = useHexTicker();
+function Dashboard() {
+  const { orbState, transcript, files, log, speechBeat, speech, music, activate } = useJarvis();
+  const [panelWidth, setPanelWidth] = useState(380);
+  const [tab,        setTabState]   = useState<Tab>(loadTab);
+  const [busyHint,   setBusyHint]   = useState(false);
+  const dragging = useRef(false);
+  const bodyRef  = useRef<HTMLDivElement>(null);
+
+  const setTab = (t: Tab) => {
+    setTabState(t);
+    try { localStorage.setItem('jarvis.tab', t); } catch { /* ignore */ }
+  };
 
   useEffect(() => {
     const onMove = (e: MouseEvent) => {
-      if (!dragging.current) return;
-      const shell = document.querySelector('.shell') as HTMLElement;
-      if (!shell) return;
-      const newWidth = shell.getBoundingClientRect().right - e.clientX;
-      setPanelWidth(Math.max(220, Math.min(1200, newWidth)));
+      if (!dragging.current || !bodyRef.current) return;
+      const w = bodyRef.current.getBoundingClientRect().right - e.clientX;
+      setPanelWidth(Math.max(280, Math.min(900, w)));
     };
     const onUp = () => { dragging.current = false; document.body.style.cursor = ''; };
     window.addEventListener('mousemove', onMove);
@@ -92,105 +101,88 @@ export default function App() {
     return () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); };
   }, []);
 
-  const runDemo = useCallback(() => {
-    const step = DEMO_CYCLE[demoIdx.current % DEMO_CYCLE.length];
-    setOrbState(step.state);
-    demoIdx.current++;
-    demoRef.current = setTimeout(runDemo, step.duration);
-  }, []);
-
-  useEffect(() => {
-    let alive = true;
-    const demoTimer = setTimeout(() => { if (alive && !serverOk) runDemo(); }, 2000);
-
-    async function poll() {
-      if (!alive) return;
-      try {
-        const res  = await fetch('/status', { signal: AbortSignal.timeout(1800) });
-        const data = await res.json();
-        if (demoRef.current) { clearTimeout(demoRef.current); demoRef.current = null; }
-        setServerOk(true);
-        setOrbState(data.state as OrbState);
-        if (data.transcript) setTranscript(data.transcript);
-        if (data.speech_beat !== undefined) setSpeechBeat(data.speech_beat);
-        if (data.files?.length !== fileCount) {
-          setFiles(data.files ?? []);
-          setFileCount(data.files?.length ?? 0);
-        }
-      } catch {
-        setServerOk(false);
-      }
-      if (alive) setTimeout(poll, 300);
+  const onOrbClick = useCallback(async () => {
+    if (!(await activate())) {
+      setBusyHint(true);
+      setTimeout(() => setBusyHint(false), 1800);
     }
-    poll();
+  }, [activate]);
 
-    return () => {
-      alive = false;
-      clearTimeout(demoTimer);
-      if (demoRef.current) clearTimeout(demoRef.current);
-    };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  const STATE_COLORS: Record<OrbState, string> = {
-    idle:      '#1a5e32',
-    activated: '#0abfa0',
-    thinking:  '#6060eb',
-    speaking:  '#14e65f',
-    error:     '#e63232',
-  };
-  const stateColor = STATE_COLORS[orbState];
+  const lastJarvis = [...log].reverse().find(m => m.role === 'jarvis');
+  const caption = orbState === 'speaking' && lastJarvis ? lastJarvis.text : transcript;
+  const captionLabel = orbState === 'speaking' && lastJarvis ? 'JARVIS' : 'LAST COMMAND';
 
   return (
-    <div className="shell">
-      <div className="scanlines" />
-
-      <header className="header">
-        <div className="logo">
-          <span className="logoMain">JARVIS</span>
-          <span className="logoSub">ADVANCED AI INTERFACE</span>
+    <div ref={bodyRef} className="body" style={{ ['--panel-w' as string]: `${panelWidth}px` }}>
+      <main className={`hero hero-${orbState}`}>
+        <div className="heroGrid" />
+        <div className="orbArea">
+          <ParticleOrb state={orbState} beat={speechBeat} speech={speech} onActivate={onOrbClick} />
         </div>
-        <div className="statusBar">
-          <StatusDot active={serverOk} label="SERVER" />
-          <StatusDot
-            active={orbState === 'speaking' || orbState === 'activated'}
-            pulsing={orbState === 'speaking'}
-            error={orbState === 'error'}
-            label={STATE_LABELS[orbState]}
-          />
-          <StatusDot active label="AI ONLINE" />
-          <span className="mono dimmed">{hex}</span>
-          <span className="mono">{clock}</span>
+
+        <div className="stateBlock">
+          <div className="stateChip"><span className="stateChipDot" />{STATE_LABELS[orbState]}</div>
+          <div className="statePhrase">{busyHint ? 'Busy — try again in a moment' : PHRASES[orbState]}</div>
         </div>
-      </header>
 
-      <div className="body" style={{ gridTemplateColumns: `1fr 5px ${panelWidth}px` }}>
-        <main className="orbPanel">
-          <div className="cornerTL" />
-          <div className="cornerBR" />
-          <div className="gridLines" />
+        <div className="caption">
+          <div className="captionLabel">{captionLabel}</div>
+          <div className="captionText">{caption || '—'}</div>
+        </div>
 
-          <div className="orbWrap">
-            <ParticleOrb state={orbState} beat={speechBeat} />
-          </div>
+        <MusicCard music={music} />
+      </main>
 
-          <div className="stateLabel" style={{ color: stateColor }}>
-            {STATE_LABELS[orbState]}
-          </div>
-          <div className="statePhrase">{PHRASES[orbState]}</div>
+      <div
+        className="resizeHandle"
+        onMouseDown={() => { dragging.current = true; document.body.style.cursor = 'col-resize'; }}
+      />
 
-          <div className="transcriptBox">
-            <div className="transcriptLabel">LAST COMMAND</div>
-            <div className="transcriptText">{transcript}</div>
-          </div>
-        </main>
-
-        <div
-          className="resizeHandle"
-          onMouseDown={() => { dragging.current = true; document.body.style.cursor = 'col-resize'; }}
-        />
-        <FilePanel files={files} />
-      </div>
+      <aside className="sidebar">
+        <div className="tabs" role="tablist">
+          {([['activity', 'ACTIVITY', log.length], ['output', 'OUTPUT', files.length], ['input', 'INPUT', null]] as const)
+            .map(([id, label, count]) => (
+              <button key={id} role="tab" aria-selected={tab === id}
+                      className={`tab ${tab === id ? 'tabActive' : ''}`} onClick={() => setTab(id)}>
+                {label}{count ? <span className="tabCount">{count}</span> : null}
+              </button>
+            ))}
+        </div>
+        <div className="tabBody">
+          {tab === 'activity' && <ActivityFeed log={log} />}
+          {tab === 'output'   && <FilePanel files={files} />}
+          {tab === 'input'    && <InputPanel />}
+        </div>
+      </aside>
     </div>
+  );
+}
+
+function Shell() {
+  const { pathname } = useLocation();
+  return (
+    <>
+      <div className="shell">
+        <Header />
+        <Routes>
+          <Route path="/" element={<Dashboard />} />
+          <Route path="/workspaces" element={<WorkspaceManager />} />
+          <Route path="*" element={null} />
+        </Routes>
+      </div>
+      {/* Always mounted, at the same place in the tree, so live pages, the editor
+          and the globe keep their state while you're on another tab */}
+      <StagePage visible={pathname === '/stage'} />
+    </>
+  );
+}
+
+export default function App() {
+  return (
+    <JarvisStatusProvider>
+      <StageProvider>
+        <Shell />
+      </StageProvider>
+    </JarvisStatusProvider>
   );
 }

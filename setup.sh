@@ -5,9 +5,9 @@ set -e
 
 echo "Installing JARVIS dependencies..."
 
-pip install anthropic python-dotenv pyautogui pygetwindow Pillow \
-    sounddevice numpy faster-whisper soundfile vosk requests \
-    flask flask-cors webrtcvad resemblyzer
+pip install anthropic python-dotenv Pillow \
+    sounddevice numpy faster-whisper vosk requests \
+    flask flask-cors webrtcvad "yt-dlp[default]" pycaw comtypes pypdf trafilatura
 
 echo ""
 echo "Downloading Vosk speech model..."
@@ -23,6 +23,23 @@ else
 fi
 
 echo ""
+echo "Installing the desktop app (Electron — lets the Stage show live web pages)..."
+if command -v npm >/dev/null 2>&1; then
+    (cd desktop && npm install && node node_modules/electron/install.js)
+else
+    echo "  npm not found — install Node.js, then run: cd desktop && npm install"
+    echo "  (Jarvis falls back to opening the dashboard in your browser.)"
+fi
+
+echo ""
+if command -v claude >/dev/null 2>&1; then
+    echo "Claude Code found — coding projects will use it."
+else
+    echo "Optional — coding projects: install Claude Code and log in once:"
+    echo "  npm install -g @anthropic-ai/claude-code && claude"
+fi
+
+echo ""
 echo "Creating folders..."
 mkdir -p jarvis_input jarvis_output
 
@@ -31,12 +48,19 @@ if [ ! -f ".env" ]; then
     cat > .env <<EOF
 ANTHROPIC_API_KEY=sk-ant-...
 BRAVE_API_KEY=BSA...
+# Optional, free at https://ion.cesium.com — 3-D terrain and buildings on the Stage globe
+CESIUM_ION_TOKEN=
 EOF
     echo "Created .env — fill in your API keys before running."
 else
     echo ".env already exists, skipping."
 fi
 
+echo ""
+echo "Optional — music playback:"
+echo "  Download mpv (shinchiro Windows build) from https://mpv.io/installation/"
+echo "  Extract mpv-x86_64-*.7z and add the folder to PATH,"
+echo "  or set MPV_EXE in jarvis.py to the full path of mpv.exe."
 echo ""
 echo "Setup complete. Run with:"
 echo "  python jarvis.py"
