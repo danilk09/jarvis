@@ -17,6 +17,15 @@ MODEL         = "claude-haiku-4-5-20251001"
 client        = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
 BRAVE_API_KEY = os.environ.get("BRAVE_API_KEY", "")
 
+# Prompt caching: the unchanging part of each prompt (the action list) is cached, so
+# repeat sends cost 10% of the input price. Writing the cache costs 1.25x ("5m") or 2x
+# ("1h"); "5m" restarts its clock on every hit, so it suits back-to-back commands, "1h"
+# suits commands spread every 10-30 minutes. Haiku 4.5 only caches prompts of 4096+
+# tokens — below that the request just runs uncached.
+PROMPT_CACHE_TTL = "5m"
+CACHE_MIN_TOKENS = 4096
+CACHE_CONTROL    = {"type": "ephemeral"} if PROMPT_CACHE_TTL == "5m" else {"type": "ephemeral", "ttl": PROMPT_CACHE_TTL}
+
 # ── Voice ─────────────────────────────────────────────────────────────────────
 # VOICE_NAME: fragment of an installed SAPI voice, e.g. "David", "Zira" (empty = system default)
 # Install voices: Settings -> Time & Language -> Speech -> Add voices

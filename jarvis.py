@@ -20,7 +20,8 @@ import queue
 import threading
 import time
 
-from core import actions, audio, brain, coding, desktop, files, music, router, server, stage, state
+from core import actions, audio, brain, coding, desktop, files, music, router, server, stage, state, verbosity
+from core import tts
 from core.tts import speak, stop_tts, suppressed, wait_tts
 
 # Dismissals and filler that never need the AI
@@ -76,6 +77,8 @@ def _startup():
 
     brain.init_chat_history(state.workspaces)
     audio.on_wake.extend([stop_tts, music.duck])   # interrupt speech and duck music instantly
+    tts.on_speech_start.append(lambda: music.duck("speech"))   # anything Jarvis says, even unprompted
+    tts.on_speech_end.append(lambda: music.unduck("speech"))
     audio.start()
     speak("Ready for your command.")
 
@@ -150,6 +153,8 @@ def main():
                 continue
 
             state.push_state("thinking", transcript=command)
+            if verbosity.update(command):
+                print("  Detailed answer requested.")
             if should_bypass_ai(command):
                 print("  Bypassed AI (dismissal command).")
                 _finish()

@@ -12,7 +12,7 @@ import time
 
 import requests
 
-from . import brain, config, media, stage
+from . import brain, config, media, stage, verbosity
 from .registry import action
 from .tts import speak
 from .web import brave_search
@@ -147,7 +147,7 @@ def _show_page(a, chain):
 _SUMMARY_SYSTEM = (
     "You summarize web articles for JARVIS, a voice assistant that shows the article on screen "
     "next to your key points. Return ONLY JSON: "
-    '{"title":"<short title>","speech":"<2 spoken sentences: what it is about and the main takeaway. No markdown.>",'
+    '{"title":"<short title>","speech":"<spoken summary, see SPEECH LENGTH. No markdown.>",'
     '"points":[{"text":"<one key point, one sentence, max 22 words>","quote":"<8-30 words copied EXACTLY, '
     'character for character, from ONE sentence of the article that supports the point>"}]} '
     "Give 3-6 points in the order they appear in the article. If the user said what they care about, focus on that."
@@ -169,8 +169,10 @@ def _read_article(a, chain):
     text = "\n".join(paragraphs)
     page = stage.get(pid)
     try:
-        summary = _ask_json(_SUMMARY_SYSTEM, f"User's interest: {a.get('focus') or 'general summary'}\n\n"
-                                             f"Title: {page['title']}\n\nArticle:\n{text[:14000]}", 1200)
+        length = verbosity.rule(short="One sentence, the main takeaway, about 20 words.")
+        summary = _ask_json(_SUMMARY_SYSTEM + " SPEECH LENGTH: " + length,
+                            f"User's interest: {a.get('focus') or 'general summary'}\n\n"
+                            f"Title: {page['title']}\n\nArticle:\n{text[:14000]}", 1200)
     except Exception as e:
         speak("Summarizing failed.")
         return f"Read article: {e}"
@@ -496,11 +498,11 @@ def _show_map(a, chain):
 
 # ── Layout by voice ───────────────────────────────────────────────────────────
 @action("stage",
-        schema='{"type":"stage","command":"show|hide|clear|restore|close|focus|arrange|resize|move|swap|clear_highlights","panel":"<panel number/kind/title, or empty>","other":"<second panel, for swap>","mode":"auto|columns|rows","size":"small|medium|large|huge|bigger|smaller","position":"left|right|top|bottom"}',
+        schema='{"type":"stage","command":"show|hide|clear|restore|close|focus|arrange|resize|move|swap|clear_highlights","panel":"<panel number/kind/title, or empty>","other":"<second panel, for swap>","mode":"auto|columns","size":"small|medium|large|huge|bigger|smaller","position":"left|right|top|bottom"}',
         rules=['"show/open the stage" → stage "show"; "back to the dashboard", "hide the stage" → "hide"',
                '"close the map", "close panel 2" → stage "close" with panel; "clear the stage", "reset the stage", "start fresh" → "clear"',
                '"undo that", "bring it back", "restore the stage", "reopen what I closed" (after closing panels or clearing) → stage "restore"',
-               '"focus on X", "make X full screen" → stage "focus"; "show everything", "tile them", "side by side" → stage "arrange" (mode auto, or columns/rows)',
+               '"focus on X", "make X full screen" → stage "focus"; "show everything", "tile them", "side by side" → stage "arrange" (mode auto, or columns)',
                '"make X bigger/smaller/huge" → stage "resize"; "move X to the left/right" → stage "move"; "swap 1 and 3" → stage "swap"',
                '"clear the highlights", "stop pointing" → stage "clear_highlights"'])
 def _stage(a, chain):

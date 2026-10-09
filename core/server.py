@@ -220,6 +220,16 @@ def _stage_file(pid):
     return jsonify({"ok": ok})
 
 
+@app.route("/api/stage/note/<pid>", methods=["POST"])
+def _stage_note(pid):
+    """The user edited a note card in the dashboard."""
+    b = _body()
+    p = stage.get(pid)
+    if not p or p["kind"] != "note" or not isinstance(b.get("markdown"), str):
+        return jsonify({"error": "note panel and markdown required"}), 400
+    return jsonify({"ok": stage.update(pid, markdown=b["markdown"])})
+
+
 @app.route("/api/stage/page/<pid>", methods=["POST"])
 def _stage_page(pid):
     """The desktop app's live page navigated (link click, back/forward)."""

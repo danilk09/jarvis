@@ -6,7 +6,7 @@ the single JSON object it returns ({"mode": "action"|"chat"|"none", ...}).
 import json
 import threading
 
-from . import config, registry, stage
+from . import config, registry, stage, verbosity
 
 CHAT_HISTORY: list = []   # user/assistant turns only; the system prompt is kept separately
 _system_prompt = ""
@@ -35,9 +35,9 @@ RULES:
 - Multi-part requests → several actions in one list, e.g. "open Discord and play lofi" → {{"mode":"action","actions":[{{"type":"app","target":"Discord"}},{{"type":"music","command":"play","query":"lofi"}}]}}
 {rules}
 - Words like "open","find","search","launch","show" → ALWAYS mode "action"
-- Any question or request for information that doesn't need real-time data → mode "chat" with a concise spoken reply
+- Any question or request for information that doesn't need real-time data → mode "chat" with a spoken reply
 - Unclear/filler → mode "none"
-- Keep chat replies SHORT: 1-2 sentences max. No markdown, no lists. Plain spoken sentences only. Answer only what was asked — no extra context unless the user asks to go in depth.
+- Chat replies: no markdown, no lists, plain spoken sentences only. Answer only what was asked.
 """
 
 
@@ -108,18 +108,40 @@ def _stage_context():
             "\"panel\" fields):\n" + panels)
 
 
+def log_usage(tag, usage):
+    """One line per call: input tokens and how much of it came from the prompt cache."""
+    read  = getattr(usage, "cache_read_input_tokens", 0) or 0
+    wrote = getattr(usage, "cache_creation_input_tokens", 0) or 0
+    total = usage.input_tokens + read + wrote
+    if read:
+        cache = f"{read} from cache"
+    elif wrote:
+        cache = f"{wrote} written to cache"
+    elif total < config.CACHE_MIN_TOKENS:
+        cache = f"not cached: under the {config.CACHE_MIN_TOKENS}-token minimum"
+    else:
+        cache = "not cached"
+    print(f"  [{tag}] {total} tokens in ({cache}), {usage.output_tokens} out")
+
+
 def ask_claude(command, workspaces):
     global _ai_error_count
     with _lock:
         messages = CHAT_HISTORY + [{"role": "user", "content": command}]
-        system   = _system_prompt + _stage_context() + "".join(p() for p in context_providers)
+        # The action list never changes between calls, so it's cached; everything that
+        # does change (Stage panels, coding project, answer length) goes after the marker.
+        live = (_stage_context() + "".join(p() for p in context_providers)
+                + f"\n\nREPLY LENGTH (chat replies and any spoken text): {verbosity.rule()}")
+        system = [{"type": "text", "text": _system_prompt, "cache_control": config.CACHE_CONTROL},
+                  {"type": "text", "text": live.strip()}]
     try:
         response = config.client.messages.create(
             model=config.MODEL,
-            max_tokens=400,
+            max_tokens=verbosity.tokens(400, 900),
             system=system,
             messages=messages,
         )
+        log_usage("brain", response.usage)
         raw = response.content[0].text.strip()
     except Exception as e:
         print(f"  Unexpected AI error: {e}")

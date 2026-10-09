@@ -6,7 +6,7 @@ import re
 
 import requests
 
-from . import config
+from . import config, verbosity
 
 
 def brave_search(query, count=5):
@@ -38,8 +38,9 @@ def synthesize_search_answer(query, results):
     try:
         response = config.client.messages.create(
             model=config.MODEL,
-            max_tokens=300,
-            system="You are a voice assistant. Using the search results below, give a concise spoken answer (2-4 sentences). No markdown, no bullet points — plain conversational sentences only.",
+            max_tokens=verbosity.tokens(200, 600),
+            system="You are a voice assistant. Using the search results below, answer the question. "
+                   + verbosity.rule() + " No markdown, no bullet points — plain conversational sentences only.",
             messages=[{"role": "user", "content": f"Question: {query}\n\nSearch results:\n{snippets}"}],
         )
         return response.content[0].text.strip()

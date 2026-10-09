@@ -37,6 +37,20 @@ _queue      = queue.Queue()
 _ready      = threading.Event()
 _interrupt  = threading.Event()   # asks the worker to cut off the current utterance
 suppressed  = threading.Event()   # set when the user interrupts; cleared each activation
+_LULL       = 0.6                 # seconds of silence before speech counts as finished
+
+# Callbacks run on the TTS thread when Jarvis starts talking and once it has gone
+# quiet (jarvis.py ducks music with these, for every voice line — not just replies)
+on_speech_start = []
+on_speech_end   = []
+
+
+def _run_hooks(hooks):
+    for fn in hooks:
+        try:
+            fn()
+        except Exception as e:
+            print(f"  Speech hook error: {e}")
 
 
 def _make_voice():
@@ -84,12 +98,22 @@ def _worker():
     voice = _make_voice()
     meter = _make_voice()     # silent twin that renders to memory for the orb's envelope
     _ready.set()
+    talking = False
     while True:
-        text, update_state, on_start = _queue.get()
+        try:
+            # While talking, a short lull ends the speech (not every gap between sentences)
+            text, update_state, on_start = _queue.get(timeout=_LULL if talking else None)
+        except queue.Empty:
+            talking = False
+            _run_hooks(on_speech_end)
+            continue
         try:
             if suppressed.is_set():   # interrupted between queueing and playback
                 continue
             _interrupt.clear()
+            if not talking:
+                talking = True
+                _run_hooks(on_speech_start)
             if update_state:
                 push_state("speaking")
             if on_start:

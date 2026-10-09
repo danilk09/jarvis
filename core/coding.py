@@ -26,7 +26,7 @@ import subprocess
 import threading
 import time
 
-from . import brain, config, stage
+from . import brain, config, stage, verbosity
 from .registry import action
 from .tts import speak
 
@@ -40,9 +40,9 @@ _MAX_EVENTS = 300
 _JARVIS_NOTE = (
     "You are being driven by voice through JARVIS, the user's voice assistant. The user is not "
     "watching a terminal and cannot answer questions mid-task, so make sensible decisions yourself "
-    "and mention any important ones at the end. When you finish, end with a short plain-language "
-    "summary — 2 to 3 sentences, no markdown, no file lists — of what you did and anything the user "
-    "needs to do next. It will be read aloud."
+    "and mention any important ones at the end. When you finish, end with a plain-language "
+    "summary — no markdown, no file lists — of what you did and anything the user needs to do "
+    "next. It will be read aloud. "
 )
 
 _PREFS_TEMPLATE = """# Coding preferences
@@ -245,7 +245,8 @@ def start(request, project=None, new=False, effort="", model="", plan=False, ext
     allowed = list(config.CODE_ALLOWED_TOOLS) + list(extra_allowed)
 
     argv = [exe, "-p", "--output-format", "stream-json", "--verbose",
-            "--permission-mode", mode, "--append-system-prompt", _JARVIS_NOTE]
+            "--permission-mode", mode, "--append-system-prompt",
+            _JARVIS_NOTE + verbosity.rule(short="Keep that summary to one or two short sentences, about 30 words.")]
     if proj.get("session"):
         argv += ["--resume", proj["session"]]
     if model:

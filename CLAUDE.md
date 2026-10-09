@@ -54,7 +54,7 @@ Optional (for music playback): download mpv from mpv.io (shinchiro Windows build
 | `registry.py` | `@action(name, schema, rules)` decorator; schemas/rules are compiled into the system prompt |
 | `actions.py` | All built-in action handlers + `handle_response()` |
 | `agent.py` | "Do anything" fallback: tool-use loop (PowerShell, files, web, Claude Code hand-off via `coding.start`) with spoken confirmation for anything non-read-only |
-| `music.py` | yt-dlp (in-process) resolves, audio is fetched in range chunks and piped to mpv's stdin; YouTube Mix autoplay with next-track prefetch; ducking via mpv IPC / pycaw |
+| `music.py` | yt-dlp (in-process) resolves, audio is fetched in range chunks and piped to mpv's stdin; YouTube Mix autoplay with next-track prefetch; ducks while listening and whenever Jarvis speaks (TTS hooks), via mpv IPC volume |
 | `files.py` | File index, bookmarks, Start-menu app index, workspaces |
 | `media.py` | Screenshots, image analysis/enhancement, `jarvis_input/` processing |
 | `generate.py` | `generate_file` content |
@@ -103,13 +103,13 @@ Flask API routes relevant to the dashboard:
 
 - **Saved between runs** — every change is written (debounced) to `stage_state.json` (`config.STAGE_STATE_FILE`, git-ignored) and `stage.load()` restores it at startup: file panels reload their contents from disk, image/file panels whose file is gone are dropped. "Clear the stage" resets it. Closing panels, clearing, and auto-closing past `MAX_PANELS` are undoable (`stage.restore_removed()`, voice "restore the stage", the Undo button), and the undo survives restarts too.
 
-- **Panel kinds** — `page` (live web page: an Electron `<webview>` in the desktop app, reader view in a browser), `summary` (key points, each linked to a quote in its page), `file` (Monaco editor, autosaves to `jarvis_output/`; Jarvis's edits arrive as a diff to accept/reject), `image`, `note` (Markdown), `map` (CesiumJS globe, loaded from the jsDelivr CDN on first use).
-- **Layout** — 12×12 grid filling the screen. `auto` splits the screen recursively by each kind's weight (`stage.KIND_WEIGHT`); `focus`, `columns`, `rows` too. Drag by the header (drop on another panel to swap), resize from edges, or by voice. Manual edits make the layout `custom` until the next arrange.
+- **Panel kinds** — `page` (live web page: an Electron `<webview>` in the desktop app, reader view in a browser), `summary` (key points, each linked to a quote in its page), `file` (Monaco editor, autosaves to `jarvis_output/`; Jarvis's edits arrive as a diff to accept/reject), `image`, `note` (Markdown; double-click or Edit to change it by hand), `map` (CesiumJS globe, loaded from the jsDelivr CDN on first use).
+- **Layout** — 12×12 grid filling the screen. `auto` splits the screen recursively by each kind's weight (`stage.KIND_WEIGHT`); `focus` and `columns` too. Drag by the header (drop on another panel to swap), resize from edges, or by voice. Manual edits make the layout `custom` until the next arrange.
 - **Highlights** — `stage.highlight(panel, target, label)`: `{"quote"}` (page/note/summary, found and marked inside the page by `pageScripts.ts`), `{"region": [x,y,w,h]}` (image, fractions), `{"lines": [a,b]}` (file), `{"place": i}` (map). `speak(text, on_start=...)` fires a highlight the moment that sentence starts, and a beam is drawn from the Stage orb to the mark.
 - **Frontend** — `jarvis-dashboard/src/stage/`: `StageContext.tsx` (SSE), `StagePage.tsx` (react-grid-layout), `panels/*`, `StageBeam.tsx`, `anchors.ts`. `pageScripts.ts` functions are injected into live pages via `toString()`, so they must stay plain ES5 with no outside references.
 - **Desktop app** — `desktop/main.js`: loads the dashboard, enables `<webview>` (locked down: no preload, sandboxed, http(s) only), blocks ads/cookie banners in Stage pages, denies location and other permissions, opens dashboard links externally. Dev aid: `JARVIS_CAPTURE=out.png JARVIS_CAPTURE_DELAY=ms [JARVIS_CAPTURE_EVAL=js]` screenshots (and prints the JS result) and exits.
 
-Flask API: `GET /api/stage/events` (SSE), `POST /api/stage/layout | arrange | clear | restore | highlight | highlights/clear`, `POST /api/stage/panel/<id>/close`, `GET /api/stage/media/<id>` (image panels only — files Jarvis put there), `POST /api/stage/file/<id>` (save / accept / reject), `POST /api/stage/page/<id>` (live page navigated), `POST /api/stage/extract/<request>` (text of a live page), `GET /api/stage/config`.
+Flask API: `GET /api/stage/events` (SSE), `POST /api/stage/layout | arrange | clear | restore | highlight | highlights/clear`, `POST /api/stage/panel/<id>/close`, `GET /api/stage/media/<id>` (image panels only — files Jarvis put there), `POST /api/stage/file/<id>` (save / accept / reject), `POST /api/stage/note/<id>` (note edited by hand), `POST /api/stage/page/<id>` (live page navigated), `POST /api/stage/extract/<request>` (text of a live page), `GET /api/stage/config`.
 
 ## Coding projects (Claude Code)
 
@@ -144,6 +144,7 @@ Edit them at `http://localhost:5151/workspaces`. Changes save instantly and hot-
 | `CESIUM_ION_TOKEN` (`.env`) | Optional: 3-D terrain and holographic buildings on the Stage globe |
 | `CODE_PERMISSION_MODE` / `CODE_ALLOWED_TOOLS` | What background Claude Code may do without asking |
 | `CODE_MODEL` / `CODE_EFFORT` | Default Claude Code model and thinking effort (voice overrides per request) |
+| `PROMPT_CACHE_TTL` | Prompt cache lifetime: `"5m"` (cheaper writes, for back-to-back commands) or `"1h"` |
 | `CODE_USE_API_KEY` | `False` = Claude Code uses your Claude login, `True` = bills the `.env` API key |
 
 ## Background mode
@@ -158,4 +159,8 @@ The project uses `claude-haiku-4-5-20251001` (`config.MODEL`) for all Claude cal
 - `media.analyze_image` — image analysis with concise spoken answers; `max_tokens=200`
 - `media._pillow_enhance` — derives image enhancement params as JSON; `max_tokens=200`
 
-History keeps the last 12 messages, always starting on a user turn. Side results (image analysis, web search, input-folder contents, agent results) are added with `brain.remember()`. Prompt caching does not apply: Haiku 4.5's minimum cacheable prefix is 4096 tokens and the system prompt is ~1.4k.
+History keeps the last 12 messages, always starting on a user turn. Side results (image analysis, web search, input-folder contents, agent results) are added with `brain.remember()`.
+
+**Prompt caching** — `brain.ask_claude` sends the system prompt as two blocks: the fixed action list (marked `cache_control`) and the parts that change per call (Stage panels, coding project, answer length). The agent loop moves one marker to its newest message each step. Haiku 4.5 only caches prompts of 4096+ tokens; the action list is ~3.2k today, so caching switches on by itself once new actions push it past that. Each call logs `[brain] N tokens in (… from cache / written to cache / not cached: under the minimum)`. Keep anything that varies out of `build_system_prompt` — one changed byte there re-writes the cache. `PROMPT_CACHE_TTL` (`config.py`): `"5m"` or `"1h"`.
+
+**Answer length** — `core/verbosity.py`: short by default (main point, ~20 words); phrases like "explain in depth" / "go into more detail" switch the current command to a full answer. Every prompt that produces speech uses `verbosity.rule()`.

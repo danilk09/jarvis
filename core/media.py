@@ -13,7 +13,7 @@ import time
 
 from PIL import Image, ImageEnhance, ImageGrab
 
-from . import brain, config, stage, state
+from . import brain, config, stage, state, verbosity
 from .tts import speak
 from .web import fetch_text
 
@@ -60,8 +60,9 @@ def analyze_image(image_path, prompt):
     try:
         response = config.client.messages.create(
             model=config.MODEL,
-            max_tokens=200,
-            system="You are a voice assistant. Answer only what was asked about the image in 1-3 concise sentences. No markdown, no bullet points, no headers — plain spoken sentences only.",
+            max_tokens=verbosity.tokens(200, 600),
+            system="You are a voice assistant. Answer only what was asked about the image. " + verbosity.rule()
+                   + " No markdown, no bullet points, no headers — plain spoken sentences only.",
             messages=[{"role": "user", "content": [
                 {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": b64}},
                 {"type": "text", "text": prompt or "Describe this image concisely."},
@@ -121,6 +122,10 @@ def _pillow_enhance(image_path, prompt):
         return f"Pillow enhancement failed: {e}"
 
 
+def wants_enhancement(prompt):
+    return any(kw in (prompt or "").lower() for kw in _ENHANCE_WORDS)
+
+
 def enhance_image(image_path, prompt):
     """Run Real-ESRGAN upscaling (or the Pillow fallback) and return a result string."""
     if not os.path.exists(config.ESRGAN_EXE):
@@ -128,7 +133,6 @@ def enhance_image(image_path, prompt):
     else:
         os.makedirs(config.JARVIS_OUTPUT_DIR, exist_ok=True)
         out_path = os.path.join(config.JARVIS_OUTPUT_DIR, f"upscaled_{time.strftime('%Y%m%d_%H%M%S')}.png")
-        speak("Upscaling image, this may take a moment.")
         try:
             subprocess.run(
                 [config.ESRGAN_EXE, "-i", image_path, "-o", out_path, "-s", "4", "-n", "realesrgan-x4plus"],
@@ -203,7 +207,7 @@ def process_input_folder(prompt):
     if not all_items:
         return {"speech": "No files found in the input folder.", "context": ""}
 
-    wants_enhancement = any(kw in (prompt or "").lower() for kw in _ENHANCE_WORDS)
+    enhance = wants_enhancement(prompt)
     context_parts, archived, bg_threads = [], [], []
     captions = {}    # image path -> analysis, shown on the Stage once archived
 
@@ -212,7 +216,7 @@ def process_input_folder(prompt):
         ext   = os.path.splitext(fname)[1].lower()
         try:
             if ext in IMAGE_EXTS:
-                if wants_enhancement:
+                if enhance:
                     def _bg(p=fpath, pr=prompt):
                         speak(enhance_image(p, pr))
                         archive_input_file(p)
@@ -247,6 +251,12 @@ def process_input_folder(prompt):
 
     for t in bg_threads:
         t.start()
+    if bg_threads:
+        verb = "Upscaling" if os.path.exists(config.ESRGAN_EXE) else "Enhancing"
+        what = "image" if len(bg_threads) == 1 else f"{len(bg_threads)} images"
+        busy = f"{verb} {what} in the background, this may take a moment."
+        if len(context_parts) == len(bg_threads):     # nothing else to talk about
+            return {"speech": busy, "context": ""}
     for fpath in archived:
         new_path = archive_input_file(fpath)
         if fpath in captions and new_path:
@@ -256,12 +266,12 @@ def process_input_folder(prompt):
     if not all_context.strip():
         return {"speech": "Could not read any content from the input folder.", "context": ""}
 
-    summary_prompt = prompt or "Briefly describe what's in these files in 2-3 spoken sentences."
+    summary_prompt = prompt or "Briefly say what's in these files."
     try:
         resp = config.client.messages.create(
             model=config.MODEL,
-            max_tokens=250,
-            system="You are a voice assistant. Answer in 1-3 concise spoken sentences. No markdown, no lists.",
+            max_tokens=verbosity.tokens(250, 600),
+            system="You are a voice assistant. " + verbosity.rule() + " No markdown, no lists.",
             messages=[{"role": "user", "content": f"Context:\n{all_context[:5000]}\n\nRequest: {summary_prompt}"}],
         )
         speech = resp.content[0].text.strip()
@@ -270,5 +280,5 @@ def process_input_folder(prompt):
     brain.remember(f"[Input folder contents]\n{all_context}", speech)
 
     if bg_threads:
-        speech += " Enhancement is running in the background."
+        speech += " " + busy
     return {"speech": speech, "context": all_context}

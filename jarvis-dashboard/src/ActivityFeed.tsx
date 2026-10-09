@@ -1,20 +1,11 @@
-import { useEffect, useRef } from 'react';
-
 export interface LogEntry {
   role: 'user' | 'jarvis';
   text: string;
   time: string;
 }
 
+// Newest first, so the latest exchange is visible without scrolling
 export default function ActivityFeed({ log }: { log: LogEntry[] }) {
-  const feedRef = useRef<HTMLDivElement>(null);
-
-  // Scroll only the feed itself — scrollIntoView would also scroll the page on narrow screens
-  useEffect(() => {
-    const el = feedRef.current;
-    if (el) el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
-  }, [log]);
-
   if (log.length === 0) {
     return (
       <div className="feedEmpty">
@@ -26,7 +17,7 @@ export default function ActivityFeed({ log }: { log: LogEntry[] }) {
   }
 
   return (
-    <div ref={feedRef} className="feed">
+    <div className="feed">
       {log.map((m, i) => (
         <div key={i} className={`msg ${m.role === 'user' ? 'msgUser' : 'msgJarvis'}`}>
           <div className="msgMeta">
@@ -35,7 +26,7 @@ export default function ActivityFeed({ log }: { log: LogEntry[] }) {
           </div>
           <div className="msgText">{m.text}</div>
         </div>
-      ))}
+      )).reverse()}
     </div>
   );
 }

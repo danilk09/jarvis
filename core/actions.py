@@ -142,7 +142,8 @@ def _screenshot(a, chain):
         schema='{"type":"input_folder","prompt":"<what to do with the files in the input folder>"}',
         rules=['"process input folder","check input folder","analyze input","look at input files","enhance image","what\'s in the input folder","summarize input" → type "input_folder"; put intent in "prompt". Can be chained with generate_file or code to use folder contents as context. Only for reading files dropped into jarvis_input — renaming/moving/deleting files anywhere is "agent".'])
 def _input_folder(a, chain):
-    speak("Processing input folder.")
+    if not media.wants_enhancement(a.get("prompt", "")):   # upscaling announces itself
+        speak("Processing input folder.")
     output = media.process_input_folder(a.get("prompt", ""))
     chain["file_context"] = output["context"]
     print(f"\n  ── Input Folder ─────────────────────\n  {output['speech']}\n  ────────────────────────────────────\n")
@@ -276,9 +277,7 @@ def _timer(a, chain):
     label   = a.get("label", "")
 
     def ring():
-        music.duck()
-        speak(f"Time's up{': ' + label if label else ''}.")
-        threading.Timer(4, music.unduck).start()   # short-lived; fine as non-daemon
+        speak(f"Time's up{': ' + label if label else ''}.")   # speech ducks the music itself
 
     timer = threading.Timer(seconds, ring)
     timer.daemon = True

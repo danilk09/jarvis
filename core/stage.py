@@ -11,7 +11,7 @@ clearing the Stage can be undone (restore_removed()).
 Layout: a 12 x 12 grid that fills the screen. In "auto" mode the panels are tiled
 by recursively splitting the screen, giving each panel area in proportion to its
 weight (pages and maps need more room than a list of key points). "focus" gives
-one panel most of the screen; "columns"/"rows" split it evenly. Dragging a panel
+one panel most of the screen; "columns" splits it evenly side by side. Dragging a panel
 switches to "custom" until the next arrange command.
 """
 
@@ -146,15 +146,11 @@ def _split(items, x, y, w, h, out):
             out.append({"i": pid, "x": x, "y": y + i, "w": w, "h": 1})
 
 
-def _even(ids, horizontal):
+def _columns(ids):
     out, n = [], len(ids)
     for k, pid in enumerate(ids):
-        if horizontal:
-            x0, x1 = round(k * COLS / n), round((k + 1) * COLS / n)
-            out.append({"i": pid, "x": x0, "y": 0, "w": max(1, x1 - x0), "h": ROWS})
-        else:
-            y0, y1 = round(k * ROWS / n), round((k + 1) * ROWS / n)
-            out.append({"i": pid, "x": 0, "y": y0, "w": COLS, "h": max(1, y1 - y0)})
+        x0, x1 = round(k * COLS / n), round((k + 1) * COLS / n)
+        out.append({"i": pid, "x": x0, "y": 0, "w": max(1, x1 - x0), "h": ROWS})
     return out
 
 
@@ -172,15 +168,15 @@ def _relayout():
         others = [(pid, _panels[pid]["weight"]) for pid in _order if pid != focus]
         out.append({"i": focus, "x": 0, "y": 0, "w": 8, "h": ROWS})
         _split(others, 8, 0, COLS - 8, ROWS, out)
-    elif mode in ("columns", "rows") and len(_order) <= 4:
-        out = _even(_order, horizontal=(mode == "columns"))
+    elif mode == "columns" and len(_order) <= 4:
+        out = _columns(_order)
     else:
         _split([(pid, _panels[pid]["weight"]) for pid in _order], 0, 0, COLS, ROWS, out)
     _layout = out
 
 
 def arrange(mode, focus_ref=None):
-    """mode: auto | focus | columns | rows."""
+    """mode: auto | focus | columns."""
     with _lock:
         if mode == "focus":
             pid = resolve(focus_ref) or (_order[-1] if _order else None)
@@ -188,7 +184,7 @@ def arrange(mode, focus_ref=None):
                 return False
             _view.update(mode="focus", focus=pid)
         else:
-            _view.update(mode=mode if mode in ("auto", "columns", "rows") else "auto", focus=None)
+            _view.update(mode=mode if mode in ("auto", "columns") else "auto", focus=None)
         _relayout()
         _changed()
     return True

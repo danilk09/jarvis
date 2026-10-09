@@ -12,7 +12,7 @@ import re
 import subprocess
 import webbrowser
 
-from . import audio, config
+from . import audio, brain, config, verbosity
 from .tts import speak, wait_tts
 from .web import brave_search, fetch_text
 
@@ -25,7 +25,8 @@ Complete the task with the tools, in as few steps as possible.
 - Look before you change things (list/read first) and never guess paths.
 - For writing or fixing code in a project, use delegate_to_claude_code instead of editing code yourself. It runs in the background and reports back by itself, so finish right after starting it.
 - If the user declines a confirmation, stop and say so.
-- When done, reply with 1-2 plain spoken sentences describing the outcome. No markdown, no lists."""
+- When done, say the outcome in plain spoken sentences. No markdown, no lists.
+- Length: """
 
 TOOLS = [
     {
@@ -197,15 +198,23 @@ def _run_tool(name, args):
 # ── Loop ──────────────────────────────────────────────────────────────────────
 def run_agent(task, context="") -> str:
     content = f"{task}\n\nContext from earlier steps:\n{context[:4000]}" if context else task
-    messages = [{"role": "user", "content": content}]
+    messages = [{"role": "user", "content": [{"type": "text", "text": content}]}]
+    marked = None
     for _ in range(MAX_STEPS):
+        # Each step resends everything so far; mark the newest block so the next step
+        # reads all of it from the cache (only the latest mark is kept — the API allows 4)
+        if marked is not None:
+            marked.pop("cache_control", None)
+        marked = messages[-1]["content"][-1]
+        marked["cache_control"] = config.CACHE_CONTROL
         response = config.client.messages.create(
             model=config.MODEL,
             max_tokens=1500,
-            system=_SYSTEM,
+            system=_SYSTEM + verbosity.rule(),
             tools=TOOLS,
             messages=messages,
         )
+        brain.log_usage("agent", response.usage)
         if response.stop_reason != "tool_use":
             return " ".join(b.text for b in response.content if b.type == "text").strip() or "Done."
         messages.append({"role": "assistant", "content": response.content})

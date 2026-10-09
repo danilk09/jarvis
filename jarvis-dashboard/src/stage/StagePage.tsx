@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import GridLayout, { verticalCompactor, Layout, LayoutItem } from 'react-grid-layout';
+import GridLayout, { getCompactor, verticalCompactor, Layout, LayoutItem } from 'react-grid-layout';
 import 'react-grid-layout/css/styles.css';
 import ParticleOrb from '../ParticleOrb';
 import { useJarvis } from '../JarvisStatus';
@@ -24,11 +24,73 @@ const ROWS = 12;
 const MARGIN = 10;
 const PADDING = 12;
 
+const MIN_SIZE = 2;                                   // smallest panel, in grid cells
+const RESIZE_HANDLES = ['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw'] as const;
+const freeCompactor = getCompactor(null, true);       // while resizing: nothing gets pushed around
+
+type Axis = 'x' | 'y';
+const SIZE = { x: 'w', y: 'h' } as const;
+const CROSS = { x: 'y', y: 'x' } as const;
+
+// Move the border at `line` (a grid line on `axis`) to `to`, like a window splitter:
+// every panel along that stretch of border shrinks or grows with it, so dragging any
+// edge of a panel takes space from — or gives it back to — the panels beside it.
+function moveBorder(items: GridItem[], selfId: string, axis: Axis, line: number, to: number): GridItem[] {
+  if (line === to) return items;
+  const size = SIZE[axis], cross = CROSS[axis], crossSize = SIZE[cross];
+  const self = items.find(it => it.i === selfId)!;
+  const before = (it: GridItem) => it[axis] + it[size] === line;   // ends at the border
+  const after = (it: GridItem) => it[axis] === line;               // starts at it
+
+  // The resized panel plus everything touching the same stretch of border
+  const group = new Set([selfId]);
+  let lo = self[cross], hi = self[cross] + self[crossSize];
+  for (let grew = true; grew;) {
+    grew = false;
+    for (const it of items) {
+      if (group.has(it.i) || !(before(it) || after(it))) continue;
+      if (it[cross] < hi && it[cross] + it[crossSize] > lo) {
+        group.add(it.i);
+        lo = Math.min(lo, it[cross]);
+        hi = Math.max(hi, it[cross] + it[crossSize]);
+        grew = true;
+      }
+    }
+  }
+
+  let target = to;   // no panel in the group may end up smaller than MIN_SIZE
+  for (const it of items) {
+    if (!group.has(it.i)) continue;
+    if (before(it)) target = Math.max(target, it[axis] + MIN_SIZE);
+    else target = Math.min(target, it[axis] + it[size] - MIN_SIZE);
+  }
+  return items.map(it => {
+    if (!group.has(it.i)) return it;
+    if (before(it)) return { ...it, [size]: target - it[axis] };
+    return { ...it, [axis]: target, [size]: it[axis] + it[size] - target };
+  });
+}
+
+function overlaps(items: GridItem[]) {
+  return items.some((a, n) => items.some((b, m) => m > n &&
+    a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h));
+}
+
+// Apply a resize (from `start`, the layout before it) edge by edge
+function resizeTiled(start: GridItem[], id: string, to: LayoutItem): GridItem[] {
+  let items = start;
+  const cur = () => items.find(it => it.i === id)!;
+  items = moveBorder(items, id, 'x', cur().x, to.x);
+  items = moveBorder(items, id, 'x', cur().x + cur().w, to.x + to.w);
+  items = moveBorder(items, id, 'y', cur().y, to.y);
+  items = moveBorder(items, id, 'y', cur().y + cur().h, to.y + to.h);
+  return overlaps(items) ? start : items;   // an odd hand-made layout it can't untangle: keep it as it was
+}
+
 const VIEWS: { mode: string; label: string; title: string }[] = [
   { mode: 'auto',    label: 'Auto',    title: 'Tile panels by how much room each needs' },
   { mode: 'focus',   label: 'Focus',   title: 'One panel large, the rest beside it' },
   { mode: 'columns', label: 'Columns', title: 'Side by side' },
-  { mode: 'rows',    label: 'Rows',    title: 'Stacked' },
 ];
 
 const STATE_LABELS: Record<string, string> = {
@@ -56,6 +118,7 @@ export default function StagePage({ visible }: { visible: boolean }) {
   const [size, setSize] = useState({ w: 0, h: 0 });
   const [local, setLocal] = useState<GridItem[]>(stage.layout);
   const [dragging, setDragging] = useState(false);
+  const [resizing, setResizing] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
   const dragStart = useRef<GridItem[]>([]);
 
@@ -114,9 +177,17 @@ export default function StagePage({ visible }: { visible: boolean }) {
     stageApi.post('layout', { layout: next });
   };
 
-  const onResizeStop = (layout: Layout) => {
+  const onResizeStart = () => {
+    dragStart.current = local;
+    setDragging(true);
+    setResizing(true);
+  };
+
+  const onResizeStop = (_layout: Layout, _old: LayoutItem | null, resized: LayoutItem | null) => {
     setDragging(false);
-    const next = layout.map(({ i, x, y, w, h }) => ({ i, x, y, w, h }));
+    setResizing(false);
+    if (!resized) return;
+    const next = resizeTiled(dragStart.current, resized.i, resized);
     setLocal(next);
     stageApi.post('layout', { layout: next });
   };
@@ -195,11 +266,11 @@ export default function StagePage({ visible }: { visible: boolean }) {
             layout={local}
             gridConfig={{ cols: 12, rowHeight, margin: [MARGIN, MARGIN], containerPadding: [PADDING, PADDING] }}
             dragConfig={{ enabled: true, handle: '.panelDrag', cancel: '.panelActions' }}
-            resizeConfig={{ enabled: true, handles: ['se', 'e', 's'] }}
-            compactor={verticalCompactor}
+            resizeConfig={{ enabled: true, handles: [...RESIZE_HANDLES] }}
+            compactor={resizing ? freeCompactor : verticalCompactor}
             onDragStart={onDragStart}
             onDragStop={onDragStop}
-            onResizeStart={() => setDragging(true)}
+            onResizeStart={onResizeStart}
             onResizeStop={onResizeStop}
           >
             {panels.map((p: Panel, n) => (

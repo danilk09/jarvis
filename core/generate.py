@@ -4,7 +4,7 @@ Content generation for generate_file (coding projects are built by Claude Code, 
 
 import os
 
-from . import config
+from . import config, verbosity
 
 _LANG_HINTS = {
     ".py": "Python", ".js": "JavaScript", ".ts": "TypeScript",
@@ -37,12 +37,13 @@ def generate_file_content(prompt_text, filename, context=""):
 
 
 def summarize_for_speech(content, filename):
-    """1-2 spoken sentences about a generated file."""
+    """A spoken sentence or two about a generated file."""
     try:
         resp = config.client.messages.create(
             model=config.MODEL,
             max_tokens=120,
-            system="You are a voice assistant. In 1-2 spoken sentences, briefly summarize what was written. Be concise and conversational. No markdown or bullet points.",
+            system="You are a voice assistant. Say what was written. " + verbosity.rule(
+                       short="One short sentence, about 15 words.") + " Conversational, no markdown or bullet points.",
             messages=[{"role": "user", "content": f"Summarize what is in '{filename}':\n\n{content[:2500]}"}],
         )
         return resp.content[0].text.strip()

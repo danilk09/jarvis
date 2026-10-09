@@ -7,8 +7,8 @@ and piped into mpv's stdin.
 
 Autoplay follows YouTube's own "Mix" radio for the first song, and the next
 track's stream URL is resolved while the current one plays, so transitions are
-near-instant. Volume is controlled over mpv's named-pipe IPC (or pycaw when
-available) so music can duck under Jarvis's voice.
+near-instant. Volume is controlled over mpv's named-pipe IPC so music ducks
+while Jarvis listens and whenever it speaks.
 """
 
 import collections
@@ -24,12 +24,6 @@ from yt_dlp import YoutubeDL
 
 from . import config
 from .tts import speak
-
-try:
-    from pycaw.pycaw import AudioUtilities, ISimpleAudioVolume
-    _PYCAW_AVAILABLE = True
-except ImportError:
-    _PYCAW_AVAILABLE = False
 
 _MPV_PIPE   = r"\\.\pipe\jarvis_mpv"
 DUCK_LEVEL  = 0.08
@@ -53,8 +47,8 @@ _current: dict = {}            # {"id", "title", "url"} of the playing track
 _skipped    = False          # set by skip() so a deliberate early end isn't a failure
 _session    = 0                # bumped by every explicit play/stop; old monitors bail out
 _paused     = False
-_ducked     = False            # True while Jarvis is listening/speaking
-_vol        = 1.0
+_duck_why   = set()            # why music is ducked: "listening", "speech"
+_vol        = 1.0              # loudness as an amplitude, 0-1
 _fade_gen   = 0
 _fade_lock  = threading.Lock()
 _upcoming   = collections.deque()   # video ids queued by autoplay
@@ -84,43 +78,39 @@ def has_track() -> bool:
 
 
 # ── Volume ────────────────────────────────────────────────────────────────────
-def _mpv_send(cmd_list):
-    """Send a JSON command to mpv via its named pipe IPC."""
+def _mpv_send(cmd_list) -> bool:
+    """Send a JSON command to mpv via its named pipe IPC. False if mpv isn't listening yet."""
     try:
         handle = ctypes.windll.kernel32.CreateFileW(
             _MPV_PIPE, 0x40000000, 0, None, 3, 0, None  # GENERIC_WRITE, OPEN_EXISTING
         )
         if handle == -1:
-            return
+            return False
         msg = (json.dumps({"command": cmd_list}) + "\n").encode()
         written = ctypes.c_ulong(0)
-        ctypes.windll.kernel32.WriteFile(handle, msg, len(msg), ctypes.byref(written), None)
+        ok = ctypes.windll.kernel32.WriteFile(handle, msg, len(msg), ctypes.byref(written), None)
         ctypes.windll.kernel32.CloseHandle(handle)
+        return bool(ok)
     except Exception:
-        pass
+        return False
 
 
-def _mpv_session():
-    """Return the ISimpleAudioVolume for the running mpv process, or None."""
-    if not _PYCAW_AVAILABLE or _proc is None:
-        return None
-    try:
-        for s in AudioUtilities.GetAllSessions():
-            if s.Process and s.Process.pid == _proc.pid:
-                return s._ctl.QueryInterface(ISimpleAudioVolume)
-    except Exception:
-        pass
-    return None
+def _mpv_volume(level: float) -> float:
+    """mpv's volume scale is cubic; convert an amplitude (0-1) to it."""
+    return round(100 * max(0.0, min(1.0, level)) ** (1 / 3), 1)
 
 
-def _set_vol(level: float):
+def _set_vol(level: float) -> bool:
+    # Only mpv's own volume is used. Mixing it with the Windows per-app volume
+    # (pycaw) left music stuck quiet: a track that started while ducked had its mpv
+    # volume lowered, and later fades only raised the Windows one.
     global _vol
     _vol = max(0.0, min(1.0, level))
-    session = _mpv_session()
-    if session:
-        session.SetMasterVolume(_vol, None)
-    else:
-        _mpv_send(["set_property", "volume", int(_vol * 100)])
+    return _mpv_send(["set_property", "volume", _mpv_volume(_vol)])
+
+
+def _target() -> float:
+    return DUCK_LEVEL if _duck_why else 1.0
 
 
 def _fade_to(target: float, steps: int = 20, duration: float = 1.0):
@@ -142,18 +132,27 @@ def _cancel_fades():
         _fade_gen += 1
 
 
-def duck():
-    global _ducked
-    _ducked = True
+def _apply_duck(duration: float):
+    global _vol
+    target = _target()
     if is_playing():
-        threading.Thread(target=_fade_to, args=(DUCK_LEVEL, 20, 0.5), daemon=True).start()
+        threading.Thread(target=_fade_to, args=(target, 20, duration), daemon=True).start()
+    else:
+        _cancel_fades()
+        _vol = target        # the next track starts at this volume
 
 
-def unduck():
-    global _ducked
-    _ducked = False
-    if is_playing():
-        threading.Thread(target=_fade_to, args=(1.0, 20, 1.5), daemon=True).start()
+def duck(reason: str = "listening"):
+    """Lower the music. It comes back up only once every reason is lifted, so the
+    end of a sentence can't raise it while Jarvis is still listening (or vice versa)."""
+    _duck_why.add(reason)
+    _apply_duck(0.5)
+
+
+def unduck(reason: str = "listening"):
+    _duck_why.discard(reason)
+    if not _duck_why:
+        _apply_duck(1.5)
 
 
 # ── Resolving tracks ──────────────────────────────────────────────────────────
@@ -249,7 +248,7 @@ def _launch(track: dict) -> bool:
     with _lock:
         try:
             _proc = subprocess.Popen(
-                [config.MPV_EXE, "--no-video", "--volume=100", "--cache=yes",
+                [config.MPV_EXE, "--no-video", f"--volume={_mpv_volume(_vol)}", "--cache=yes",
                  f"--input-ipc-server={_MPV_PIPE}",
                  f"--force-media-title={track['title']}", "-"],
                 stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -261,11 +260,19 @@ def _launch(track: dict) -> bool:
         _skipped = False
     threading.Thread(target=_feed, args=(_proc, track), daemon=True).start()
     print(f"  Now playing: {track['title']}")
-    time.sleep(0.3)   # give mpv a moment to open the IPC pipe
-    # Match the current duck state — a track that finishes loading after Jarvis
-    # stopped talking must not stay stuck at duck volume.
-    _set_vol(DUCK_LEVEL if _ducked else 1.0)
+    threading.Thread(target=_sync_volume, args=(_proc,), daemon=True).start()
     return True
+
+
+def _sync_volume(proc):
+    """mpv starts at the volume it was launched with. Once its IPC pipe is open,
+    re-send the current one in case a duck/unduck happened in between."""
+    for _ in range(50):
+        time.sleep(0.1)
+        if proc is not _proc or proc.poll() is not None:
+            return
+        if _set_vol(_vol):
+            return
 
 
 def _monitor(session: int):
@@ -332,10 +339,11 @@ def play(target: str, push_history: bool = True):
 
 
 def stop():
-    global _proc, _session, _paused, _current
+    global _proc, _session, _paused, _current, _vol
     _session += 1
     _paused = False
     _cancel_fades()
+    _vol = _target()       # a fade cut off mid-way mustn't leave the next track at its level
     with _lock:
         if _proc and _proc.poll() is None:
             try:

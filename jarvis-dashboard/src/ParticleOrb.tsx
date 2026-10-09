@@ -15,6 +15,9 @@ import { useEffect, useRef } from 'react';
 // Interaction: the cursor repels particles and tilts the orb; clicking sends a
 // shockwave through the shell and activates Jarvis.
 
+// Overall brightness of the orb's colours (1 = full). Only colour — motion is untouched.
+const GLOW = 0.72;
+
 export type OrbState = 'idle' | 'activated' | 'thinking' | 'speaking' | 'error';
 
 export interface SpeechEnvelope {
@@ -256,7 +259,7 @@ export default function ParticleOrb({ state, beat = 0, speech = null, onActivate
       ringRot += dt * (0.08 + sp.rotSpeed * 0.12);
       const breath = Math.sin(t * Math.PI * 2 * 0.15) * 6 * (1 - sp.energy * 0.5);
       const e  = sp.energy;
-      const cr = sp.r | 0, cg = sp.g | 0, cb = sp.b | 0;
+      const cr = (sp.r * GLOW) | 0, cg = (sp.g * GLOW) | 0, cb = (sp.b * GLOW) | 0;
 
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
@@ -353,8 +356,8 @@ export default function ParticleOrb({ state, beat = 0, speech = null, onActivate
 
         const shell  = Math.max(0, 1 - Math.abs(r - R0) / 50);
         const bright = shell * .6 + depth * .4;
-        const spec   = bright * bright * 80 + lv * 110;
-        const rC = Math.min(255, (cr * .12 + bright * cr * .88 + spec + e * 40) | 0);
+        const spec   = (bright * bright * 80 + lv * 110) * GLOW;
+        const rC = Math.min(255, (cr * .12 + bright * cr * .88 + spec + e * 40 * GLOW) | 0);
         const gC = Math.min(255, (cg * .10 + bright * cg * .90 + spec) | 0);
         const bC = Math.min(255, (cb * .10 + bright * cb * .90 + spec) | 0);
 
@@ -381,7 +384,7 @@ export default function ParticleOrb({ state, beat = 0, speech = null, onActivate
         const len = (3 + lv * 40) * S;
         const c = Math.cos(ang), s = Math.sin(ang);
         ctx.globalAlpha = .14 + e * .12 + lv * .7;
-        ctx.strokeStyle = `rgb(${Math.min(255, cr + lv * 140) | 0},${Math.min(255, cg + lv * 60) | 0},${Math.min(255, cb + lv * 120) | 0})`;
+        ctx.strokeStyle = `rgb(${Math.min(255, cr + lv * 140 * GLOW) | 0},${Math.min(255, cg + lv * 60 * GLOW) | 0},${Math.min(255, cb + lv * 120 * GLOW) | 0})`;
         ctx.beginPath();
         ctx.moveTo(CX + c * ringR, CY + s * ringR);
         ctx.lineTo(CX + c * (ringR + len), CY + s * (ringR + len));
