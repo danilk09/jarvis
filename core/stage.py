@@ -147,10 +147,14 @@ def _split(items, x, y, w, h, out):
 
 
 def _columns(ids):
-    out, n = [], len(ids)
-    for k, pid in enumerate(ids):
-        x0, x1 = round(k * COLS / n), round((k + 1) * COLS / n)
-        out.append({"i": pid, "x": x0, "y": 0, "w": max(1, x1 - x0), "h": ROWS})
+    """Equal-width columns, whatever each panel's weight. More than 4 panels: two rows of them."""
+    out = []
+    rows = [ids] if len(ids) <= 4 else [ids[:(len(ids) + 1) // 2], ids[(len(ids) + 1) // 2:]]
+    for r, row in enumerate(rows):
+        y0, y1 = round(r * ROWS / len(rows)), round((r + 1) * ROWS / len(rows))
+        for k, pid in enumerate(row):
+            x0, x1 = round(k * COLS / len(row)), round((k + 1) * COLS / len(row))
+            out.append({"i": pid, "x": x0, "y": y0, "w": max(1, x1 - x0), "h": y1 - y0})
     return out
 
 
@@ -168,7 +172,7 @@ def _relayout():
         others = [(pid, _panels[pid]["weight"]) for pid in _order if pid != focus]
         out.append({"i": focus, "x": 0, "y": 0, "w": 8, "h": ROWS})
         _split(others, 8, 0, COLS - 8, ROWS, out)
-    elif mode == "columns" and len(_order) <= 4:
+    elif mode == "columns":
         out = _columns(_order)
     else:
         _split([(pid, _panels[pid]["weight"]) for pid in _order], 0, 0, COLS, ROWS, out)

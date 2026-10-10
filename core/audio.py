@@ -2,7 +2,8 @@
 Microphone input: wake word, command recording and transcription.
 
 A single 16 kHz input stream feeds everything. Each 20 ms frame goes to:
-  - a 1 s ring buffer (pre-roll, so "Jarvis, open Discord" in one breath works)
+  - a 4 s ring buffer (pre-roll, so "Jarvis, open Discord" in one breath works even when
+    the wake-word detector is running behind)
   - the wake-word thread, while wake listening is enabled
   - the command recorder, while a capture is running
 """
@@ -36,7 +37,7 @@ whisper_lock  = threading.Lock()
 
 FRAMES_PER_SEC = config.SAMPLE_RATE // config.FRAME   # 50
 
-_ring       = collections.deque(maxlen=FRAMES_PER_SEC * 2)   # last 2 s of audio (pre-roll)
+_ring       = collections.deque(maxlen=FRAMES_PER_SEC * 4)   # last 4 s of audio (pre-roll)
 _levels     = collections.deque(maxlen=FRAMES_PER_SEC * 3)   # RMS of the last 3 s, for the noise floor
 _noise      = {"floor": 0.0}                                 # frozen when a recording starts
 _wake_q     = queue.Queue()
@@ -47,7 +48,7 @@ _wake_reset = threading.Event()
 
 activated  = threading.Event()      # set when the wake word is heard
 on_wake: list = []                  # callbacks run the instant the wake word fires (stop TTS, duck music)
-_wake_info = {"time": 0.0, "preroll": [], "source": "voice"}
+_wake_info = {"time": 0.0, "preroll": [], "source": "voice", "lag": 0}
 # The last recording: {"frames", "text", "raw", "time"} — voice ID and the voice-data log use it
 last_capture: dict = {"frames": [], "text": "", "raw": "", "time": 0.0}
 mic = {"name": ""}                  # current input device
@@ -218,10 +219,14 @@ def _wake_loop():
 
 
 def _fire_wake():
-    print("Wake word detected!")
-    # Keep the last 1 s from before detection and start recording immediately, in case the
-    # command follows the wake word without a pause.
-    _wake_info["preroll"] = list(_ring)
+    # The detector runs behind real time (audio still queued for it, plus Vosk reporting a
+    # word a moment after it ends), so "Jarvis" sits further back than the newest audio.
+    # Keep 2.5 s before the point the detector had reached, so the word is never cut off —
+    # otherwise Whisper doesn't hear "Jarvis" and the command is thrown away as a false wake.
+    lag = _wake_q.qsize() + 5
+    print("Wake word detected!" + (f" (detector {lag * 1000 // FRAMES_PER_SEC} ms behind)" if lag > 15 else ""))
+    _wake_info["preroll"] = list(_ring)[-(int(FRAMES_PER_SEC * 2.5) + lag):]
+    _wake_info["lag"] = lag
     _wake_info["time"] = time.monotonic()
     _wake_info["source"] = "voice"
     _measure_noise()
@@ -352,8 +357,34 @@ def wake_source():
 
 
 def wake_audio(seconds=1.2):
-    """The last `seconds` before the wake word fired — "Jarvis" itself, for voice ID."""
-    return _wake_info["preroll"][-int(seconds * FRAMES_PER_SEC):]
+    """The `seconds` before the detector heard the wake word — "Jarvis" itself, for voice ID."""
+    pre, lag = _wake_info["preroll"], _wake_info.get("lag", 0)
+    end = len(pre) - lag
+    return pre[max(0, end - int(seconds * FRAMES_PER_SEC)):max(0, end)]
+
+
+def _fuzzy_wake(heard):
+    """Whisper sometimes spells the wake word oddly ("Travis", "Darvis"). The detector already
+    heard it, so a close match in the first two words counts. Returns the end of that word, or None."""
+    import difflib
+    for m in list(re.finditer(r"[A-Za-z']+", heard))[:2]:
+        if difflib.SequenceMatcher(None, m.group(0).lower(), config.WAKE_WORD).ratio() >= 0.65:
+            rest = re.match(r"\W*", heard[m.end():])
+            return m.end() + (rest.end() if rest else 0)
+    return None
+
+
+def _log_false_wake(heard):
+    """Keep the last few false wakes (jarvis_memory/voice/false_wakes.jsonl) to tune against."""
+    try:
+        import os
+        path = os.path.join(config.MEMORY_DIR, "voice", "false_wakes.jsonl")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"time": time.strftime("%Y-%m-%d %H:%M:%S"), "heard": heard,
+                                "lag_ms": _wake_info.get("lag", 0) * 1000 // FRAMES_PER_SEC}) + "\n")
+    except OSError:
+        pass
 
 
 def _keep(frames, text, raw, voice_from=0):
@@ -379,12 +410,17 @@ def capture_followup():
         return ""
     print("  Processing speech...")
     heard, raw = transcribe_full(frames)
-    _keep(frames, heard, raw, voice_from=max(0, len(_wake_info["preroll"]) - int(1.2 * FRAMES_PER_SEC)))
+    voice_from = max(0, len(_wake_info["preroll"]) - _wake_info.get("lag", 0) - int(1.2 * FRAMES_PER_SEC))
+    _keep(frames, heard, raw, voice_from=voice_from)
     match = _WAKE_ANYWHERE.search(heard)
-    if not match:
+    end = match.end() if match else _fuzzy_wake(heard)
+    if end is None:
         print(f'  Ignoring false wake (no "{config.WAKE_WORD}" in: "{heard[:80]}")')
+        _log_false_wake(heard)
         return None
-    text = heard[match.end():].strip()
+    if not match:
+        print(f'  Wake word heard as "{heard[:end].strip(" ,.")}" — accepting it')
+    text = heard[end:].strip()
     if text:
         print(f'  Heard: "{text}"')
     return text
@@ -395,7 +431,27 @@ last_listen = [0.0]   # when the last listen started (so a question it answered 
 
 def listen_for_command(max_duration=8, silence_duration=0.8, onset_timeout=None) -> str:
     """Record one command (WebRTC VAD end-pointing) and transcribe it. With onset_timeout,
-    give up if no speech starts within that many seconds."""
+    give up if no speech starts within that many seconds.
+
+    Every listen — after "Yes sir", answering a question, a yes/no confirmation — shows
+    LISTENING on the dashboard and pauses the wake word: otherwise saying "Jarvis" (or
+    clicking the orb) while Jarvis waits for an answer queues a second activation that only
+    fires once this listen times out."""
+    from . import state
+    wake_was_on = _wake_on.is_set()
+    disable_wake()
+    state.listening.set()
+    state.push_state("activated")
+    try:
+        return _listen(max_duration, silence_duration, onset_timeout)
+    finally:
+        state.listening.clear()
+        state.push_state("thinking")     # whoever asked now works with the answer
+        if wake_was_on:
+            enable_wake()
+
+
+def _listen(max_duration, silence_duration, onset_timeout):
     last_listen[0] = time.time()
     time.sleep(0.3)  # let TTS echo and room reverb die down before capture starts
     _measure_noise()

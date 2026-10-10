@@ -130,8 +130,14 @@ def _listen_for_answer(question):
     music.duck()
     state.push_state("activated")
     print(f'  Listening for an answer to: "{question}"')
-    answer = audio.listen_for_command(onset_timeout=config.ANSWER_WINDOW)
-    answer = re.sub(r"^\W*(hey |ok |okay )?jarvis\b\W*", "", answer or "", flags=re.IGNORECASE).strip()
+    heard = audio.listen_for_command(onset_timeout=config.ANSWER_WINDOW)
+    answer = re.sub(r"^\W*(hey |ok |okay )?jarvis\b\W*", "", heard or "", flags=re.IGNORECASE).strip()
+    if not answer and audio._WAKE_ANYWHERE.search(heard or ""):
+        # Just "Jarvis" instead of an answer: a fresh activation, not a reply
+        speak("Yes sir.")
+        wait_tts()
+        command = audio.listen_for_command()
+        return voice.screen(command, "prompted") if command else None
     if not answer or answer.lower().rstrip(".!?") in _END_ANSWERS:
         return None
     answer = voice.screen(answer, "answer")      # someone else answering → "Who is this?"

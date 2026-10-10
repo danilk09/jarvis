@@ -32,8 +32,14 @@ session_archive = ""
 dash_url = ""
 
 
+# Set while the mic is recording a command or answer (audio.listen_for_command)
+listening = threading.Event()
+
+
 def push_state(state, transcript="", sample=""):
     """sample: id of the recording the transcript came from (lets the dashboard correct it)."""
+    if state == "idle" and listening.is_set():
+        state = "activated"      # speech ending mid-listen mustn't show STANDBY while Jarvis listens
     with dash_lock:
         dash_state["state"] = state
         if transcript:
