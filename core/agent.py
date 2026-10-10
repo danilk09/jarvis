@@ -102,7 +102,8 @@ def confirm(summary) -> bool:
     speak(f"{summary}. Should I go ahead?")
     wait_tts()
     answer = audio.listen_for_command(max_duration=6, silence_duration=0.8)
-    approved = bool(_YES.search(answer)) and not _NO.search(answer)
+    from . import voice                      # (voice imports agent)
+    approved = bool(_YES.search(answer)) and not _NO.search(answer) and voice.answer_allowed()
     print(f"  Confirmation {'granted' if approved else 'declined'}: {answer!r}")
     return approved
 

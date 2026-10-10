@@ -19,7 +19,7 @@ import sounddevice as sd
 import vosk
 from faster_whisper import WhisperModel
 
-from . import config
+from . import asr, config
 
 try:
     import webrtcvad as _webrtcvad
@@ -33,11 +33,6 @@ vosk.SetLogLevel(-1)
 print("  Loading Whisper model (first run may take a moment)...")
 WHISPER_MODEL = WhisperModel(config.WHISPER_MODEL, device="cpu", compute_type="int8")
 whisper_lock  = threading.Lock()
-# Phrase order matters: noisy audio can make Whisper repeat this list, and _strip_prompt_echo
-# cuts runs of neighbouring phrases, so phrases you'd say together must not be neighbours.
-_WHISPER_PROMPT = ("Jarvis, open Discord, search YouTube for, open workspace, never mind, take a screenshot, "
-                   "find files, yes, analyze image, cancel, what's on screen, open file, play, no, pause, "
-                   "resume, stop")
 
 FRAMES_PER_SEC = config.SAMPLE_RATE // config.FRAME   # 50
 
@@ -52,7 +47,10 @@ _wake_reset = threading.Event()
 
 activated  = threading.Event()      # set when the wake word is heard
 on_wake: list = []                  # callbacks run the instant the wake word fires (stop TTS, duck music)
-_wake_info = {"time": 0.0, "preroll": []}
+_wake_info = {"time": 0.0, "preroll": [], "source": "voice"}
+# The last recording: {"frames", "text", "raw", "time"} — voice ID and the voice-data log use it
+last_capture: dict = {"frames": [], "text": "", "raw": "", "time": 0.0}
+mic = {"name": ""}                  # current input device
 
 _stream       = None
 _stream_lock  = threading.Lock()
@@ -102,7 +100,8 @@ def _open_stream():
                                     dtype="int16", channels=1, callback=_callback, device=device)
         _last_frame = time.monotonic()
         _stream.start()
-        print(f"  Microphone: {sd.query_devices(_stream.device)['name']}")
+        mic["name"] = sd.query_devices(_stream.device)["name"]
+        print(f"  Microphone: {mic['name']}")
 
 
 def _default_mic_id():
@@ -224,6 +223,7 @@ def _fire_wake():
     # command follows the wake word without a pause.
     _wake_info["preroll"] = list(_ring)
     _wake_info["time"] = time.monotonic()
+    _wake_info["source"] = "voice"
     _measure_noise()
     _drain(_capture_q)
     _capturing.set()
@@ -241,6 +241,7 @@ def trigger_wake() -> bool:
         return False
     print("Activated from dashboard.")
     _wake_info["time"] = 0.0     # no one-breath command to capture — go straight to "Yes sir"
+    _wake_info["source"] = "dashboard"
     for cb in on_wake:
         try:
             cb()
@@ -324,47 +325,18 @@ def _record(max_duration, silence_duration, preroll=(), onset_deadline=None, ign
     return frames[speech_start:len(frames) - consec_silence]
 
 
-_PROMPT_PHRASES = [p.strip().lower() for p in _WHISPER_PROMPT.split(",") if p.strip()]
-
-
-def _strip_prompt_echo(text):
-    """
-    On noisy audio Whisper sometimes repeats its hint prompt ("…open Discord, search YouTube
-    for, open workspace, never mind"). Cut the text where two or more prompt phrases follow
-    each other in prompt order; a real "search YouTube for cats" is left alone.
-    """
-    parts = [p.strip() for p in text.split(",")]
-    for i in range(len(parts) - 1):
-        a, b = parts[i].lower().rstrip(".!?"), parts[i + 1].lower().rstrip(".!?")
-        # start at the 3rd phrase: "Jarvis, open Discord" is how real commands begin too
-        for k in range(2, len(_PROMPT_PHRASES) - 1):
-            if a == _PROMPT_PHRASES[k] and b and _PROMPT_PHRASES[k + 1].startswith(b):
-                return ", ".join(parts[:i]).strip(" ,")
-    return text
+def transcribe_full(audio):
+    """(text, raw text) of a file path or a list of int16 PCM frames. The text has your
+    learned fixes applied ("this cord" → "Discord"), see core/speech_data.py."""
+    if isinstance(audio, list):
+        audio = np.frombuffer(b"".join(audio), dtype=np.int16).astype(np.float32) / 32768.0
+    with whisper_lock:
+        return asr.transcribe(WHISPER_MODEL, audio)
 
 
 def transcribe(audio) -> str:
     """Transcribe a file path or a list of int16 PCM frames."""
-    if isinstance(audio, list):
-        audio = np.frombuffer(b"".join(audio), dtype=np.int16).astype(np.float32) / 32768.0
-    with whisper_lock:
-        segments, _ = WHISPER_MODEL.transcribe(
-            audio,
-            language="en",
-            beam_size=1,               # greedy decoding: noticeably faster on CPU for short commands
-            # No temperature fallback: on noisy audio Whisper otherwise re-decodes up to 6 times,
-            # running off into repeated text — 20-40 s per command in a loud room, in testing
-            temperature=0.0,
-            condition_on_previous_text=False,
-            no_repeat_ngram_size=3,
-            max_new_tokens=80,
-            without_timestamps=True,
-            vad_filter=True,
-            initial_prompt=_WHISPER_PROMPT,
-            vad_parameters=dict(min_silence_duration_ms=500, speech_pad_ms=200),
-        )
-        # segments is a lazy generator — decoding happens here, so keep it inside the lock
-        return _strip_prompt_echo(" ".join(s.text.strip() for s in segments).strip())
+    return transcribe_full(audio)[0]
 
 
 # The wake word anywhere in the transcript (Whisper sometimes spells it differently). The
@@ -372,6 +344,21 @@ def transcribe(audio) -> str:
 _WAKE_VARIANTS = {"jarvis": r"j[ae]rv[ie]s|javis|jarvas|jarvi's|jervis|charvis"}
 _WAKE_ANYWHERE = re.compile(rf"\b(?:{_WAKE_VARIANTS.get(config.WAKE_WORD, re.escape(config.WAKE_WORD))})\b\W*",
                             re.IGNORECASE)
+
+
+def wake_source():
+    """How the last activation happened: "voice" (the wake word) or "dashboard" (orb click)."""
+    return _wake_info["source"]
+
+
+def wake_audio(seconds=1.2):
+    """The last `seconds` before the wake word fired — "Jarvis" itself, for voice ID."""
+    return _wake_info["preroll"][-int(seconds * FRAMES_PER_SEC):]
+
+
+def _keep(frames, text, raw, voice_from=0):
+    """voice_from: where the speaker's own audio starts (the pre-roll can hold someone else)."""
+    last_capture.update(frames=frames or [], text=text, raw=raw, time=time.time(), voice_from=voice_from)
 
 
 def capture_followup():
@@ -391,7 +378,8 @@ def capture_followup():
     if not frames:
         return ""
     print("  Processing speech...")
-    heard = transcribe(frames)
+    heard, raw = transcribe_full(frames)
+    _keep(frames, heard, raw, voice_from=max(0, len(_wake_info["preroll"]) - int(1.2 * FRAMES_PER_SEC)))
     match = _WAKE_ANYWHERE.search(heard)
     if not match:
         print(f'  Ignoring false wake (no "{config.WAKE_WORD}" in: "{heard[:80]}")')
@@ -417,14 +405,17 @@ def listen_for_command(max_duration=8, silence_duration=0.8, onset_timeout=None)
     frames = _record(max_duration, silence_duration,
                      onset_deadline=time.monotonic() + onset_timeout if onset_timeout else None)
     if not frames:
+        _keep([], "", "")
         print("  No speech detected.")
         return ""
     print("  Processing speech...")
     try:
-        text = transcribe(frames)
+        text, raw = transcribe_full(frames)
     except Exception as e:
+        _keep([], "", "")
         print(f"  Whisper error: {e}")
         return ""
+    _keep(frames, text, raw)
     if text:
         print(f'  Heard: "{text}"')
     else:

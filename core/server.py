@@ -258,15 +258,16 @@ def _stage_config():
 @app.route("/api/coding/<command>", methods=["POST"])
 def _coding(command):
     from . import coding
+    project = _body().get("project") or None
     if command == "stop":
-        return jsonify({"ok": coding.stop()})
+        return jsonify({"ok": bool(coding.stop(project))})
     if command == "approve":
-        threading.Thread(target=coding.approve, daemon=True).start()
+        threading.Thread(target=coding.approve, args=(project,), daemon=True).start()
         return jsonify({"ok": True})
     if command == "vscode":
-        return jsonify({"ok": coding.open_vscode()})
+        return jsonify({"ok": coding.open_vscode(project)})
     if command == "terminal":
-        return jsonify({"ok": coding.open_terminal()})
+        return jsonify({"ok": coding.open_terminal(project)})
     if command == "file":
         # Open a file Claude Code touched in the Stage editor — only inside a known project folder
         path = os.path.abspath(_body().get("path", ""))
@@ -283,9 +284,31 @@ def _coding(command):
     return jsonify({"error": "unknown command"}), 404
 
 
+# ── Phone notification buttons (ntfy calls these over Tailscale) ─────────────
+@app.route("/api/notify/action", methods=["POST"])
+def _notify_action():
+    from . import notify
+    ok, message = notify.handle_action(_body())
+    print(f"  [phone] button: {message}")
+    return jsonify({"ok": ok, "message": message}), (200 if ok else 403 if message == "bad key" else 400)
+
+
 @app.route("/api/activate", methods=["POST"])
 def _activate():
     return jsonify({"ok": audio.trigger_wake()})
+
+
+# ── Voice data: correct (or confirm) what Jarvis heard ───────────────────────
+@app.route("/api/voice/label", methods=["POST"])
+def _voice_label():
+    from . import speech_data
+    body = _body()
+    sample, text = body.get("sample", ""), (body.get("text") or "").strip()
+    confirmed = body.get("confirmed", False)
+    if not speech_data.label(sample, text, "confirmed" if confirmed else "dashboard"):
+        return jsonify({"error": "unknown recording"}), 404
+    state.mark_log(sample, **({"confirmed": True} if confirmed else {"text": text, "corrected": True}))
+    return jsonify({"ok": True})
 
 
 @app.route("/api/music/control", methods=["POST"])

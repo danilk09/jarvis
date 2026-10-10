@@ -21,7 +21,8 @@ import re
 import threading
 import time
 
-from core import actions, agenda, audio, brain, coding, desktop, files, memory, music, router, server, stage, state, verbosity
+from core import actions, agenda, audio, brain, coding, desktop, files, memory, music, notify, router, server, stage, state, verbosity
+from core import speech_data, voice, voice_id
 from core import tts
 from core.tts import speak, stop_tts, suppressed, wait_tts
 
@@ -80,7 +81,9 @@ def _startup():
     if brain.restore_history():
         print("  Picked up the conversation from the last run")
     memory.start()     # conversation log + background review of what's worth remembering
+    phone_topic = notify.start()   # ntfy topic for reminders on the phone
     agenda.start()     # reminders and timers
+    voice.start()      # voice ID model + profile, prune old recordings
     audio.on_wake.extend([stop_tts, music.duck])   # interrupt speech and duck music instantly
     tts.on_speech_start.append(lambda: music.duck("speech"))   # anything Jarvis says, even unprompted
     tts.on_speech_end.append(lambda: music.unduck("speech"))
@@ -95,6 +98,8 @@ def _startup():
         print(f"  Phone mic:  {phone_url}{tls_note}")
     else:
         print("  Phone mic:  Tailscale not detected — install Tailscale for remote phone access")
+    if config.PHONE_PUSH:
+        print(f"  Phone alerts: ntfy app -> subscribe to \"{phone_topic}\" on {config.NTFY_SERVER}")
     print(f"  Workspaces: {list(state.workspaces.keys()) or 'none'}")
     print(f"  AI: Claude Haiku 4.5   OS: {config.OS}")
     print(f"  Input folder:  {config.JARVIS_INPUT_DIR}")
@@ -128,6 +133,9 @@ def _listen_for_answer(question):
     answer = audio.listen_for_command(onset_timeout=config.ANSWER_WINDOW)
     answer = re.sub(r"^\W*(hey |ok |okay )?jarvis\b\W*", "", answer or "", flags=re.IGNORECASE).strip()
     if not answer or answer.lower().rstrip(".!?") in _END_ANSWERS:
+        return None
+    answer = voice.screen(answer, "answer")      # someone else answering → "Who is this?"
+    if not answer:
         return None
     if question == _RETRY:       # a second try at the same command, not an answer
         return answer
@@ -163,12 +171,17 @@ def _next_command():
     if command is None:
         return None, False   # false wake from background speech
     if command:
-        return command, False
+        return voice.screen(command, "wake"), False   # not your voice → ignored
+    if voice.wake_is_stranger():
+        return None, False
 
     speak("Yes sir.")
     wait_tts()
     state.push_state("activated")
-    return audio.listen_for_command(), False
+    command = audio.listen_for_command()
+    if not command:
+        return command, False
+    return voice.screen(command, "dashboard" if audio.wake_source() == "dashboard" else "prompted"), False
 
 
 def _finish(since=None, followups=0):
@@ -206,14 +219,28 @@ def main():
                 continue
             if from_phone:
                 print(f'\n  Phone command: "{command}"')
+                voice_id.current.clear()
+                voice_id.current.update(verdict="none", score=None, sample="", guest=False)
             elif not command:
                 print("  No command heard.\n")
                 speak(_RETRY)
                 followup = _finish(turn_start, followups)
                 continue
 
+            # "No, I said open Discord": label the last recording, learn the fix, run the right command
+            fixed = None if from_phone else speech_data.parse_correction(command)
+            if fixed:
+                sid = voice_id.current.get("sample")
+                newest = speech_data.recent_sample()
+                prev = speech_data.recent_sample(skip=1 if newest and newest[0] == sid else 0)
+                if prev and speech_data.label(prev[0], fixed, "voice"):
+                    state.mark_log(prev[0], text=fixed, corrected=True)
+                    print(f'  Correction: "{prev[1]}" -> "{fixed}"')
+                    command = fixed
+
             # the dashboard and the conversation log show just what was said, not the question
-            state.push_state("thinking", transcript=re.sub(r'^\(Answering your question ".*?"\) ', "", command))
+            state.push_state("thinking", transcript=re.sub(r'^\(Answering your question ".*?"\) ', "", command),
+                             sample="" if from_phone or fixed else voice_id.current.get("sample", ""))
             if verbosity.update(command):
                 print("  Detailed answer requested.")
             if should_bypass_ai(command):
@@ -227,6 +254,8 @@ def main():
             else:
                 print("  Thinking...")
                 response = brain.ask_claude(command, state.workspaces)
+            if voice_id.current.get("guest") and (response or {}).get("mode") == "action":
+                response = voice.guest_reply()   # strangers may chat, not act
 
             audio.enable_wake()   # let the user interrupt Jarvis mid-response
             try:

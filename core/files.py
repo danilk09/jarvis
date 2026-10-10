@@ -3,8 +3,10 @@ Local lookups: file index, browser bookmarks, installed apps and workspaces.
 All indexes are built in the background so startup stays fast.
 """
 
+import difflib
 import json
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -137,6 +139,22 @@ def find_app(name):
         if hits:
             return min(hits, key=lambda a: len(a["name"]))
     return None
+
+
+def closest_name(heard, names, cutoff=0.8, margin=0.08):
+    """The name `heard` most likely was, ignoring spaces ("this cord" → "Discord"), or None
+    unless it's a close match and clearly closer than the runner-up."""
+    squash = lambda s: re.sub(r"[^a-z0-9]", "", s.lower())
+    target = squash(heard)
+    if len(target) < 4:
+        return None
+    scored = sorted(((difflib.SequenceMatcher(None, target, squash(n)).ratio(), n) for n in names if n),
+                    reverse=True)
+    if not scored or scored[0][0] < cutoff:
+        return None
+    if len(scored) > 1 and scored[0][0] - scored[1][0] < margin and squash(scored[1][1]) != squash(scored[0][1]):
+        return None
+    return scored[0][1]
 
 
 def open_app(name) -> bool:

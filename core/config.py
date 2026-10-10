@@ -58,6 +58,35 @@ SPEECH_OVER_NOISE = 2.0
 # Microphone: name fragment to pin a specific input (e.g. "AirPods"). Empty = follow the
 # Windows default recording device, switching automatically when it changes.
 INPUT_DEVICE = ""
+WHISPER_BEAM = 1             # 1 = greedy (fastest on CPU); 5 = beam search, a bit more accurate, slower
+# Put your vocabulary (workspace names, jarvis_memory/voice/vocabulary.txt, words you've
+# corrected) into Whisper's hint prompt so it spells them right.
+WHISPER_VOCAB_PROMPT = True
+
+# ── Voice ID (core/voice_id.py) and voice data (core/speech_data.py) ──────────
+# Only respond to your voice. Enroll first: "Jarvis, learn my voice".
+#   "off"     — no speaker check
+#   "shadow"  — check and log every score, but never block (run this for a week to calibrate)
+#   "enforce" — ignore other voices after the wake word; if Jarvis was made to listen (orb
+#               click, answering its question) it asks who it is and refuses
+# "Turn on/off voice lock" switches between enforce and shadow (saved in jarvis_memory/voice).
+VOICE_ID_MODE  = "shadow"
+VOICE_MODEL    = os.path.join(ROOT, "models", "speaker", "nemo_en_titanet_small.onnx")
+# Match score (cosine similarity, -1..1) against your enrolled voice. ≥ ACCEPT: you.
+# < REJECT: someone else. In between: Jarvis asks you to repeat. Calibrate with
+# python scripts/voice/calibrate.py after a few days in shadow mode.
+VOICE_ACCEPT   = 0.45
+VOICE_REJECT   = 0.25
+VOICE_ADAPT    = 0.60        # recordings scoring this high are added to your profile (follows a cold, a new room)
+OWNER_NAME     = "Danil"          # what Jarvis calls you when it turns someone away; empty = from memory
+# Strangers: False = refused. True = guest mode: they may chat and ask questions, but no actions.
+VOICE_GUEST_MODE = False
+# Every command's audio + transcript is saved to jarvis_memory/voice/ (benchmark and training
+# data). Unlabeled recordings are deleted after VOICE_SAMPLE_DAYS; ones you've labeled are kept.
+VOICE_SAVE_SAMPLES = True
+VOICE_SAMPLE_DAYS  = 60
+# A mishearing you correct this many times ("no, I said Discord") is fixed automatically.
+VOICE_RULE_MIN     = 2
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 WORKSPACES_FILE   = os.path.join(ROOT, "workspaces.json")
@@ -85,6 +114,15 @@ AGENDA_REMIND_DEFAULTS = {
     "deadline":    ["1d@19:00", "0d@09:00"],
     "task":        [],
 }
+# Phone notifications via ntfy (core/notify.py): install the ntfy app and subscribe to the
+# topic Jarvis prints at startup. Reminders go to the phone when you've been away from the
+# PC (no input, no voice command) for PHONE_AWAY_MIN minutes; deadlines due within
+# PHONE_URGENT_HOURS always go to the phone too.
+PHONE_PUSH         = True
+NTFY_SERVER        = "https://ntfy.sh"   # or your own ntfy server
+NTFY_TOPIC         = ""                  # empty = a random topic, saved in jarvis_memory/notify.json
+PHONE_AWAY_MIN     = 10
+PHONE_URGENT_HOURS = 2
 # Daily breakdown ("give me a breakdown of today"). HOME_CITY empty = use the city from
 # memory, or ask once and remember it.
 HOME_CITY     = ""
@@ -100,6 +138,19 @@ CODE_EFFORT          = ""              # "" = default; or "low", "medium", "high
 # False: Claude Code uses your own Claude login/subscription (`claude` → /login). True: it bills
 # the ANTHROPIC_API_KEY from .env instead (that key would otherwise override your login).
 CODE_USE_API_KEY     = False
+# Your repos: "work on murphys next js" finds ~/OneDrive/Desktop/GitHub/murphys-nextjs, and
+# "clone my X repo" clones github.com/<GITHUB_USER>/X into the first folder. GITHUB_TOKEN in
+# .env (optional) lets Jarvis see your private repos too.
+REPO_DIRS            = [os.path.join(os.path.expanduser("~"), "OneDrive", "Desktop", "GitHub")]
+GITHUB_USER          = "danilk09"
+GITHUB_TOKEN         = os.environ.get("GITHUB_TOKEN", "")
+CODE_MAX_PARALLEL    = 3       # Claude Code runs at once (one per project)
+# Each task in a git repo gets its own branch (jarvis/<task>); Claude Code commits there and
+# never touches main. Pushing and opening PRs always need your spoken OK.
+CODE_BRANCH_PER_TASK = True
+# Phone notification when a run finishes (with Continue on phone / Allow buttons):
+# "away" = only when you're away from the PC, "always", or "never"
+CODE_NOTIFY          = "away"
 # Commands Claude Code may run without asking (it runs in the background, so nobody can click
 # "approve"). Anything else is refused and Jarvis asks you — say "allow it" to run it.
 _ALLOWED_COMMANDS = [
@@ -114,6 +165,15 @@ _ALLOWED_COMMANDS = [
     "python", "python3", "py", "node", "cd", "Set-Location", "mkdir",
 ]
 CODE_ALLOWED_TOOLS = [f"{shell}({cmd}:*)" for cmd in _ALLOWED_COMMANDS for shell in ("PowerShell", "Bash")]
+# GitHub (scripts/setup_github_mcp.py): reading runs freely; anything that writes to GitHub —
+# opening a PR, commenting, merging, pushing files — is refused and Jarvis asks you first.
+_GITHUB_READ_TOOLS = [   # GitHub's server as of Oct 2026 (issue_read / pull_request_read cover details, CI status)
+    "get_me", "issue_read", "pull_request_read", "list_issues", "search_issues", "list_pull_requests",
+    "search_pull_requests", "get_file_contents", "list_commits", "get_commit", "search_commits", "list_branches",
+    "list_tags", "get_tag", "list_releases", "get_latest_release", "get_release_by_tag", "get_label",
+    "list_issue_types", "list_issue_fields", "search_code", "search_repositories",
+]
+CODE_ALLOWED_TOOLS += [f"mcp__github__{t}" for t in _GITHUB_READ_TOOLS]
 
 # External tools
 MPV_EXE    = r"C:\Users\paten\OneDrive\Desktop\Tools\mpv\mpv.exe"   # or just "mpv" if it's on PATH

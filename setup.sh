@@ -7,7 +7,7 @@ echo "Installing JARVIS dependencies..."
 
 pip install anthropic python-dotenv Pillow \
     sounddevice numpy faster-whisper vosk requests \
-    flask flask-cors webrtcvad "yt-dlp[default]" pycaw comtypes pypdf trafilatura
+    flask flask-cors webrtcvad "yt-dlp[default]" pycaw comtypes pypdf trafilatura sherpa-onnx
 
 echo ""
 echo "Downloading Vosk speech model..."
@@ -20,6 +20,17 @@ if [ ! -d "models/vosk-model-small-en-us-0.15" ]; then
     echo "  Vosk model downloaded."
 else
     echo "  Vosk model already present, skipping."
+fi
+
+echo ""
+echo "Downloading the speaker model (voice ID: Jarvis answers only your voice)..."
+mkdir -p models/speaker
+if [ ! -f "models/speaker/nemo_en_titanet_small.onnx" ]; then
+    curl -L -o models/speaker/nemo_en_titanet_small.onnx \
+        https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/nemo_en_titanet_small.onnx
+    echo "  Speaker model downloaded. Then say: \"Jarvis, learn my voice\""
+else
+    echo "  Speaker model already present, skipping."
 fi
 
 echo ""

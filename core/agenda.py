@@ -22,7 +22,7 @@ import re
 import threading
 import time
 
-from . import config, events, stage, state
+from . import config, events, notify, stage, state
 from .registry import action
 from .tts import speak
 
@@ -367,6 +367,20 @@ def unmark(item_id, date=""):
         return True
 
 
+def snooze(item_id, occ_key, minutes=60):
+    """Remind again about one occurrence in `minutes` (the phone's Snooze button)."""
+    with _lock:
+        item = get(item_id)
+        if not item:
+            return False
+        key = occ_key if _date(occ_key) else (_current_occurrence(item) or {}).get("key")
+        if not key:
+            return False
+        item.setdefault("snooze", {}).setdefault(key, []).append(time.time() + minutes * 60)
+        _save()
+        return True
+
+
 def add_timer(seconds, label=""):
     when = dt.datetime.now() + dt.timedelta(seconds=seconds)
     with _lock:
@@ -394,19 +408,21 @@ def _fire_time(spec, o):
 
 
 def _reminders(now):
-    """Every reminder due between now - _GRACE and two days from now: [(fire datetime, key, message, item)]."""
+    """Every reminder due between now - _GRACE and two days from now:
+    [(fire datetime, key, message, item, occurrence or None)]."""
     out = []
     for item in items():
         if item["kind"] == "timer":
             at = dt.datetime.fromtimestamp(item["at"])
             label = f": {item['text']}" if item["text"] else ""
-            out.append((at, f"{item['id']}|timer", f"Time's up{label}.", item))
+            out.append((at, f"{item['id']}|timer", f"Time's up{label}.", item, None))
             continue
         for o in occurrences(item, now.date() - dt.timedelta(days=1), now.date() + dt.timedelta(days=9)):
             if o["done"] or o["skipped"]:
                 continue
-            for spec in item.get("remind", []):
-                fire = _fire_time(spec, o)
+            snoozed = [(dt.datetime.fromtimestamp(t), f"snooze{int(t)}")
+                       for t in item.get("snooze", {}).get(o["key"], [])]
+            for fire, spec in [(_fire_time(s, o), s) for s in item.get("remind", [])] + snoozed:
                 if fire is None or fire > now + dt.timedelta(days=2) or fire < now - dt.timedelta(seconds=_GRACE):
                     continue
                 if item["kind"] == "deadline":
@@ -417,7 +433,7 @@ def _reminders(now):
                     msg = f"Reminder, sir: {item['text']} {soon}."
                 else:
                     msg = f"Reminder, sir: {item['text']}."
-                out.append((fire, f"{item['id']}|{o['key']}|{spec}", msg, item))
+                out.append((fire, f"{item['id']}|{o['key']}|{spec}", msg, item, o))
     return sorted(out, key=lambda r: r[0])
 
 
@@ -431,12 +447,19 @@ def _loop():
         now = dt.datetime.now()
         pending = [r for r in _reminders(now) if r[1] not in _data["fired"]]
         due = [r for r in pending if r[0] <= now]
-        if due and not _idle():          # don't talk over a command: try again shortly
+        away = notify.away()
+        if due and not away and not _idle():   # don't talk over a command: try again shortly
             _wake.wait(3)
             _wake.clear()
             continue
-        for fire, key, msg, item in due:
-            speak(msg)
+        for fire, key, msg, item, o in due:
+            # at the PC: say it. Away: send it to the phone. A deadline close to due: both.
+            urgent = (bool(o) and item["kind"] == "deadline"
+                      and (o["at"] - now).total_seconds() <= config.PHONE_URGENT_HOURS * 3600)
+            if not away:
+                speak(msg)
+            if away or urgent:
+                notify.reminder(msg, item, o["key"] if o else None)
             with _lock:
                 _data["fired"][key] = time.time()
                 if item["kind"] == "timer":

@@ -78,12 +78,12 @@ export default function CodePanel({ panel }: PanelProps) {
           <span className="codeMeta">{elapsed(d.duration)}{d.cost ? ` · $${d.cost.toFixed(2)}` : ''}</span>
         )}
         {status === 'running'
-          ? <button className="fileBtn fileBtnReject" onClick={() => post('stop')}>Stop</button>
+          ? <button className="fileBtn fileBtnReject" onClick={() => post('stop', { project: panel.data.project })}>Stop</button>
           : (
             <>
-              <button className="fileBtn" title="Open the project in VS Code" onClick={() => post('vscode')}>VS Code</button>
+              <button className="fileBtn" title="Open the project in VS Code" onClick={() => post('vscode', { project: panel.data.project })}>VS Code</button>
               <button className="fileBtn" title="Continue this conversation in an interactive Claude Code window"
-                      onClick={() => post('terminal')}>Terminal</button>
+                      onClick={() => post('terminal', { project: panel.data.project })}>Terminal</button>
             </>
           )}
       </div>
@@ -122,7 +122,7 @@ export default function CodePanel({ panel }: PanelProps) {
             Needs your permission to run:
             {denials.map((x, i) => <code key={i}>{x.command}</code>)}
           </div>
-          <button className="fileBtn fileBtnAccept" onClick={() => post('approve')}>Allow &amp; continue</button>
+          <button className="fileBtn fileBtnAccept" onClick={() => post('approve', { project: panel.data.project })}>Allow &amp; continue</button>
         </div>
       )}
 

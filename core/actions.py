@@ -11,7 +11,7 @@ import webbrowser
 from urllib.parse import quote_plus
 
 from . import agenda, agent, audio, brain, config, files, media, music, stage, state
-from . import briefing, coding, memory, places, stage_actions  # noqa: F401  (register the briefing, Claude Code, memory, places and Stage actions)
+from . import briefing, coding, memory, notify, places, stage_actions  # noqa: F401  (register their actions)
 from .generate import generate_file_content, summarize_for_speech
 from .registry import ACTIONS, action
 from .tts import speak

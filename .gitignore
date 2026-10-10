@@ -12,3 +12,6 @@ stage_state.json.tmp
 __pycache__/
 jarvis_memory/
 jarvis_input/archive/
+models/speaker/
+models/whisper-*/
+jarvis_voice_data.zip

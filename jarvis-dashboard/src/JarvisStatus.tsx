@@ -109,7 +109,7 @@ export function JarvisStatusProvider({ children }: { children: ReactNode }) {
         }
         const lg: LogEntry[] = data.log ?? [];
         const last = lg[lg.length - 1];
-        const sig = last ? `${lg.length}|${last.time}|${last.text}` : '';
+        const sig = last ? `${lg.length}|${last.time}|${last.text}|${data.log_rev ?? 0}` : '';
         if (sig !== logSig.current) { logSig.current = sig; setLog(lg); }
         const m: MusicState = {
           playing:     !!data.music_playing,

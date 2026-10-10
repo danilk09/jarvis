@@ -381,6 +381,19 @@
 }
 .msgUser .msgMeta span:first-child { color: var(--green); }
 .msgText { font-size: 15px; line-height: 1.45; color: var(--text-bright); white-space: pre-wrap; word-break: break-word; }
+.msgLabel { margin-left: 8px; white-space: nowrap; }
+.msgLabel button {
+  background: none; border: none; padding: 0 3px; cursor: pointer;
+  font-size: 12px; color: var(--text-dim); opacity: 0; transition: opacity 0.15s, color 0.15s;
+}
+.msg:hover .msgLabel button { opacity: 1; }
+.msgLabel button:hover { color: var(--green); }
+.msgLabelDone { font-size: 11px; color: var(--green); opacity: 0.7; }
+.msgEdit {
+  width: 100%; box-sizing: border-box; font: inherit; font-size: 15px;
+  color: var(--text-bright); background: rgba(0,0,0,0.35);
+  border: 1px solid var(--green); border-radius: 4px; padding: 3px 6px; outline: none;
+}
 
 .feedEmpty {
   flex: 1;

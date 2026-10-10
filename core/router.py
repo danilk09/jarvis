@@ -83,6 +83,15 @@ def route(command):
     if re.fullmatch(r"what do you (remember|know) about me|show (me )?(my|your) memory", text):
         return {"mode": "action", "actions": [{"type": "memory", "command": "show"}]}
 
+    if re.fullmatch(r"(learn|train|enroll|memorize) my voice( again)?|add this (microphone|mic)", text):
+        return {"mode": "action", "actions": [{"type": "voice", "command": "enroll"}]}
+    if re.fullmatch(r"(do you|can you) recognize (me|my voice)|test my voice|whose voice is this", text):
+        return {"mode": "action", "actions": [{"type": "voice", "command": "test"}]}
+    m = re.fullmatch(r"turn (on|off) (the )?voice lock|(enable|disable) (the )?voice lock", text)
+    if m:
+        on = (m.group(1) or m.group(3)) in ("on", "enable")
+        return {"mode": "action", "actions": [{"type": "voice", "command": "lock_on" if on else "lock_off"}]}
+
     m = re.fullmatch(r"set (a |an )?timer for (\d+|[a-z]+(?: five)?) (second|minute|hour)s?", text)
     if m:
         amount = int(m.group(2)) if m.group(2).isdigit() else _NUMBER_WORDS.get(m.group(2))
@@ -100,5 +109,11 @@ def route(command):
         app = files.find_app(target)
         if app and len(target) >= 3 and app["name"].lower().startswith(target):
             return {"mode": "action", "actions": [{"type": "app", "target": app["name"]}]}
+        # Misheard names ("open this cord" → Discord): only a clear sound-alike, else Claude decides
+        name = files.closest_name(target, list(state.workspaces) + [a["name"] for a in files.APPS])
+        if name in state.workspaces:
+            return {"mode": "action", "actions": [{"type": "workspace", "target": name}]}
+        if name:
+            return {"mode": "action", "actions": [{"type": "app", "target": name}]}
 
     return None

@@ -13,6 +13,7 @@ Requires a `.env` file with:
 ```
 ANTHROPIC_API_KEY=sk-ant-...
 BRAVE_API_KEY=BSA...        # optional — enables real-time web search
+GITHUB_TOKEN=github_pat_... # optional — private repos + GitHub MCP for Claude Code (scripts/setup_github_mcp.py)
 ```
 
 ## Dependencies
@@ -28,7 +29,7 @@ Required packages (installed by setup.sh):
 ```bash
 pip install anthropic python-dotenv Pillow \
     sounddevice numpy faster-whisper vosk requests \
-    flask flask-cors webrtcvad "yt-dlp[default]" pycaw comtypes pypdf trafilatura
+    flask flask-cors webrtcvad "yt-dlp[default]" pycaw comtypes pypdf trafilatura sherpa-onnx
 ```
 
 The desktop app (needs Node.js): `cd desktop && npm install` — if `node_modules/electron/dist/electron.exe` is missing afterwards, run `node node_modules/electron/install.js`. Without it Jarvis opens the dashboard in the browser and Stage pages fall back to a reader view.
@@ -48,7 +49,11 @@ Optional (for music playback): download mpv from mpv.io (shinchiro Windows build
 | `config.py` | All settings, paths, the Anthropic client. Edit settings here. |
 | `state.py` | Shared state: dashboard status (`dash_state`), `workspaces` (mutated in place for hot-reload), session archive path |
 | `tts.py` | In-process SAPI speech via `comtypes` on one dedicated thread. `speak()`, `stop_tts()`, `wait_tts()`, `suppressed` |
-| `audio.py` | One shared 16 kHz mic stream → 2 s pre-roll ring + 3 s level history (noise floor), wake-word thread (Vosk, grammar: "jarvis" + decoys), and the command recorder (WebRTC VAD gated by loudness over the room). Whisper transcription; the false-wake check looks for "Jarvis" anywhere in the transcript. |
+| `audio.py` | One shared 16 kHz mic stream → 2 s pre-roll ring + 3 s level history (noise floor), wake-word thread (Vosk, grammar: "jarvis" + decoys), and the command recorder (WebRTC VAD gated by loudness over the room). Whisper transcription (via `asr.py`); the false-wake check looks for "Jarvis" anywhere in the transcript. Keeps the last recording in `audio.last_capture` for voice ID. |
+| `asr.py` | Whisper settings shared with `scripts/voice/benchmark.py`: hint prompt = fixed command phrases + workspace names + your vocabulary, prompt-echo stripping, learned fixes applied after decoding |
+| `speech_data.py` | Voice data in `jarvis_memory/voice/`: every command's audio + transcript, labels (true text), "heard → meant" corrections that become automatic fixes, `vocabulary.txt` |
+| `voice_id.py` | Speaker verification: NeMo TitaNet-small (ONNX via sherpa-onnx, ~80 ms on CPU) voiceprints vs. your enrolled profile; modes off / shadow / enforce |
+| `voice.py` | Voice ID in the conversation: `screen()` on every command, the "who is this?" challenge, enrollment ("learn my voice"), `voice` action |
 | `router.py` | Local fast path: music controls, "play X", "open <app>", time/date, timers, agenda questions, "breakdown of today", "what do you remember about me" — handled without calling Claude |
 | `brain.py` | `ask_claude()` — system prompt (built from the registry) + `CHAT_HISTORY` → one JSON object |
 | `registry.py` | `@action(name, schema, rules)` decorator; schemas/rules are compiled into the system prompt |
@@ -58,12 +63,13 @@ Optional (for music playback): download mpv from mpv.io (shinchiro Windows build
 | `briefing.py` | "Give me a breakdown of today": weather (Open-Meteo), headlines (Brave News), agenda, special days and yesterday's summary, gathered in parallel; one Haiku call writes the spoken version (opens with a holiday greeting, sky events as an aside); full breakdown as a Stage note |
 | `events.py` | Special days: US holidays + fun observances, daylight saving changes, moon phases and seasons (USNO API), meteor shower peaks, eclipses (2026-28), today's rocket launches (Launch Library 2). Upcoming holidays also go into the agenda prompt so Claude resolves "Thanksgiving week" correctly |
 | `places.py` | `find_places` ("pizza restaurants in Honolulu"): Brave search → Haiku picks named places with one-line descriptions → located with Photon (parallel) → `places` Stage panel; opening hours/websites filled in afterwards from Overpass |
+| `notify.py` | Phone notifications via ntfy: reminders when you're away from the PC (no input/voice for `PHONE_AWAY_MIN`), urgent deadlines always; Mark done / Snooze buttons call `POST /api/notify/action` over Tailscale (secret key in `jarvis_memory/notify.json`); `send_to_phone` action |
 | `agent.py` | "Do anything" fallback: tool-use loop (PowerShell, files, web, Claude Code hand-off via `coding.start`) with spoken confirmation for anything non-read-only |
 | `music.py` | yt-dlp (in-process) resolves, audio is fetched in range chunks and piped to mpv's stdin; YouTube Mix autoplay with next-track prefetch; ducks while listening and whenever Jarvis speaks (TTS hooks), via mpv IPC volume |
 | `files.py` | File index, bookmarks, Start-menu app index, workspaces |
 | `media.py` | Screenshots, image analysis/enhancement, `jarvis_input/` processing |
 | `generate.py` | `generate_file` content |
-| `coding.py` | Coding projects via Claude Code: `code` action (new / run / switch / stop / approve / remember …), headless `claude -p --output-format stream-json` runs streamed onto a Stage `code` panel, per-project session resume, voice approval of refused commands, preferences in `jarvis_coding/CLAUDE.md` |
+| `coding.py` | Coding projects via Claude Code: `code` action (new / run / switch / clone / repos / stop / approve / remember …), any repo in `REPO_DIRS` by spoken name, up to `CODE_MAX_PARALLEL` runs at once, a `jarvis/<task>` branch per task, headless `claude -p --output-format stream-json` runs streamed onto a Stage `code` panel, per-project session resume, voice approval of refused commands, preferences in `jarvis_coding/CLAUDE.md` |
 | `web.py` | Brave search + spoken summary, page fetching |
 | `server.py` | Flask: dashboard, JSON API, Stage API + event stream, `/phone` page (`core/static/phone.html`), Tailscale HTTPS |
 | `stage.py` | Stage state (panels, 12×12 layout, highlights) in memory; pushes every change to dashboards over SSE. Auto-tiling, voice references ("panel 2", "the map"), content helpers (`add_image`, `open_file`, `show_places`) |
@@ -75,6 +81,7 @@ Flow of one command:
 
 1. **Wake word** — `audio._wake_loop` feeds Vosk 100 ms batches while `audio.enable_wake()` is on. On "jarvis" it immediately runs `audio.on_wake` callbacks (`stop_tts`, `music.duck`), starts recording, and sets `audio.activated`.
 2. **Command** — `audio.capture_followup()` checks whether the user kept talking ("Jarvis, open Discord"); if not, Jarvis says "Yes sir" and `audio.listen_for_command()` records until silence. faster-whisper transcribes from memory.
+   **Voice ID** — `voice.screen()` scores the recording against your voiceprint, saves it to `jarvis_memory/voice/`, and (in enforce mode) drops or challenges anyone else. "No, I said X" labels the previous recording, learns the fix and runs X instead.
 3. **Routing** — `router.route()` handles common commands locally; otherwise `brain.ask_claude()` returns `{"mode": "action"|"chat"|"none", ...}`.
 4. **Execution** — `actions.handle_response()` looks each action's `type` up in `registry.ACTIONS`. Wake listening is re-enabled during execution so the user can interrupt.
 5. **TTS** — the TTS thread speaks queued text; real SAPI word positions drive the dashboard's `speech_beat`.
@@ -100,6 +107,7 @@ Flask API routes relevant to the dashboard:
 - `GET /status?files=<n>` — current state, transcript, conversation `log`, speech beat, current `speech` (id/start time), music state, and the file list (omitted when the client already has `n` files)
 - `GET /api/speech/<id>` — 16-band spectral envelope of one utterance (computed in `tts._envelope`); the orb replays it in sync with the audio
 - `POST /api/activate` — same as saying the wake word (clicking the orb)
+- `POST /api/voice/label` — `{sample, text}` corrects what Jarvis heard, `{sample, text, confirmed: true}` marks it right (the ✎ / ✓ on your lines in the Activity feed)
 - `GET /api/workspaces` — returns the contents of `workspaces.json`
 - `POST /api/workspaces` — writes `workspaces.json`, updates `state.workspaces`, and rebuilds the system prompt
 
@@ -125,6 +133,11 @@ Flask API: `GET /api/stage/events` (SSE), `POST /api/stage/layout | arrange | cl
 - **Permissions** — `CODE_PERMISSION_MODE = "acceptEdits"`: file edits and file operations inside the project are automatic; shell commands must match `CODE_ALLOWED_TOOLS` (`PowerShell(...)` and `Bash(...)` prefix rules — Claude Code's shell tool on this machine is PowerShell). Refused commands come back as `permission_denials`; Jarvis asks, and "allow it" (`coding.approve()`) resumes with each part of the command allowed. Claude Code's PowerShell permission parser can time out and refuse a command that then succeeds on retry, so only denials that never succeeded are reported.
 - **Voice → settings** — the `code` action carries `effort` (`--effort`), `model` (`--model`) and `plan_only` (`--permission-mode plan`; "go ahead" afterwards runs "Implement the plan you proposed."). Subagents aren't a flag: the user's wording stays in the request. Defaults: `CODE_EFFORT`, `CODE_MODEL` in `config.py`.
 - **Preferences** — `jarvis_coding/CLAUDE.md`. Claude Code loads CLAUDE.md from the project folder and every parent, so this applies to every project. "Remember I prefer X" appends a line (`coding.remember_pref`); "show my coding preferences" opens it on the Stage.
+- **Your repos** — every folder in `REPO_DIRS` (default `Desktop/GitHub`) is a project: "work on murphys next js" matches `murphys-nextjs` (`_find_project`: exact ignoring separators, then all words, shortest wins, then closest spelling). "Clone my X repo" clones from `github.com/GITHUB_USER` (private repos need `GITHUB_TOKEN` in `.env`). "Which repos have changes" → `repo_status()` note on the Stage.
+- **Parallel runs** — `_jobs` holds one run per project, up to `CODE_MAX_PARALLEL` (3). Each has its own Stage `code` panel; finishes are announced by project name. stop / approve / VS Code / terminal take a project (panel buttons send theirs); approve defaults to the current project, else the one that asked last.
+- **Branch per task** (`CODE_BRANCH_PER_TASK`) — before a run in a git repo, `_prepare_branch` creates `jarvis/<task-slug>` from the current branch (asking first if there are uncommitted changes); follow-ups stay on a `jarvis/` branch unless `fresh_branch`. Claude Code is told to commit there and not push/merge/switch; `git push` isn't allowed, so it comes back as a denial and Jarvis asks. Plans and `question` runs (read-only questions like "any new issues on hiclimb", run in plan mode at low effort) don't branch.
+- **GitHub** — `scripts/setup_github_mcp.py` registers GitHub's MCP server (`https://api.githubcopilot.com/mcp/`, user scope) with the token from `.env`. Read tools (`mcp__github__get_*`, `list_*`, `search_*`…) are in `CODE_ALLOWED_TOOLS`; anything that writes (open PR, comment, merge) is denied and approved by voice — `approve()` allows the tool itself.
+- **Phone** — headless runs can't be watched through Remote Control (it only works in interactive sessions, and `--remote-control` is silently ignored with `-p`). Instead: "continue this on my phone" (`open_on_phone`) reopens the project's conversation as `claude --resume <session> --remote-control "Jarvis - <project>"` in a minimized console, so it appears in the Claude app with its history; Jarvis closes that window (`_close_remote`) before its next run in the project so the two never write to the same conversation. Interactive sessions stop at Claude Code's folder-trust prompt, so an untrusted folder (`trusted()` reads `~/.claude.json`) opens visibly instead. When a run finishes while you're away (`CODE_NOTIFY`), `_notify_finish` sends an ntfy notification with **Continue on phone** and, if something was refused, **Allow** buttons (`do: phone` / `do: approve` in `notify.handle_action`).
 - **Billing** — `CODE_USE_API_KEY = False` strips `ANTHROPIC_API_KEY` from Claude Code's environment so it uses the user's Claude login (the `.env` key would otherwise take precedence).
 
 ## Memory and agenda
@@ -135,6 +148,17 @@ Everything lives in `jarvis_memory/` (git-ignored):
 - **`conversations/YYYY-MM-DD.jsonl`** — everything said (`state.on_log` → `memory.log`). After `MEMORY_REVIEW_IDLE_MIN` quiet minutes, `memory.review()` asks Haiku for add/update/delete ops (never secrets, never agenda items). `daily/YYYY-MM-DD.md` summaries of past days are written hourly; the last 3 go in the prompt. `memory recall` answers "what did we talk about…" from them.
 - **`chat_history.json`** — `CHAT_HISTORY`, restored at startup if under `CHAT_HISTORY_KEEP_MIN` old.
 - **`agenda.json`** — items `{id, kind: deadline|appointment|task|timer, text, group, when | repeat, remind, done, skip}`. A recurring item is one rule (`repeat: {every, days, time, from, until, interval}`); occurrences are keyed by date, so done/skip apply per week. Occurrences due before the item was created never count as overdue. Python does all date math; the prompt gets `NOW`, every item's id and schedule, overdue items and the next 7 days. Reminder specs: `"30m"`, `"2h"`, `"1d@19:00"` (defaults per kind in `config.AGENDA_REMIND_DEFAULTS`); fired reminders are recorded, so restarts neither repeat nor (within 15 min) miss them. Reminders wait until Jarvis is idle. The `timer` action is stored here too. Recurring adds are read back for a spoken yes/no; "this semester" uses the semester end from memory or asks for it.
+
+## Voice ID and voice training
+
+Everything lives in `jarvis_memory/voice/` (git-ignored). Model: `models/speaker/nemo_en_titanet_small.onnx` (git-ignored, `setup.sh` downloads it). The WeSpeaker models sherpa-onnx offers separated real speakers poorly in testing (different speakers up to 0.89 cosine); TitaNet-small scored same speaker ≈0.6-0.8 vs. others ≈0-0.3.
+
+- **Enrollment** — "Jarvis, learn my voice": ~30 lines (`voice.ENROLL_LINES` + "open <workspace>") read from a Stage note; each good recording becomes a voiceprint for the current mic and a labeled sample. Repeat per microphone. `profile.npz` holds enrolled + adapted voiceprints (recordings ≥ `VOICE_ADAPT` are added, max 40).
+- **Scoring** — mean cosine to the 5 closest voiceprints, over speech frames only (webrtcvad). Under 1 s of speech both thresholds drop by 0.08. Verdicts: `owner` / `unsure` / `other`, `new_mic` (no enrollment on this mic → allowed with a one-time hint), `none` (off / not enrolled / too short).
+- **Modes** (`VOICE_ID_MODE`, overridden by "turn on/off voice lock" → `settings.json`) — `shadow` logs scores only; `enforce`: unsure → "say it again?"; other after the wake word → ignored silently (also before "Yes sir" if "Jarvis" itself clearly wasn't you); other when Jarvis was made to listen (orb click, after "Yes sir", answering its question) → "Who is this?", logged to `visitors.jsonl`, refused. `agent.confirm` ignores a "yes" that clearly wasn't you. Phone commands aren't checked (Tailscale-authenticated). `VOICE_GUEST_MODE` lets strangers chat but turns their actions into a refusal.
+- **Data** — every screened command is saved (`samples/<day>/<id>.wav` + `samples.jsonl`), except refused strangers in enforce mode. Labels come from enrollment, "no, I said …", the dashboard ✎/✓, or `scripts/voice/label.py`. Unlabeled recordings are pruned after `VOICE_SAMPLE_DAYS`. One-breath commands store a `prefix` ("Jarvis, ") so a label of the command alone still matches the audio.
+- **Fixes and vocabulary** — a correction diffs heard vs. meant words; a pair seen `VOICE_RULE_MIN` times is applied to every transcript (`corrections.json`). Corrected words and `vocabulary.txt` go into the Whisper prompt. "Open <misheard app>" also fuzzy-matches app/workspace names (`files.closest_name`). Comparisons normalize number words ("three" = "3").
+- **Scripts** (`scripts/voice/`) — `benchmark.py` (WER + speed per model on your labeled recordings, same decoding as Jarvis), `label.py` (play + label recordings in the terminal), `calibrate.py` (threshold suggestions from your scores), `export.py` (zip for fine-tuning), `finetune.py` (LoRA on `openai/whisper-small.en`, GPU/Colab only → CTranslate2 folder for `WHISPER_MODEL`).
 
 ## Workspaces
 
@@ -151,7 +175,12 @@ Edit them at `http://localhost:5151/workspaces`. Changes save instantly and hot-
 | `WAKE_WORD` | Defaults to `"jarvis"` |
 | `WAKE_GRAMMAR` / `WAKE_DECOYS` | Vosk listens only for the wake word plus sound-alike decoy words (default). Full-vocabulary mode (`False`) falls behind real time in loud rooms; it's capped to 4 s utterances and a 1 s backlog guard skips ahead |
 | `SPEECH_OVER_NOISE` | How much louder than the room (median of the last 3 s) speech must be, over a 0.4 s window, for end-of-speech detection. Raise if recordings run on in noise, lower if quiet speech gets cut off |
-| `WHISPER_MODEL` | faster-whisper model (`base.en`). Transcription runs with no temperature fallback (noisy audio otherwise took 20-40 s) and strips echoes of the hint prompt (`audio._strip_prompt_echo`) |
+| `WHISPER_MODEL` | faster-whisper model (`base.en`) or a fine-tuned model folder. Transcription runs with no temperature fallback (noisy audio otherwise took 20-40 s) and strips echoes of the hint prompt (`asr.strip_prompt_echo`). Pick with `scripts/voice/benchmark.py` |
+| `WHISPER_BEAM` / `WHISPER_VOCAB_PROMPT` | Beam size (1 = greedy); whether your vocabulary goes into the hint prompt |
+| `VOICE_ID_MODE` | `"off"` / `"shadow"` (score only) / `"enforce"` (only your voice) — voice "turn on/off voice lock" overrides it |
+| `VOICE_ACCEPT` / `VOICE_REJECT` / `VOICE_ADAPT` | Score thresholds (0.45 / 0.25 / 0.60); tune with `scripts/voice/calibrate.py` |
+| `OWNER_NAME` / `VOICE_GUEST_MODE` | Your name in refusals (empty = from memory); let strangers chat (no actions) |
+| `VOICE_SAVE_SAMPLES` / `VOICE_SAMPLE_DAYS` / `VOICE_RULE_MIN` | Save command recordings; days to keep unlabeled ones; corrections before a fix is automatic |
 | `INPUT_DEVICE` | Mic name fragment to pin (e.g. `"AirPods"`); empty = follow the Windows default, switching automatically when it changes |
 | `FOLLOWUP_WINDOW` | Seconds to wait after the wake word for a one-breath command before saying "Yes sir" (0.9 — a natural pause after "Jarvis," is ~0.3 s) |
 | `MPV_EXE` / `ESRGAN_EXE` | Paths to optional external tools |
@@ -160,6 +189,9 @@ Edit them at `http://localhost:5151/workspaces`. Changes save instantly and hot-
 | `CODE_PERMISSION_MODE` / `CODE_ALLOWED_TOOLS` | What background Claude Code may do without asking |
 | `CODE_MODEL` / `CODE_EFFORT` | Default Claude Code model and thinking effort (voice overrides per request) |
 | `PROMPT_CACHE_TTL` | Prompt cache lifetime: `"5m"` (cheaper writes, for back-to-back commands) or `"1h"` |
+| `PHONE_PUSH` / `NTFY_SERVER` / `NTFY_TOPIC` / `PHONE_AWAY_MIN` / `PHONE_URGENT_HOURS` | Phone notifications (ntfy): on/off, server, topic (empty = random, saved), how long away before reminders go to the phone, deadlines that always go |
+| `CODE_NOTIFY` | Phone notification when a Claude Code run finishes: `"away"` (default), `"always"` or `"never"` |
+| `REPO_DIRS` / `GITHUB_USER` / `CODE_MAX_PARALLEL` / `CODE_BRANCH_PER_TASK` | Where your repos live, your GitHub user (for cloning), parallel Claude Code runs, branch per task |
 | `ANSWER_WINDOW` | Seconds Jarvis waits for you to start answering its question before going back to the wake word |
 | `HOME_CITY` / `UNITS` / `BRIEFING_NEWS` | Daily breakdown: weather city (empty = from memory, or ask once), °F/°C, news searches |
 | `MEMORY_REVIEW_IDLE_MIN` / `CHAT_HISTORY_KEEP_MIN` | Quiet minutes before the memory review runs; how recent a conversation must be to survive a restart |
