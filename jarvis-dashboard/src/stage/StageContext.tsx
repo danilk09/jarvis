@@ -5,7 +5,7 @@ import { useLocation, useNavigate } from 'react-router-dom';
 // server is the single source of truth: voice commands and mouse edits both go
 // through it, and every change comes back here as a full snapshot.
 
-export type PanelKind = 'page' | 'summary' | 'file' | 'image' | 'note' | 'map' | 'code';
+export type PanelKind = 'page' | 'summary' | 'file' | 'image' | 'note' | 'map' | 'places' | 'code';
 
 export interface Panel {
   id: string;
@@ -22,7 +22,7 @@ export interface HighlightTarget {
   quote?: string;            // page / note / summary
   region?: number[];         // image: [x, y, w, h] as fractions
   lines?: number[];          // file: [first, last]
-  place?: number;            // map: index into data.places
+  place?: number;            // map / places: index into data.places
 }
 
 export interface Highlight {

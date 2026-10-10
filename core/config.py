@@ -45,6 +45,9 @@ WAKE_DECOYS  = ["service", "nervous", "harvest", "travis", "mavis", "jars", "pur
 # After the wake word, how long to wait for you to keep talking ("Jarvis, open Discord")
 # before falling back to "Yes sir" and a separate listen.
 FOLLOWUP_WINDOW = 0.9  # seconds (a natural pause after "Jarvis," is ~0.3 s)
+# When Jarvis asks you something ("What would you like to play?"), it listens for the answer
+# without the wake word. Seconds to start answering before it goes back to waiting for "Jarvis".
+ANSWER_WINDOW = 6
 # Speech-to-text model (faster-whisper). "base.en" is English-only: same speed as "base" but
 # hears "Jarvis" much more reliably in background noise. "small.en" is more accurate, ~3x slower.
 WHISPER_MODEL = "base.en"
@@ -66,6 +69,27 @@ JARVIS_OUTPUT_DIR = os.path.join(ROOT, "jarvis_output")
 INPUT_ARCHIVE_DIR = os.path.join(JARVIS_INPUT_DIR, "archive")
 LOG_DIR           = os.path.join(ROOT, "logs")
 CODING_DIR        = os.path.join(os.path.expanduser("~"), "OneDrive", "Desktop", "jarvis_coding")
+# Everything Jarvis remembers: memory.md (facts — edit it freely), agenda.json,
+# conversation logs and daily summaries. Git-ignored; back this folder up.
+MEMORY_DIR        = os.path.join(ROOT, "jarvis_memory")
+
+# ── Memory and agenda (core/memory.py, core/agenda.py) ────────────────────────
+# After this many quiet minutes Jarvis reviews the conversation for facts worth keeping
+MEMORY_REVIEW_IDLE_MIN = 10
+# Recent conversation survives a restart if it's younger than this
+CHAT_HISTORY_KEEP_MIN  = 30
+# Default reminders per kind: "30m"/"2h"/"1d" before, or "1d@19:00" = 7 PM the day before
+# ("0d@09:00" = 9 AM the same day). Saying "remind me an hour before" overrides them.
+AGENDA_REMIND_DEFAULTS = {
+    "appointment": ["30m"],
+    "deadline":    ["1d@19:00", "0d@09:00"],
+    "task":        [],
+}
+# Daily breakdown ("give me a breakdown of today"). HOME_CITY empty = use the city from
+# memory, or ask once and remember it.
+HOME_CITY     = ""
+UNITS         = "imperial"           # "imperial" (°F, mph) or "metric" (°C, km/h)
+BRIEFING_NEWS = ["top news today"]   # news searches for the headlines; add topics you follow
 
 # ── Claude Code (coding projects, see core/coding.py) ─────────────────────────
 # Your coding preferences live in CODING_DIR/CLAUDE.md — say "remember I prefer ..." to add one.

@@ -69,6 +69,20 @@ def route(command):
     if reply:
         return {"mode": "chat", "reply": reply}
 
+    m = re.fullmatch(r"what('s| is| do i have)( on)? (my agenda|my schedule|due)( (for )?(today|tomorrow|this week))?"
+                     r"|what do i have( on| due)? (today|tomorrow|this week)", text)
+    if m:
+        rng = next((w for w in ("today", "tomorrow") if w in text), "week")
+        return {"mode": "action", "actions": [{"type": "agenda", "command": "list", "range": rng}]}
+    if re.fullmatch(r"(give me |what's |what is )?(a |the |my )?(daily |morning )?(breakdown|briefing|brief|rundown)"
+                    r"( (of|for) (today|the day))?|brief me|(give me )?(a |my )?(daily|morning) (briefing|brief|breakdown)"
+                    r"|what does (today|my day) look like", text):
+        return {"mode": "action", "actions": [{"type": "briefing"}]}
+    if re.fullmatch(r"show (me )?my (agenda|schedule)", text):
+        return {"mode": "action", "actions": [{"type": "agenda", "command": "show"}]}
+    if re.fullmatch(r"what do you (remember|know) about me|show (me )?(my|your) memory", text):
+        return {"mode": "action", "actions": [{"type": "memory", "command": "show"}]}
+
     m = re.fullmatch(r"set (a |an )?timer for (\d+|[a-z]+(?: five)?) (second|minute|hour)s?", text)
     if m:
         amount = int(m.group(2)) if m.group(2).isdigit() else _NUMBER_WORDS.get(m.group(2))

@@ -49,10 +49,15 @@ Optional (for music playback): download mpv from mpv.io (shinchiro Windows build
 | `state.py` | Shared state: dashboard status (`dash_state`), `workspaces` (mutated in place for hot-reload), session archive path |
 | `tts.py` | In-process SAPI speech via `comtypes` on one dedicated thread. `speak()`, `stop_tts()`, `wait_tts()`, `suppressed` |
 | `audio.py` | One shared 16 kHz mic stream → 2 s pre-roll ring + 3 s level history (noise floor), wake-word thread (Vosk, grammar: "jarvis" + decoys), and the command recorder (WebRTC VAD gated by loudness over the room). Whisper transcription; the false-wake check looks for "Jarvis" anywhere in the transcript. |
-| `router.py` | Local fast path: music controls, "play X", "open <app>", time/date, timers — handled without calling Claude |
+| `router.py` | Local fast path: music controls, "play X", "open <app>", time/date, timers, agenda questions, "breakdown of today", "what do you remember about me" — handled without calling Claude |
 | `brain.py` | `ask_claude()` — system prompt (built from the registry) + `CHAT_HISTORY` → one JSON object |
 | `registry.py` | `@action(name, schema, rules)` decorator; schemas/rules are compiled into the system prompt |
 | `actions.py` | All built-in action handlers + `handle_response()` |
+| `memory.py` | Long-term memory: facts in `jarvis_memory/memory.md` (cached prompt block), daily conversation logs, background review that saves facts mentioned in passing, daily summaries, `memory` action (remember / forget / update / show / recall) |
+| `agenda.py` | Deadlines, appointments, to-dos and timers in `jarvis_memory/agenda.json`; recurring rules; reminder thread; `agenda` action; the NOW + agenda lines in the live prompt block |
+| `briefing.py` | "Give me a breakdown of today": weather (Open-Meteo), headlines (Brave News), agenda, special days and yesterday's summary, gathered in parallel; one Haiku call writes the spoken version (opens with a holiday greeting, sky events as an aside); full breakdown as a Stage note |
+| `events.py` | Special days: US holidays + fun observances, daylight saving changes, moon phases and seasons (USNO API), meteor shower peaks, eclipses (2026-28), today's rocket launches (Launch Library 2). Upcoming holidays also go into the agenda prompt so Claude resolves "Thanksgiving week" correctly |
+| `places.py` | `find_places` ("pizza restaurants in Honolulu"): Brave search → Haiku picks named places with one-line descriptions → located with Photon (parallel) → `places` Stage panel; opening hours/websites filled in afterwards from Overpass |
 | `agent.py` | "Do anything" fallback: tool-use loop (PowerShell, files, web, Claude Code hand-off via `coding.start`) with spoken confirmation for anything non-read-only |
 | `music.py` | yt-dlp (in-process) resolves, audio is fetched in range chunks and piped to mpv's stdin; YouTube Mix autoplay with next-track prefetch; ducks while listening and whenever Jarvis speaks (TTS hooks), via mpv IPC volume |
 | `files.py` | File index, bookmarks, Start-menu app index, workspaces |
@@ -73,6 +78,7 @@ Flow of one command:
 3. **Routing** — `router.route()` handles common commands locally; otherwise `brain.ask_claude()` returns `{"mode": "action"|"chat"|"none", ...}`.
 4. **Execution** — `actions.handle_response()` looks each action's `type` up in `registry.ACTIONS`. Wake listening is re-enabled during execution so the user can interrupt.
 5. **TTS** — the TTS thread speaks queued text; real SAPI word positions drive the dashboard's `speech_beat`.
+6. **Answers without the wake word** — any spoken line ending in "?" is recorded in `tts.last_question`. When a turn ends (or, while idle, when a background job like Claude Code asks), if nothing has listened since (`audio.last_listen`), `jarvis._listen_for_answer` listens for `ANSWER_WINDOW` seconds and sends the reply on as `(Answering your question "...") <answer>`. Up to 3 in a row; "never mind" or silence ends it. Handlers that ask and listen themselves (`agent.confirm`) aren't asked twice. Claude is told to end with a question only when it needs the answer.
 
 **Adding a command:** write a handler in `core/actions.py` decorated with `@action("type", schema='{"type":"type",...}', rules=['"trigger phrase" → type "type"'])`. It appears in Claude's system prompt automatically. If it's common and unambiguous, also add a pattern to `core/router.py` so it skips the API.
 
@@ -103,7 +109,7 @@ Flask API routes relevant to the dashboard:
 
 - **Saved between runs** — every change is written (debounced) to `stage_state.json` (`config.STAGE_STATE_FILE`, git-ignored) and `stage.load()` restores it at startup: file panels reload their contents from disk, image/file panels whose file is gone are dropped. "Clear the stage" resets it. Closing panels, clearing, and auto-closing past `MAX_PANELS` are undoable (`stage.restore_removed()`, voice "restore the stage", the Undo button), and the undo survives restarts too.
 
-- **Panel kinds** — `page` (live web page: an Electron `<webview>` in the desktop app, reader view in a browser), `summary` (key points, each linked to a quote in its page), `file` (Monaco editor, autosaves to `jarvis_output/`; Jarvis's edits arrive as a diff to accept/reject), `image`, `note` (Markdown; double-click or Edit to change it by hand), `map` (CesiumJS globe, loaded from the jsDelivr CDN on first use).
+- **Panel kinds** — `page` (live web page: an Electron `<webview>` in the desktop app, reader view in a browser), `summary` (key points, each linked to a quote in its page), `file` (Monaco editor, autosaves to `jarvis_output/`; Jarvis's edits arrive as a diff to accept/reject), `image`, `note` (Markdown; double-click or Edit to change it by hand), `map` (CesiumJS globe, loaded from the jsDelivr CDN on first use), `places` (numbered options beside a Leaflet street map with Esri's keyless dark tiles — Leaflet from jsDelivr, wrapped like Cesium so Monaco's AMD `define` doesn't swallow it; clicking an option or pin highlights `{"place": i}`).
 - **Layout** — 12×12 grid filling the screen. `auto` splits the screen recursively by each kind's weight (`stage.KIND_WEIGHT`); `focus` and `columns` too. Drag by the header (drop on another panel to swap), resize from edges, or by voice. Manual edits make the layout `custom` until the next arrange.
 - **Highlights** — `stage.highlight(panel, target, label)`: `{"quote"}` (page/note/summary, found and marked inside the page by `pageScripts.ts`), `{"region": [x,y,w,h]}` (image, fractions), `{"lines": [a,b]}` (file), `{"place": i}` (map). `speak(text, on_start=...)` fires a highlight the moment that sentence starts, and a beam is drawn from the Stage orb to the mark.
 - **Frontend** — `jarvis-dashboard/src/stage/`: `StageContext.tsx` (SSE), `StagePage.tsx` (react-grid-layout), `panels/*`, `StageBeam.tsx`, `anchors.ts`. `pageScripts.ts` functions are injected into live pages via `toString()`, so they must stay plain ES5 with no outside references.
@@ -120,6 +126,15 @@ Flask API: `GET /api/stage/events` (SSE), `POST /api/stage/layout | arrange | cl
 - **Voice → settings** — the `code` action carries `effort` (`--effort`), `model` (`--model`) and `plan_only` (`--permission-mode plan`; "go ahead" afterwards runs "Implement the plan you proposed."). Subagents aren't a flag: the user's wording stays in the request. Defaults: `CODE_EFFORT`, `CODE_MODEL` in `config.py`.
 - **Preferences** — `jarvis_coding/CLAUDE.md`. Claude Code loads CLAUDE.md from the project folder and every parent, so this applies to every project. "Remember I prefer X" appends a line (`coding.remember_pref`); "show my coding preferences" opens it on the Stage.
 - **Billing** — `CODE_USE_API_KEY = False` strips `ANTHROPIC_API_KEY` from Claude Code's environment so it uses the user's Claude login (the `.env` key would otherwise take precedence).
+
+## Memory and agenda
+
+Everything lives in `jarvis_memory/` (git-ignored):
+
+- **`memory.md`** — facts about the user, one bullet each under `## About me / People / Preferences / Places / Other`. The user may edit it freely (on the Stage: "what do you remember about me"); it's re-read when it changes. Every bullet goes into the system prompt as a second cached block, numbered so the `memory` action can forget/update by number. Bullets ending in `(auto)` came from the background review, which may only update/delete `(auto)` facts.
+- **`conversations/YYYY-MM-DD.jsonl`** — everything said (`state.on_log` → `memory.log`). After `MEMORY_REVIEW_IDLE_MIN` quiet minutes, `memory.review()` asks Haiku for add/update/delete ops (never secrets, never agenda items). `daily/YYYY-MM-DD.md` summaries of past days are written hourly; the last 3 go in the prompt. `memory recall` answers "what did we talk about…" from them.
+- **`chat_history.json`** — `CHAT_HISTORY`, restored at startup if under `CHAT_HISTORY_KEEP_MIN` old.
+- **`agenda.json`** — items `{id, kind: deadline|appointment|task|timer, text, group, when | repeat, remind, done, skip}`. A recurring item is one rule (`repeat: {every, days, time, from, until, interval}`); occurrences are keyed by date, so done/skip apply per week. Occurrences due before the item was created never count as overdue. Python does all date math; the prompt gets `NOW`, every item's id and schedule, overdue items and the next 7 days. Reminder specs: `"30m"`, `"2h"`, `"1d@19:00"` (defaults per kind in `config.AGENDA_REMIND_DEFAULTS`); fired reminders are recorded, so restarts neither repeat nor (within 15 min) miss them. Reminders wait until Jarvis is idle. The `timer` action is stored here too. Recurring adds are read back for a spoken yes/no; "this semester" uses the semester end from memory or asks for it.
 
 ## Workspaces
 
@@ -145,6 +160,10 @@ Edit them at `http://localhost:5151/workspaces`. Changes save instantly and hot-
 | `CODE_PERMISSION_MODE` / `CODE_ALLOWED_TOOLS` | What background Claude Code may do without asking |
 | `CODE_MODEL` / `CODE_EFFORT` | Default Claude Code model and thinking effort (voice overrides per request) |
 | `PROMPT_CACHE_TTL` | Prompt cache lifetime: `"5m"` (cheaper writes, for back-to-back commands) or `"1h"` |
+| `ANSWER_WINDOW` | Seconds Jarvis waits for you to start answering its question before going back to the wake word |
+| `HOME_CITY` / `UNITS` / `BRIEFING_NEWS` | Daily breakdown: weather city (empty = from memory, or ask once), °F/°C, news searches |
+| `MEMORY_REVIEW_IDLE_MIN` / `CHAT_HISTORY_KEEP_MIN` | Quiet minutes before the memory review runs; how recent a conversation must be to survive a restart |
+| `AGENDA_REMIND_DEFAULTS` | Default reminders per agenda kind |
 | `CODE_USE_API_KEY` | `False` = Claude Code uses your Claude login, `True` = bills the `.env` API key |
 
 ## Background mode
@@ -161,6 +180,6 @@ The project uses `claude-haiku-4-5-20251001` (`config.MODEL`) for all Claude cal
 
 History keeps the last 12 messages, always starting on a user turn. Side results (image analysis, web search, input-folder contents, agent results) are added with `brain.remember()`.
 
-**Prompt caching** — `brain.ask_claude` sends the system prompt as two blocks: the fixed action list (marked `cache_control`) and the parts that change per call (Stage panels, coding project, answer length). The agent loop moves one marker to its newest message each step. Haiku 4.5 only caches prompts of 4096+ tokens; the action list is ~3.2k today, so caching switches on by itself once new actions push it past that. Each call logs `[brain] N tokens in (… from cache / written to cache / not cached: under the minimum)`. Keep anything that varies out of `build_system_prompt` — one changed byte there re-writes the cache. `PROMPT_CACHE_TTL` (`config.py`): `"5m"` or `"1h"`.
+**Prompt caching** — `brain.ask_claude` sends the system prompt as up to three blocks: the fixed action list and the memory block (both marked `cache_control`), then the parts that change per call (time, agenda, Stage panels, coding project, answer length). The agent loop moves one marker to its newest message each step. Haiku 4.5 only caches prompts of 4096+ tokens; the action list is ~3.2k today, so caching switches on by itself once new actions push it past that. Each call logs `[brain] N tokens in (… from cache / written to cache / not cached: under the minimum)`. Keep anything that varies out of `build_system_prompt` — one changed byte there re-writes the cache. `PROMPT_CACHE_TTL` (`config.py`): `"5m"` or `"1h"`.
 
 **Answer length** — `core/verbosity.py`: short by default (main point, ~20 words); phrases like "explain in depth" / "go into more detail" switch the current command to a full answer. Every prompt that produces speech uses `verbosity.rule()`.

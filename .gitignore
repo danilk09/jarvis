@@ -10,3 +10,5 @@ coding_state.json
 coding_state.json.tmp
 stage_state.json.tmp
 __pycache__/
+jarvis_memory/
+jarvis_input/archive/

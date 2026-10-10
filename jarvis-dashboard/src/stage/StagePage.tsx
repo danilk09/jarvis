@@ -12,6 +12,7 @@ import NotePanel from './panels/NotePanel';
 import ImagePanel from './panels/ImagePanel';
 import FileEditorPanel from './panels/FileEditorPanel';
 import MapPanel from './panels/MapPanel';
+import PlacesPanel from './panels/PlacesPanel';
 import CodePanel from './panels/CodePanel';
 import type { PanelProps } from './panels/types';
 import './Stage.css';
@@ -105,6 +106,7 @@ function PanelContent(props: PanelProps) {
     case 'image':   return <ImagePanel {...props} />;
     case 'file':    return <FileEditorPanel {...props} />;
     case 'map':     return <MapPanel {...props} />;
+    case 'places':  return <PlacesPanel {...props} />;
     case 'code':    return <CodePanel {...props} />;
     default:        return <div className="panelEmpty">Unknown panel</div>;
   }

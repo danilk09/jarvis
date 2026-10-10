@@ -118,7 +118,7 @@ def _page_from_action(a, speak_first=True):
         pid = stage.resolve(a.get("panel") or "page")
         if pid and stage.get(pid)["kind"] == "page":
             return pid
-        speak("Which page? Give me a topic or a site.")
+        speak("Which page should I pull up?")
         return None
     title = None
     if not url:
@@ -279,6 +279,23 @@ def _point_out(a, chain):
             speak(res.get("speech") or "Here.",
                   on_start=lambda: stage.highlight(pid, {"region": region}, res.get("label", "")))
             return f"Pointed out region {region}"
+        if kind == "places":
+            from .places import point_at
+            opts = p["data"].get("places", [])
+            names = [_norm(pl["name"]) for pl in opts]
+            m = re.search(r"\b(\d+)\b", what)
+            idx = int(m.group(1)) - 1 if m and 0 < int(m.group(1)) <= len(opts) else None
+            if idx is None:
+                hit = (difflib.get_close_matches(_norm(what), names, n=1, cutoff=0.4)
+                       or [n for n in names if _norm(what) in n or n in _norm(what)][:1])
+                idx = names.index(hit[0]) if hit else None
+            if idx is None:
+                speak(f"{what} isn't one of the options on the map.")
+                return "Point out: not an option"
+            pl = opts[idx]
+            speak(f"Here's {pl['name']}" + (f", {pl['address']}." if pl.get("address") else "."),
+                  on_start=lambda: point_at(pid, idx))
+            return f"Pointed at {pl['name']}"
         if kind == "map":
             places = list(p["data"].get("places", []))
             names = [_norm(pl["name"]) for pl in places]

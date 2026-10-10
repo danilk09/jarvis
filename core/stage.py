@@ -27,7 +27,7 @@ MAX_PANELS = 8
 _CELL_ASPECT = 1.6     # a grid cell is ~1.6x wider than tall on a 16:9 screen
 
 # Relative screen area each kind wants; "size" from a voice command overrides it
-KIND_WEIGHT = {"page": 4.0, "map": 3.5, "file": 3.0, "code": 2.6, "image": 2.5, "note": 1.6, "summary": 1.5}
+KIND_WEIGHT = {"page": 4.0, "map": 3.5, "places": 4.0, "file": 3.0, "code": 2.6, "image": 2.5, "note": 1.6, "summary": 1.5}
 SIZE_WEIGHT = {"small": 1.0, "medium": 2.0, "large": 4.0, "huge": 7.0}
 
 _lock      = threading.RLock()
@@ -485,6 +485,7 @@ _KIND_WORDS = {
     "summary": ("summary", "key points", "points", "notes on"),
     "file": ("file", "document", "doc", "code", "editor"),
     "image": ("image", "picture", "photo", "screenshot"),
+    "places": ("places", "options", "restaurants", "spots", "street map", "results"),
     "map": ("map", "globe", "earth"),
     "note": ("note", "list", "card"),
     "code": ("claude code", "coding", "build log", "progress", "code panel"),
@@ -516,7 +517,8 @@ def resolve(ref):
             return _order[-1]
         for kind, names in _KIND_WORDS.items():
             if any(name in ref for name in names):
-                matches = [p for p in _order if _panels[p]["kind"] == kind]
+                kinds = ("map", "places") if kind == "map" else (kind,)   # "the map" can be either
+                matches = [p for p in _order if _panels[p]["kind"] in kinds]
                 if matches:
                     return matches[-1]
         best, best_score = None, 0
@@ -537,6 +539,8 @@ def describe():
         for n, pid in enumerate(_order, 1):
             p = _panels[pid]
             extra = p["data"].get("url") or p["data"].get("name") or p["data"].get("project") or ""
+            if p["kind"] == "places":
+                extra = "options: " + "; ".join(f"{i + 1}. {pl['name']}" for i, pl in enumerate(p["data"].get("places", [])))
             lines.append(f'{n}. {p["kind"]} "{p["title"]}"' + (f" ({extra})" if extra else ""))
         focus = _order.index(_view["focus"]) + 1 if _view["focus"] in _panels else None
         return ("\n".join(lines) + f"\nLayout: {_view['mode']}" + (f", panel {focus} in focus" if focus else ""))
@@ -547,7 +551,7 @@ def highlight(pid, target, label=""):
     """
     Point something out. target depends on the panel kind:
       page/note/summary → {"quote": exact text}     image → {"region": [x, y, w, h] in 0-1}
-      file → {"lines": [first, last]}               map   → {"place": index}
+      file → {"lines": [first, last]}               map / places → {"place": index}
     """
     global _active_hl
     with _lock:

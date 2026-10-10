@@ -40,10 +40,19 @@ def push_state(state, transcript=""):
         push_log("user", transcript)
 
 
+# Called with (role, text) for every logged line (memory.py keeps the conversation on disk)
+on_log: list = []
+
+
 def push_log(role, text):
     entry = {"role": role, "text": text, "time": time.strftime("%H:%M:%S")}
     with dash_lock:
         dash_state["log"] = (dash_state["log"] + [entry])[-_LOG_MAX:]
+    for fn in on_log:
+        try:
+            fn(role, text)
+        except Exception as e:
+            print(f"  Log hook error: {e}")
 
 
 def push_file(name, content):

@@ -17,10 +17,11 @@ if config.BACKGROUND_MODE:
 
 import os
 import queue
+import re
 import threading
 import time
 
-from core import actions, audio, brain, coding, desktop, files, music, router, server, stage, state, verbosity
+from core import actions, agenda, audio, brain, coding, desktop, files, memory, music, router, server, stage, state, verbosity
 from core import tts
 from core.tts import speak, stop_tts, suppressed, wait_tts
 
@@ -41,11 +42,11 @@ def should_bypass_ai(text):
 def _startup():
     state.workspaces.update(files.load_workspaces())
 
-    # I/O folders, plus a per-session archive for processed input files
+    # I/O folders. Processed input files go to a per-session archive folder, created only
+    # when the first file is archived (media.archive_input_file).
     os.makedirs(config.JARVIS_INPUT_DIR, exist_ok=True)
     os.makedirs(config.JARVIS_OUTPUT_DIR, exist_ok=True)
     state.session_archive = os.path.join(config.INPUT_ARCHIVE_DIR, f"session_{time.strftime('%Y%m%d_%H%M%S')}")
-    os.makedirs(state.session_archive, exist_ok=True)
 
     # Tailscale: HTTPS cert so the phone page can use the mic
     ts_ip, ts_fqdn = server.detect_tailscale()
@@ -76,6 +77,10 @@ def _startup():
         background.start_index_refresh()
 
     brain.init_chat_history(state.workspaces)
+    if brain.restore_history():
+        print("  Picked up the conversation from the last run")
+    memory.start()     # conversation log + background review of what's worth remembering
+    agenda.start()     # reminders and timers
     audio.on_wake.extend([stop_tts, music.duck])   # interrupt speech and duck music instantly
     tts.on_speech_start.append(lambda: music.duck("speech"))   # anything Jarvis says, even unprompted
     tts.on_speech_end.append(lambda: music.unduck("speech"))
@@ -98,14 +103,55 @@ def _startup():
     print("\n  Say 'Jarvis' to activate — or all at once: 'Jarvis, open Discord'.\n")
 
 
+# An answer that means "never mind" ends the exchange instead of going to Claude
+_END_ANSWERS = {"never mind", "nevermind", "forget it", "cancel", "nothing", "no thanks", "no thank you",
+                "that's all", "that's it", "not now", "skip it"}
+_MAX_FOLLOWUPS = 3   # questions answered in a row without the wake word
+_RETRY = "I didn't catch that. Say it again?"
+
+
+def _open_question(since):
+    """The question Jarvis asked after `since` that nothing has listened for yet, or ""."""
+    q = tts.last_question
+    if q["time"] > since and q["time"] > audio.last_listen[0] and not suppressed.is_set():
+        return q["text"]
+    return ""
+
+
+def _listen_for_answer(question):
+    """Jarvis asked something: listen for the answer without the wake word. Returns the
+    next command (the answer, with the question for context) or None."""
+    audio.disable_wake()
+    music.duck()
+    state.push_state("activated")
+    print(f'  Listening for an answer to: "{question}"')
+    answer = audio.listen_for_command(onset_timeout=config.ANSWER_WINDOW)
+    answer = re.sub(r"^\W*(hey |ok |okay )?jarvis\b\W*", "", answer or "", flags=re.IGNORECASE).strip()
+    if not answer or answer.lower().rstrip(".!?") in _END_ANSWERS:
+        return None
+    if question == _RETRY:       # a second try at the same command, not an answer
+        return answer
+    return f'(Answering your question "{question}") {answer}'
+
+
 def _next_command():
     """Block until the wake word or a phone command. Returns (command, from_phone)."""
     audio.enable_wake()
+    waiting_since = time.time()
     while not audio.activated.wait(timeout=0.1):
         try:
             return server.phone_commands.get_nowait(), True
         except queue.Empty:
             pass
+        # Something running in the background (Claude Code, a reminder) asked a question
+        if not tts.busy() and _open_question(waiting_since):
+            answer = _listen_for_answer(_open_question(waiting_since))
+            if answer:
+                return answer, False
+            music.unduck()
+            state.push_state("idle")
+            audio.enable_wake()
+            waiting_since = time.time()
     audio.disable_wake()
     audio.activated.clear()
     suppressed.clear()
@@ -125,21 +171,35 @@ def _next_command():
     return audio.listen_for_command(), False
 
 
-def _finish():
-    """Return to idle once Jarvis has finished speaking."""
+def _finish(since=None, followups=0):
+    """Once Jarvis has finished speaking: if it asked a question, listen for the answer and
+    return it as the next command; otherwise go back to idle and return None."""
     wait_tts()
+    question = _open_question(since) if since and followups < _MAX_FOLLOWUPS else ""
+    if question and not audio.activated.is_set():
+        answer = _listen_for_answer(question)
+        if answer:
+            return answer
     if not audio.activated.is_set():   # re-activated mid-response: keep music ducked
         music.unduck()
     state.push_state("idle")
+    return None
 
 
 def main():
     _startup()
+    followup, followups = None, 0
     while True:
         try:
-            print("Waiting for wake-word or phone command...")
-            command, from_phone = _next_command()
+            if followup:                 # the answer to a question Jarvis just asked
+                command, from_phone, followup = followup, False, None
+                followups += 1
+            else:
+                print("Waiting for wake-word or phone command...")
+                command, from_phone = _next_command()
+                followups = 1 if command and command.startswith("(Answering your question") else 0
             audio.disable_wake()
+            turn_start = time.time()
             if command is None:
                 music.unduck()
                 state.push_state("idle")
@@ -147,12 +207,13 @@ def main():
             if from_phone:
                 print(f'\n  Phone command: "{command}"')
             elif not command:
-                print("  No command heard. Say 'Jarvis' again.\n")
-                speak("I didn't catch that. Try again.")
-                _finish()
+                print("  No command heard.\n")
+                speak(_RETRY)
+                followup = _finish(turn_start, followups)
                 continue
 
-            state.push_state("thinking", transcript=command)
+            # the dashboard and the conversation log show just what was said, not the question
+            state.push_state("thinking", transcript=re.sub(r'^\(Answering your question ".*?"\) ', "", command))
             if verbosity.update(command):
                 print("  Detailed answer requested.")
             if should_bypass_ai(command):
@@ -172,7 +233,7 @@ def main():
                 actions.handle_response(response)
             except Exception as e:
                 print(f"  Error in handle_response: {e}")
-            _finish()
+            followup = _finish(turn_start, followups)
 
         except KeyboardInterrupt:
             speak("Shutting down. Goodbye.")

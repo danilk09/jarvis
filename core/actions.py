@@ -10,8 +10,8 @@ import time
 import webbrowser
 from urllib.parse import quote_plus
 
-from . import agent, audio, brain, config, files, media, music, stage, state
-from . import coding, stage_actions  # noqa: F401  (register the Claude Code and Stage actions)
+from . import agenda, agent, audio, brain, config, files, media, music, stage, state
+from . import briefing, coding, memory, places, stage_actions  # noqa: F401  (register the briefing, Claude Code, memory, places and Stage actions)
 from .generate import generate_file_content, summarize_for_speech
 from .registry import ACTIONS, action
 from .tts import speak
@@ -274,16 +274,9 @@ def _fmt_duration(seconds):
         rules=['"set a timer for N minutes", "remind me in N minutes to X" → type "timer", seconds = total seconds, label = reminder text'])
 def _timer(a, chain):
     seconds = max(1, int(float(a.get("seconds", 60))))
-    label   = a.get("label", "")
-
-    def ring():
-        speak(f"Time's up{': ' + label if label else ''}.")   # speech ducks the music itself
-
-    timer = threading.Timer(seconds, ring)
-    timer.daemon = True
-    timer.start()
+    agenda.add_timer(seconds, a.get("label", ""))   # on the agenda, so it survives a restart
     speak(f"Timer set for {_fmt_duration(seconds)}.")
-    return f"Timer: {seconds}s {label}".strip()
+    return f"Timer: {seconds}s {a.get('label', '')}".strip()
 
 
 @action("agent",

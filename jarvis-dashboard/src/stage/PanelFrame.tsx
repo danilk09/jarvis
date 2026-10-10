@@ -2,11 +2,11 @@ import { ReactNode } from 'react';
 import type { Panel } from './StageContext';
 
 const KIND_ICON: Record<string, string> = {
-  page: '◎', summary: '≣', file: '‹›', image: '▣', note: '✎', map: '◍', code: '⌘',
+  page: '◎', summary: '≣', file: '‹›', image: '▣', note: '✎', map: '◍', places: '⌖', code: '⌘',
 };
 
 const KIND_NAME: Record<string, string> = {
-  page: 'PAGE', summary: 'KEY POINTS', file: 'FILE', image: 'IMAGE', note: 'NOTE', map: 'GLOBE', code: 'CLAUDE CODE',
+  page: 'PAGE', summary: 'KEY POINTS', file: 'FILE', image: 'IMAGE', note: 'NOTE', map: 'GLOBE', places: 'PLACES', code: 'CLAUDE CODE',
 };
 
 interface Props {

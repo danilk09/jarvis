@@ -444,14 +444,14 @@ def _finish(job, result):
     if status == "error":
         speak("Claude Code ran into a problem. The details are on the stage.")
     elif status == "planned":
-        speak("The plan is ready on the stage. Say go ahead to build it, or tell me what to change.")
+        speak("The plan is ready on the stage. Shall I go ahead and build it, or is there anything to change?")
     else:
         speak(_speakable(summary))
     if denials:
         first = _speakable_command(denials[0]["command"])
         more = f" and {len(denials) - 1} other command{'s' if len(denials) > 2 else ''}" if len(denials) > 1 else ""
-        speak(f"It also wanted to run {first}{more}, which needs your permission. "
-              "Say allow it if that's okay — the commands are on the stage.")
+        speak(f"It also wanted to run {first}{more}, which needs your permission — the commands "
+              "are on the stage. Should I let it?")
 
 
 def use_path(path):
@@ -532,8 +532,8 @@ def open_terminal():
                'Thinking depth: "think hard/harder" → effort "high"; "think really hard", "ultrathink", "max effort", "as thorough as possible" → "max"; "quick", "low effort" → "low". "use Opus/Sonnet/Haiku" → model. Leave both empty otherwise.',
                '"plan it first", "just plan", "don\'t change anything yet" → plan_only true. After a plan, "go ahead", "build it", "do it" → code command "run" with request "Implement the plan you proposed."',
                '"switch to / work on [project]" → code "switch" with project; "what projects do I have" → "list"; "how\'s the coding going", "what is Claude Code doing" → "status"; "stop coding", "cancel the coding" → "stop"',
-               '"allow it", "yes run it" (after Jarvis asked permission for a command) → code "approve"',
-               '"remember I prefer X for coding", "always use X in my projects", "from now on use X" → code "remember" with preference = the preference as a short sentence; "show my coding preferences" → "show_prefs"',
+               '"allow it", "yes run it", "yes" (after Jarvis asked permission for a command) → code "approve"',
+               'Coding preferences only — "remember I prefer X for coding", "always use X in my projects", "from now on use X when you code" → code "remember" with preference = the preference as a short sentence (anything else to remember is type "memory"); "show my coding preferences" → "show_prefs"',
                '"open the project in VS Code" → code "open_vscode"; "open a Claude Code terminal", "let me take over" → "open_terminal"'])
 def _code(a, chain):
     cmd = a.get("command") or "run"

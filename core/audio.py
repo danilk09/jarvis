@@ -402,14 +402,20 @@ def capture_followup():
     return text
 
 
-def listen_for_command(max_duration=8, silence_duration=0.8) -> str:
-    """Record one command (WebRTC VAD end-pointing) and transcribe it."""
+last_listen = [0.0]   # when the last listen started (so a question it answered isn't asked again)
+
+
+def listen_for_command(max_duration=8, silence_duration=0.8, onset_timeout=None) -> str:
+    """Record one command (WebRTC VAD end-pointing) and transcribe it. With onset_timeout,
+    give up if no speech starts within that many seconds."""
+    last_listen[0] = time.time()
     time.sleep(0.3)  # let TTS echo and room reverb die down before capture starts
     _measure_noise()
     _drain(_capture_q)
     _capturing.set()
     print("  Speak your command...")
-    frames = _record(max_duration, silence_duration)
+    frames = _record(max_duration, silence_duration,
+                     onset_deadline=time.monotonic() + onset_timeout if onset_timeout else None)
     if not frames:
         print("  No speech detected.")
         return ""

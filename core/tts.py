@@ -39,6 +39,10 @@ _interrupt  = threading.Event()   # asks the worker to cut off the current utter
 suppressed  = threading.Event()   # set when the user interrupts; cleared each activation
 _LULL       = 0.6                 # seconds of silence before speech counts as finished
 
+# The last question Jarvis asked (a spoken line ending in "?"): jarvis.py listens for the
+# answer without the wake word unless something already listened after it
+last_question = {"text": "", "time": 0.0}
+
 # Callbacks run on the TTS thread when Jarvis starts talking and once it has gone
 # quiet (jarvis.py ducks music with these, for every voice line — not just replies)
 on_speech_start = []
@@ -163,6 +167,8 @@ def speak(text, update_state=True, on_start=None):
         print(f"  [muted] JARVIS: {text}")
         return
     print(f"  JARVIS: {text}")
+    if str(text).rstrip().endswith("?"):
+        last_question.update(text=str(text).strip(), time=time.time())
     if update_state:
         push_log("jarvis", str(text))
     _queue.put((str(text), update_state, on_start))
@@ -183,3 +189,8 @@ def stop_tts():
 def wait_tts():
     """Block until everything queued has been spoken."""
     _queue.join()
+
+
+def busy():
+    """True while anything is queued or being spoken."""
+    return _queue.unfinished_tasks > 0
