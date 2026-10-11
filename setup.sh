@@ -7,7 +7,7 @@ echo "Installing JARVIS dependencies..."
 
 pip install anthropic python-dotenv Pillow \
     sounddevice numpy faster-whisper vosk requests \
-    flask flask-cors webrtcvad "yt-dlp[default]" pycaw comtypes pypdf trafilatura sherpa-onnx
+    flask flask-cors webrtcvad "yt-dlp[default]" pycaw comtypes pypdf trafilatura sherpa-onnx uv
 
 echo ""
 echo "Downloading Vosk speech model..."
@@ -61,6 +61,8 @@ ANTHROPIC_API_KEY=sk-ant-...
 BRAVE_API_KEY=BSA...
 # Optional, free at https://ion.cesium.com — 3-D terrain and buildings on the Stage globe
 CESIUM_ION_TOKEN=
+# Optional, free at https://developer.wolframalpha.com — exact math and science answers
+WOLFRAM_APP_ID=
 EOF
     echo "Created .env — fill in your API keys before running."
 else
@@ -72,6 +74,9 @@ echo "Optional — music playback:"
 echo "  Download mpv (shinchiro Windows build) from https://mpv.io/installation/"
 echo "  Extract mpv-x86_64-*.7z and add the folder to PATH,"
 echo "  or set MPV_EXE in jarvis.py to the full path of mpv.exe."
+echo ""
+echo "Optional — MCP servers (Google, coding tools, job search, Miro):"
+echo "  python scripts/setup_mcp.py status"
 echo ""
 echo "Setup complete. Run with:"
 echo "  python jarvis.py"

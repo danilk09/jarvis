@@ -21,7 +21,7 @@ def generate_file_content(prompt_text, filename, context=""):
     lang_hint = _LANG_HINTS.get(os.path.splitext(filename)[1].lower(), "plain text")
     try:
         resp = config.client.messages.create(
-            model=config.MODEL,
+            model=config.MODEL, **config.NO_THINK,
             max_tokens=3000,
             system=(
                 f"You are a file generator. Output ONLY the raw file content with no "
@@ -31,7 +31,7 @@ def generate_file_content(prompt_text, filename, context=""):
             ),
             messages=[{"role": "user", "content": _with_context(prompt_text, context)}],
         )
-        return resp.content[0].text.strip()
+        return config.reply_text(resp).strip()
     except Exception as e:
         return f"# File generation failed: {e}"
 
@@ -40,12 +40,12 @@ def summarize_for_speech(content, filename):
     """A spoken sentence or two about a generated file."""
     try:
         resp = config.client.messages.create(
-            model=config.MODEL,
+            model=config.MODEL, **config.NO_THINK,
             max_tokens=120,
             system="You are a voice assistant. Say what was written. " + verbosity.rule(
                        short="One short sentence, about 15 words.") + " Conversational, no markdown or bullet points.",
             messages=[{"role": "user", "content": f"Summarize what is in '{filename}':\n\n{content[:2500]}"}],
         )
-        return resp.content[0].text.strip()
+        return config.reply_text(resp).strip()
     except Exception:
         return f"{filename} is ready."

@@ -175,13 +175,13 @@ def ask_claude(command, workspaces):
         system.append({"type": "text", "text": live.strip()})
     try:
         response = config.client.messages.create(
-            model=config.MODEL,
-            max_tokens=verbosity.tokens(400, 900),
+            model=config.MODEL, **config.THINK_LOW,
+            max_tokens=verbosity.tokens(1000, 1500),   # room for thinking; only what's used is billed
             system=system,
             messages=messages,
         )
         log_usage("brain", response.usage)
-        raw = response.content[0].text.strip()
+        raw = config.reply_text(response).strip()
     except Exception as e:
         print(f"  Unexpected AI error: {e}")
         return {"mode": "none"}

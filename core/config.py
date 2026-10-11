@@ -13,17 +13,29 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 load_dotenv(os.path.join(ROOT, ".env"))
 
 # ── Claude ────────────────────────────────────────────────────────────────────
-MODEL         = "claude-haiku-4-5-20251001"
+MODEL         = "claude-haiku-5-5"
 client        = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
 BRAVE_API_KEY = os.environ.get("BRAVE_API_KEY", "")
+
+# Haiku 5.5 thinks before answering unless told not to (effort "medium" by default), and
+# thinking tokens count toward max_tokens. Command dispatch and the agent think a little
+# (effort "low"); one-shot text (summaries, one-liners, extraction) skips thinking.
+THINK_LOW = {"output_config": {"effort": "low"}}
+NO_THINK  = {"thinking": {"type": "disabled"}}
+
+
+def reply_text(response):
+    """The text of a reply. With thinking on, content[0] is a thinking block, not the answer."""
+    return "".join(b.text for b in response.content if b.type == "text")
+
 
 # Prompt caching: the unchanging part of each prompt (the action list) is cached, so
 # repeat sends cost 10% of the input price. Writing the cache costs 1.25x ("5m") or 2x
 # ("1h"); "5m" restarts its clock on every hit, so it suits back-to-back commands, "1h"
-# suits commands spread every 10-30 minutes. Haiku 4.5 only caches prompts of 4096+
+# suits commands spread every 10-30 minutes. Haiku 5.5 only caches prompts of 512+
 # tokens — below that the request just runs uncached.
 PROMPT_CACHE_TTL = "5m"
-CACHE_MIN_TOKENS = 4096
+CACHE_MIN_TOKENS = 512
 CACHE_CONTROL    = {"type": "ephemeral"} if PROMPT_CACHE_TTL == "5m" else {"type": "ephemeral", "ttl": PROMPT_CACHE_TTL}
 
 # ── Voice ─────────────────────────────────────────────────────────────────────
@@ -174,6 +186,35 @@ _GITHUB_READ_TOOLS = [   # GitHub's server as of Oct 2026 (issue_read / pull_req
     "list_issue_types", "list_issue_fields", "search_code", "search_repositories",
 ]
 CODE_ALLOWED_TOOLS += [f"mcp__github__{t}" for t in _GITHUB_READ_TOOLS]
+# Coding MCP servers (python scripts/setup_mcp.py coding). Docs lookup, the test browser and
+# the read-only Postgres connection run freely; Docker, Firebase and Postman changes are
+# refused and Jarvis asks you, like a push.
+CODE_ALLOWED_TOOLS += ["mcp__context7", "mcp__playwright", "mcp__postgres"]
+
+# ── Delegated tasks (core/delegate.py) ────────────────────────────────────────
+# Gmail, Drive, job searches, Miro... go to Claude Code (your subscription) with only the
+# MCP servers that service needs. Server definitions: delegate.SERVICES.
+DELEGATE_DIR      = os.path.join(ROOT, "jarvis_delegate")  # where they run; files they make land here
+DELEGATE_MODEL    = "sonnet"   # Claude Code model for delegated tasks ("" = Claude Code's default)
+DELEGATE_EFFORT   = "low"      # quick by default; "think hard" in the request raises it
+# A service's conversation is continued ("reply to the second one") until it's been idle this
+# long; then it starts fresh so old context doesn't make every later task slower and bigger.
+DELEGATE_SESSION_HOURS = 3
+# Indeed's own MCP server only exists as a claude.ai connector (claude.ai → Settings →
+# Connectors → Indeed). True: job searches also load your claude.ai connectors so it's used.
+JOBS_INDEED_CONNECTOR = False
+# Your resume for job searches: resume.pdf, resume.md or resume.txt in jarvis_memory/ (the
+# first one found). Kept out of memory.md on purpose: that file is in every prompt; this is
+# only read by job tasks.
+RESUME_FILE       = os.path.join(MEMORY_DIR, "resume")
+# Google goes through your claude.ai Gmail / Drive / Calendar connectors (claude.ai → Settings
+# → Connectors), then python scripts/setup_mcp.py google. Unread mail in the daily breakdown:
+BRIEFING_EMAIL    = True
+
+# ── Knowledge ─────────────────────────────────────────────────────────────────
+# Wolfram|Alpha (free AppID at developer.wolframalpha.com, "Spoken Results" + "LLM API"):
+# exact math, units, conversions and science facts.
+WOLFRAM_APP_ID = os.environ.get("WOLFRAM_APP_ID", "")
 
 # External tools
 MPV_EXE    = r"C:\Users\paten\OneDrive\Desktop\Tools\mpv\mpv.exe"   # or just "mpv" if it's on PATH

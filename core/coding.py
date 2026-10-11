@@ -119,12 +119,16 @@ def context():
     if name:
         lines.append(f'Current coding project: "{name}" ({proj["path"]})')
     for job in running():
-        lines.append(f'Claude Code is working on "{job["project"]}" right now: {job["request"][:120]}')
+        if job.get("service"):
+            lines.append(f'A {job["label"]} task is running in the background (delegate "{job["service"]}"): '
+                         f'{job["request"][:120]}')
+        else:
+            lines.append(f'Claude Code is working on "{job["project"]}" right now: {job["request"][:120]}')
     with _lock:
         waiting = {n: p["pending"] for n, p in _state["projects"].items() if p.get("pending")}
     for n, pending in waiting.items():
         lines.append(f'Waiting for permission in "{n}": ' + "; ".join(d["command"][:80] for d in pending))
-    others = [n for n in _state["projects"] if n != name][:12]
+    others = [n for n, p in _state["projects"].items() if n != name and not p.get("service")][:12]
     if others:
         lines.append("Other projects: " + ", ".join(others))
     repos = repo_names()
@@ -217,6 +221,21 @@ def _use(name, proj):
 
 
 # ── Running Claude Code ───────────────────────────────────────────────────────
+def _env():
+    env = {k: v for k, v in os.environ.items() if not k.startswith("CLAUDECODE")}
+    if not config.CODE_USE_API_KEY:
+        # .env's key (loaded for Jarvis's own calls) would override the user's Claude login
+        env.pop("ANTHROPIC_API_KEY", None)
+        env.pop("ANTHROPIC_AUTH_TOKEN", None)
+    env.setdefault("MCP_DISCOVERY_CACHE", "1")    # reuse MCP tool lists from the last run: faster startup
+    return env
+
+
+def _ps_args(args):
+    """Arguments quoted for a PowerShell command line."""
+    return "".join(" '" + a.replace("'", "''") + "'" for a in args)
+
+
 def claude_exe():
     """The real claude.exe (npm installs a .cmd shim, which Python can't launch cleanly)."""
     if config.CLAUDE_EXE and os.path.isfile(config.CLAUDE_EXE):
@@ -246,13 +265,34 @@ def busy(project=None):
     return any(j["project"] == project or project is None for j in running())
 
 
-def _code_panel(name, path):
+def _code_panel(name, path, title=None):
     """The project's Claude Code panel on the Stage (reused across runs)."""
     for p in stage.panels():
         if p["kind"] == "code" and p["data"].get("path") == path:
             return p["id"]
-    return stage.add("code", f"Claude Code — {name}", {"project": name, "path": path, "status": "idle",
-                                                        "events": [], "files": [], "runs": 0})
+    return stage.add("code", title or f"Claude Code — {name}", {"project": name, "path": path, "status": "idle",
+                                                                 "events": [], "files": [], "runs": 0})
+
+
+def _service_entry(svc):
+    """The state entry for a delegated service (core/delegate.py): like a project, but never the
+    current one. Its conversation restarts after DELEGATE_SESSION_HOURS idle."""
+    with _lock:
+        entry = _state["projects"].setdefault(svc["name"], {"path": svc["path"], "session": None, "pending": [],
+                                                            "created": time.time()})
+        entry.update(path=svc["path"], service=svc["service"])
+        if entry.get("session") and time.time() - entry.get("last", 0) > config.DELEGATE_SESSION_HOURS * 3600:
+            entry["session"] = None
+        _save()
+        return entry
+
+
+def mcp_flags(entry):
+    """MCP flags for reopening a delegated service's conversation (terminal, phone)."""
+    if not entry or not entry.get("service"):
+        return []
+    from . import delegate
+    return delegate.cli_flags(entry["service"])
 
 
 # ── Git: a branch per task ────────────────────────────────────────────────────
@@ -311,8 +351,11 @@ def _prepare_branch(name, path, request, fresh=False):
 
 
 def start(request, project=None, new=False, effort="", model="", plan=False, extra_allowed=(), quiet=False,
-          fresh_branch=False, question=False):
-    """Send a request to Claude Code in a project (in the background). Returns a status string."""
+          fresh_branch=False, question=False, service=None, on_done=None):
+    """Send a request to Claude Code in a project (in the background). Returns a status string.
+    `service` (from delegate.spec) runs a delegated task instead: its own folder, MCP servers,
+    allowed tools and instructions, and no git branch. `on_done(status, summary)` is called when
+    it finishes (with quiet=True the caller does the talking)."""
     exe = claude_exe()
     if not exe:
         speak("Claude Code isn't installed. Install it with npm install -g @anthropic-ai/claude-code.")
@@ -324,7 +367,9 @@ def start(request, project=None, new=False, effort="", model="", plan=False, ext
               + ". Wait for one to finish, or tell me to stop one.")
         return "Too many runs"
 
-    if new:
+    if service:
+        name, proj = service["name"], _service_entry(service)
+    elif new:
         name, path = _new_project(project or request)
         proj = _use(name, {"path": path})
     elif project:
@@ -339,14 +384,15 @@ def start(request, project=None, new=False, effort="", model="", plan=False, ext
             speak("Which project? Tell me to start a new one, or say switch to and the project name.")
             return "No current project"
     if busy(name):
-        speak(f"Claude Code is still working on {pretty(name)}. Wait until it's done, "
-              "or tell me to stop it.")
+        speak(f"I'm still on the last {service['label']} task. Give it a moment, or tell me to stop it." if service
+              else f"Claude Code is still working on {pretty(name)}. Wait until it's done, or tell me to stop it.")
         return "Busy"
     _close_remote(name)
 
     # A task in a git repo gets its own branch; a plan changes nothing, so it waits for the build
     branch_note = ""
-    if config.CODE_BRANCH_PER_TASK and not new and not plan and not question and _is_git(proj["path"]):
+    if config.CODE_BRANCH_PER_TASK and not service and not new and not plan and not question \
+            and _is_git(proj["path"]):
         task = proj.get("plan_request") if request.startswith("Implement the plan") else request
         ok, branch_note = _prepare_branch(name, proj["path"], task or request, fresh=fresh_branch)
         if not ok:
@@ -362,11 +408,14 @@ def start(request, project=None, new=False, effort="", model="", plan=False, ext
     mode = "plan" if plan or question else config.CODE_PERMISSION_MODE
     if question and not effort:
         effort = "low"
-    allowed = list(config.CODE_ALLOWED_TOOLS) + list(extra_allowed)
+    allowed = list(config.CODE_ALLOWED_TOOLS) + list(extra_allowed) + list((service or {}).get("allowed", []))
 
     argv = [exe, "-p", "--output-format", "stream-json", "--verbose",
             "--permission-mode", mode, "--append-system-prompt",
-            _JARVIS_NOTE + verbosity.rule(short="Keep that summary to one or two short sentences, about 30 words.")]
+            _JARVIS_NOTE + (service["note"] if service else "")
+            + verbosity.rule(short="Keep that summary to one or two short sentences, about 30 words.")]
+    if service:
+        argv += service["flags"]
     if proj.get("session"):
         argv += ["--resume", proj["session"]]
     if model:
@@ -382,17 +431,18 @@ def start(request, project=None, new=False, effort="", model="", plan=False, ext
         prompt += f"\n\n{branch_note}"
     if question:
         prompt += "\n\nThis is a question: just answer it. Don't propose a plan or change anything."
-    if not new and _is_git(proj["path"]):
+    if not new and not service and _is_git(proj["path"]):
         code, remote = _git(proj["path"], "remote", "get-url", "origin")
         m = re.search(r"github\.com[:/]([^/\s]+)/([^/\s]+?)(?:\.git)?$", remote) if code == 0 else None
         if m:
             prompt += f"\n\nThis repo's GitHub remote is {m.group(1)}/{m.group(2)} (use it for GitHub tools)."
 
-    env = {k: v for k, v in os.environ.items() if not k.startswith("CLAUDECODE")}
-    if not config.CODE_USE_API_KEY:
-        # .env's key (loaded for Jarvis's own calls) would override the user's Claude login
-        env.pop("ANTHROPIC_API_KEY", None)
-        env.pop("ANTHROPIC_AUTH_TOKEN", None)
+    env = _env()
+    if service:
+        try:                       # a fresh result.md, so an old one is never shown as this answer
+            os.remove(service["result_file"])
+        except OSError:
+            pass
     try:
         proc = subprocess.Popen(argv, cwd=proj["path"], env=env, stdin=subprocess.PIPE,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
@@ -404,7 +454,7 @@ def start(request, project=None, new=False, effort="", model="", plan=False, ext
         speak("I couldn't start Claude Code.")
         return f"Claude Code failed to start: {e}"
 
-    pid = _code_panel(name, proj["path"])
+    pid = _code_panel(name, proj["path"], f"Claude — {service['label']}" if service else None)
     p = stage.get(pid)
     runs = p["data"].get("runs", 0) + 1
     divider = {"kind": "request", "text": request, "time": time.time(),
@@ -417,7 +467,9 @@ def start(request, project=None, new=False, effort="", model="", plan=False, ext
         _save()
     job = {"proc": proc, "project": name, "panel": pid, "request": request, "events": events,
            "files": list(p["data"].get("files", [])), "dirty": False, "plan": plan, "quiet": quiet,
-           "commands": {}, "succeeded": set()}
+           "commands": {}, "succeeded": set(), "service": (service or {}).get("service"),
+           "label": (service or {}).get("label", ""), "result_file": (service or {}).get("result_file"),
+           "on_done": on_done}
     _jobs[name] = job
     threading.Thread(target=_read_output, args=(job,), daemon=True, name=f"claude-code-{name}").start()
     threading.Thread(target=_flush_loop, args=(job,), daemon=True).start()
@@ -567,12 +619,33 @@ def _finish(job, result):
         if p["kind"] == "file" and inside and os.path.isfile(fp):
             stage.open_file(fp)
 
-    brain.remember(f"[Asked Claude Code in project {job['project']}] {job['request']}",
-                   f"[Claude Code result] {summary[:1500]}")
+    result_md = _result_markdown(job)
+    if result_md:
+        stage.add("note", job["label"], {"markdown": result_md})
+    if job.get("service"):
+        brain.remember(f"[Asked Claude ({job['label']})] {job['request']}",
+                       f"[Result] {summary[:1500]}" + (f"\n\n{result_md[:2500]}" if result_md else ""))
+    else:
+        brain.remember(f"[Asked Claude Code in project {job['project']}] {job['request']}",
+                       f"[Claude Code result] {summary[:1500]}")
+    if job.get("on_done"):
+        try:
+            job["on_done"](status, summary)
+        except Exception as e:
+            print(f"  on_done failed: {e}")
     if stopped or job["quiet"]:
         return
     _notify_finish(job, status, summary, denials)
     who = pretty(job["project"])
+    if job.get("service"):
+        if status == "error":
+            speak(f"The {job['label']} task ran into a problem. The details are on the stage.")
+        else:
+            speak(_speakable(summary) + (" The full version is on the stage." if len(result_md) > 400 else ""))
+        if denials:
+            more = f" and {len(denials) - 1} other thing{'s' if len(denials) > 2 else ''}" if len(denials) > 1 else ""
+            speak(f"It also wants to {_speakable_denial(denials[0])}{more}, which needs your OK. Should I let it?")
+        return
     if status == "error":
         speak(f"Claude Code ran into a problem in {who}. The details are on the stage.")
     elif status == "planned":
@@ -584,6 +657,18 @@ def _finish(job, result):
         more = f" and {len(denials) - 1} other command{'s' if len(denials) > 2 else ''}" if len(denials) > 1 else ""
         speak(f"In {who}, it also wanted to run {first}{more}, which needs your permission — the commands "
               "are on the stage. Should I let it?")
+
+
+def _result_markdown(job):
+    """The result.md a delegated task wrote this run, if any."""
+    path = job.get("result_file")
+    if not path or not os.path.isfile(path):
+        return ""
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.read().strip()[:20000]
+    except OSError:
+        return ""
 
 
 def use_path(path):
@@ -599,7 +684,7 @@ def use_path(path):
 def _speakable_denial(d):
     """What a refused tool call was, in words: "git push", or "create pull request" for a GitHub tool."""
     if d["tool"] and d["tool"] not in ("PowerShell", "Bash"):
-        action = d["tool"].split("__")[-1].replace("_", " ")
+        action = d["tool"].split("__")[-1].replace("_", " ").replace("-", " ")
         return f"{action} on GitHub" if d["tool"].startswith("mcp__github") else action
     return _speakable_command(d["command"])
 
@@ -659,8 +744,11 @@ def approve(project=None):
                 allowed.append(f"{tool}({prefix}:*)")
     cmds = "\n".join(f"- {d['command']}" for d in pending)
     speak("Okay, letting it run those.")
-    return start(f"The user approved these commands that were refused before:\n{cmds}\n"
-                 "Run them now and finish the task.", project=name, extra_allowed=allowed)
+    request = f"The user approved these commands that were refused before:\n{cmds}\nRun them now and finish the task."
+    if waiting[name].get("service"):
+        from . import delegate
+        return delegate.run(waiting[name]["service"], request, extra_allowed=allowed)
+    return start(request, project=name, extra_allowed=allowed)
 
 
 def _project_or_current(project=None):
@@ -687,8 +775,8 @@ def open_terminal(project=None):
     resume = f" --resume {proj['session']}" if proj.get("session") else ""
     q = proj["path"].replace("'", "''")
     subprocess.Popen(["powershell", "-NoExit", "-Command",
-                      f"Set-Location -LiteralPath '{q}'; & '{exe}'{resume}"],
-                     creationflags=subprocess.CREATE_NEW_CONSOLE)
+                      f"Set-Location -LiteralPath '{q}'; & '{exe}'{resume}{_ps_args(mcp_flags(proj))}"],
+                     creationflags=subprocess.CREATE_NEW_CONSOLE, env=_env())
     return True
 
 
@@ -733,15 +821,11 @@ def open_on_phone(project=None):
     if ok:
         info.dwFlags |= subprocess.STARTF_USESHOWWINDOW
         info.wShowWindow = 7      # SW_SHOWMINNOACTIVE: minimized, doesn't steal focus
-    env = {k: v for k, v in os.environ.items() if not k.startswith("CLAUDECODE")}
-    if not config.CODE_USE_API_KEY:
-        env.pop("ANTHROPIC_API_KEY", None)
-        env.pop("ANTHROPIC_AUTH_TOKEN", None)
     _remote[name] = subprocess.Popen(
         ["powershell", "-NoExit", "-Command",
          f"$host.UI.RawUI.WindowTitle = '{label}'; Set-Location -LiteralPath '{q}'; "
-         f"& '{exe}' --resume {proj['session']} --remote-control '{label}'"],
-        creationflags=subprocess.CREATE_NEW_CONSOLE, startupinfo=info, env=env)
+         f"& '{exe}' --resume {proj['session']} --remote-control '{label}'{_ps_args(mcp_flags(proj))}"],
+        creationflags=subprocess.CREATE_NEW_CONSOLE, startupinfo=info, env=_env())
     print(f"  {name}: Remote Control session opened ({label})" + ("" if ok else " — waiting for the folder trust prompt"))
     return name, ok
 
@@ -763,7 +847,7 @@ def _notify_finish(job, status, summary, denials):
     from . import notify
     if job["quiet"] or config.CODE_NOTIFY == "never" or (config.CODE_NOTIFY == "away" and not notify.away()):
         return
-    who = pretty(job["project"])
+    who = job.get("label") or pretty(job["project"])
     title = {"error": f"{who} hit a problem", "planned": f"Plan ready: {who}"}.get(status, f"{who} is done")
     text = _speakable(summary, limit=900)
     if denials:
@@ -907,8 +991,8 @@ def _code(a, chain):
         return f"Current project: {hit[0]}"
     if cmd == "list":
         repos = repo_names()
-        mine = [n for n, p in _state["projects"].items()
-                if not any(os.path.normcase(p["path"]).startswith(os.path.normcase(r)) for r in config.REPO_DIRS)]
+        mine = [n for n, p in _state["projects"].items() if not p.get("service")
+                and not any(os.path.normcase(p["path"]).startswith(os.path.normcase(r)) for r in config.REPO_DIRS)]
         parts = []
         if repos:
             parts.append(f"You have {len(repos)} repos in your GitHub folder, including "

@@ -72,11 +72,11 @@ def _web_candidates(what, where, count):
     text = re.sub(r"<[^>]+>", "", text)[:12000]
     try:
         resp = config.client.messages.create(
-            model=config.MODEL, max_tokens=900, system=_PICK_SYSTEM,
+            model=config.MODEL, **config.NO_THINK, max_tokens=900, system=_PICK_SYSTEM,
             messages=[{"role": "user", "content": f"The user wants: {what} in {where}. Up to {count + 2} places.\n\n"
                                                   f"SEARCH RESULTS:\n{text}"}])
         brain.log_usage("places", resp.usage)
-        data = brain.parse_json(resp.content[0].text.strip()) or {}
+        data = brain.parse_json(config.reply_text(resp).strip()) or {}
     except Exception as e:
         print(f"  [places] picking failed: {e}")
         return [], ""

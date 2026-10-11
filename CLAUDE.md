@@ -14,6 +14,9 @@ Requires a `.env` file with:
 ANTHROPIC_API_KEY=sk-ant-...
 BRAVE_API_KEY=BSA...        # optional — enables real-time web search
 GITHUB_TOKEN=github_pat_... # optional — private repos + GitHub MCP for Claude Code (scripts/setup_github_mcp.py)
+WOLFRAM_APP_ID=...          # optional — exact math/science answers (developer.wolframalpha.com)
+POSTGRES_URL=postgresql://... # optional — read-only Postgres MCP for Claude Code
+POSTMAN_API_KEY=PMAK-...    # optional — else Postman signs in through the browser
 ```
 
 ## Dependencies
@@ -29,8 +32,10 @@ Required packages (installed by setup.sh):
 ```bash
 pip install anthropic python-dotenv Pillow \
     sounddevice numpy faster-whisper vosk requests \
-    flask flask-cors webrtcvad "yt-dlp[default]" pycaw comtypes pypdf trafilatura sherpa-onnx
+    flask flask-cors webrtcvad "yt-dlp[default]" pycaw comtypes pypdf trafilatura sherpa-onnx uv
 ```
+
+MCP servers: `python scripts/setup_mcp.py status` shows what's set up; `google` (reads which tools your claude.ai Gmail/Drive/Calendar connectors have → `jarvis_memory/mcp/google_tools.json`), `coding` (Context7, Playwright, Postman, Firebase, Docker, Postgres → Claude Code user scope), `jobs` (downloads JobSpy), `miro` (sign-in). Python-based servers run through `uvx --python 3.12` (they don't support 3.14); `delegate.uvx_exe()` also finds uvx in Python's per-user Scripts folder.
 
 The desktop app (needs Node.js): `cd desktop && npm install` — if `node_modules/electron/dist/electron.exe` is missing afterwards, run `node node_modules/electron/install.js`. Without it Jarvis opens the dashboard in the browser and Stage pages fall back to a reader view.
 
@@ -60,7 +65,7 @@ Optional (for music playback): download mpv from mpv.io (shinchiro Windows build
 | `actions.py` | All built-in action handlers + `handle_response()` |
 | `memory.py` | Long-term memory: facts in `jarvis_memory/memory.md` (cached prompt block), daily conversation logs, background review that saves facts mentioned in passing, daily summaries, `memory` action (remember / forget / update / show / recall) |
 | `agenda.py` | Deadlines, appointments, to-dos and timers in `jarvis_memory/agenda.json`; recurring rules; reminder thread; `agenda` action; the NOW + agenda lines in the live prompt block |
-| `briefing.py` | "Give me a breakdown of today": weather (Open-Meteo), headlines (Brave News), agenda, special days and yesterday's summary, gathered in parallel; one Haiku call writes the spoken version (opens with a holiday greeting, sky events as an aside); full breakdown as a Stage note |
+| `briefing.py` | "Give me a breakdown of today": weather (Open-Meteo), headlines (Brave News), agenda, special days and yesterday's summary, gathered in parallel; one Haiku call writes the spoken version (opens with a holiday greeting, sky events as an aside); full breakdown as a Stage note. Unread email (`BRIEFING_EMAIL`) is checked in parallel by a quiet `delegate` google run (Haiku) and spoken right after the breakdown |
 | `events.py` | Special days: US holidays + fun observances, daylight saving changes, moon phases and seasons (USNO API), meteor shower peaks, eclipses (2026-28), today's rocket launches (Launch Library 2). Upcoming holidays also go into the agenda prompt so Claude resolves "Thanksgiving week" correctly |
 | `places.py` | `find_places` ("pizza restaurants in Honolulu"): Brave search → Haiku picks named places with one-line descriptions → located with Photon (parallel) → `places` Stage panel; opening hours/websites filled in afterwards from Overpass |
 | `notify.py` | Phone notifications via ntfy: reminders when you're away from the PC (no input/voice for `PHONE_AWAY_MIN`), urgent deadlines always; Mark done / Snooze buttons call `POST /api/notify/action` over Tailscale (secret key in `jarvis_memory/notify.json`); `send_to_phone` action |
@@ -71,6 +76,8 @@ Optional (for music playback): download mpv from mpv.io (shinchiro Windows build
 | `generate.py` | `generate_file` content |
 | `coding.py` | Coding projects via Claude Code: `code` action (new / run / switch / clone / repos / stop / approve / remember …), any repo in `REPO_DIRS` by spoken name, up to `CODE_MAX_PARALLEL` runs at once, a `jarvis/<task>` branch per task, headless `claude -p --output-format stream-json` runs streamed onto a Stage `code` panel, per-project session resume, voice approval of refused commands, preferences in `jarvis_coding/CLAUDE.md` |
 | `web.py` | Brave search + spoken summary, page fetching |
+| `delegate.py` | `delegate` action: open-ended tasks needing an outside service go to Claude Code (subscription) with only that service's MCP servers — `SERVICES`: `google` (the claude.ai Gmail/Drive/Calendar connectors — no Google Cloud setup), `jobs` (JobSpy; Indeed connector optional), `miro`, `general` (your normal Claude Code setup). Runs through `coding.start(service=...)` |
+| `knowledge.py` | `wolfram` (Spoken Results API → ready-to-say sentence; LLM API + Haiku fallback) and `youtube` (captions via yt-dlp → one Haiku call; transcript saved to `jarvis_output/transcripts/`) |
 | `server.py` | Flask: dashboard, JSON API, Stage API + event stream, `/phone` page (`core/static/phone.html`), Tailscale HTTPS |
 | `stage.py` | Stage state (panels, 12×12 layout, highlights) in memory; pushes every change to dashboards over SSE. Auto-tiling, voice references ("panel 2", "the map"), content helpers (`add_image`, `open_file`, `show_places`) |
 | `stage_actions.py` | Stage actions: `show_page`, `read_article` (live page + key points, narrated with highlights), `point_out`, `show_file` / `edit_file` / `file_changes`, `show_image`, `show_note`, `show_map` (Nominatim geocoding), `stage` (layout by voice) |
@@ -140,6 +147,20 @@ Flask API: `GET /api/stage/events` (SSE), `POST /api/stage/layout | arrange | cl
 - **Phone** — headless runs can't be watched through Remote Control (it only works in interactive sessions, and `--remote-control` is silently ignored with `-p`). Instead: "continue this on my phone" (`open_on_phone`) reopens the project's conversation as `claude --resume <session> --remote-control "Jarvis - <project>"` in a minimized console, so it appears in the Claude app with its history; Jarvis closes that window (`_close_remote`) before its next run in the project so the two never write to the same conversation. Interactive sessions stop at Claude Code's folder-trust prompt, so an untrusted folder (`trusted()` reads `~/.claude.json`) opens visibly instead. When a run finishes while you're away (`CODE_NOTIFY`), `_notify_finish` sends an ntfy notification with **Continue on phone** and, if something was refused, **Allow** buttons (`do: phone` / `do: approve` in `notify.handle_action`).
 - **Billing** — `CODE_USE_API_KEY = False` strips `ANTHROPIC_API_KEY` from Claude Code's environment so it uses the user's Claude login (the `.env` key would otherwise take precedence).
 
+## Delegated tasks and MCP servers
+
+Three tiers, cheapest first: **direct API calls** in Python where the data is fixed (Wolfram, YouTube captions — one Haiku call at most); **Haiku dispatch** picks the action; **Claude Code** (`claude -p`, the user's subscription) does anything open-ended with MCP tools. MCP tool schemas never go into `brain.ask_claude`.
+
+- **`delegate` action** (`core/delegate.py`) — `delegate.spec(service)` → `coding.start(service=spec)`: runs in `jarvis_delegate/<service>/` with `--mcp-config jarvis_memory/mcp/<service>.json --strict-mcp-config` (only that service's servers; the file has `${VAR}` references, no secrets — Claude Code expands them from the environment). `connectors: True` drops `--strict-mcp-config` so claude.ai connectors and user-scope servers load too (`google`, `general`, and `jobs` with `JOBS_INDEED_CONNECTOR` — Indeed's MCP is claude.ai-connector-only).
+- **Google** — the claude.ai connectors (connected at claude.ai → Settings → Connectors). Their tool names can't be known in advance, so `scripts/setup_mcp.py google` asks Claude Code for them once and `delegate.classify` splits them by name: send/delete/update/share/label… → asked about, the rest (read, search, draft, create) → allowed. Saved in `jarvis_memory/mcp/google_tools.json` (editable); `delegate.google_ready()` needs it.
+- **Callbacks** — `coding.start(..., quiet=True, on_done=fn)` lets a caller speak the result itself (the briefing's inbox check).
+- **Allowed vs. asked** — each service's `allowed` tools run freely (reading, drafts, creating new files); sending, editing calendars, deleting and sharing are refused and come back as denials → "allow it" (`coding.approve` → `delegate.run(..., extra_allowed)`).
+- **State** — a service is a `coding._state["projects"]` entry `jarvis-<service>` with `"service"` set: never the current project, hidden from project lists, session resumed for follow-ups until idle `DELEGATE_SESSION_HOURS`. Same Stage `code` panel (titled "Claude — <label>"), phone notification and Remote Control handoff (with the MCP flags) as coding runs.
+- **Results** — long answers are written to `result.md` (deleted before each run) and shown as a Stage note; only the short summary is spoken.
+- **Defaults** — `DELEGATE_MODEL = "sonnet"`, `DELEGATE_EFFORT = "low"`.
+- **Coding servers** — `scripts/setup_mcp.py coding` registers Context7, Playwright, Postman (`/minimal` endpoint), Firebase, Docker MCP Gateway and Postgres (`postgres-mcp --access-mode=restricted`, read-only) at user scope. `mcp__context7`, `mcp__playwright`, `mcp__postgres` are in `CODE_ALLOWED_TOOLS`; Docker/Firebase/Postman tools are approved by voice.
+- **Resume** — `jarvis_memory/resume.md` / `.txt`, or `resume.pdf` turned into text once (`resume.pdf.txt`, redone when the PDF changes; text costs Claude Code far fewer tokens than a PDF, which it also reads as page images) — `delegate.resume_file()`, read only by `jobs` tasks (not in `memory.md`, which goes into every prompt).
+
 ## Memory and agenda
 
 Everything lives in `jarvis_memory/` (git-ignored):
@@ -197,6 +218,9 @@ Edit them at `http://localhost:5151/workspaces`. Changes save instantly and hot-
 | `MEMORY_REVIEW_IDLE_MIN` / `CHAT_HISTORY_KEEP_MIN` | Quiet minutes before the memory review runs; how recent a conversation must be to survive a restart |
 | `AGENDA_REMIND_DEFAULTS` | Default reminders per agenda kind |
 | `CODE_USE_API_KEY` | `False` = Claude Code uses your Claude login, `True` = bills the `.env` API key |
+| `DELEGATE_MODEL` / `DELEGATE_EFFORT` / `DELEGATE_SESSION_HOURS` | Claude Code model/effort for delegated tasks; idle hours before a service's conversation starts fresh |
+| `JOBS_INDEED_CONNECTOR` / `RESUME_FILE` | Also use the claude.ai Indeed connector for job searches; your resume, without extension (ranks results by fit) |
+| `BRIEFING_EMAIL` | Unread mail in the daily breakdown (needs the Google connectors) |
 
 ## Background mode
 
@@ -204,14 +228,15 @@ Built but **not in use yet** — Jarvis is still in development. `python jarvis.
 
 ## Claude API usage
 
-The project uses `claude-haiku-4-5-20251001` (`config.MODEL`) for all Claude calls:
-- `brain.ask_claude` — main command dispatch; returns a single JSON object; `max_tokens=400`
-- `agent.run_agent` — tool-use loop for tasks no action covers; up to 8 steps, `max_tokens=1500` per step
-- `media.analyze_image` — image analysis with concise spoken answers; `max_tokens=200`
-- `media._pillow_enhance` — derives image enhancement params as JSON; `max_tokens=200`
+The project uses `claude-haiku-5-5` (`config.MODEL`) for all Claude calls:
+- `brain.ask_claude` — main command dispatch; returns a single JSON object; `max_tokens=1000` (1500 for in-depth answers), `effort: "low"`
+- `agent.run_agent` — tool-use loop for tasks no action covers; up to 8 steps, `max_tokens=3000` per step, `effort: "low"`
+- everything else (summaries, image analysis, extraction, one-liners) — thinking off
+
+**Thinking** — Haiku 5.5 thinks before answering unless told not to (default effort `medium`), and thinking tokens count toward `max_tokens`. Pass `**config.THINK_LOW` (dispatch, agent) or `**config.NO_THINK` (one-shot text) on every call, and read replies with `config.reply_text(resp)` — with thinking on, `content[0]` is a thinking block, not the answer. Thinking can't be given a token budget on this model (`budget_tokens` is rejected); `effort` is the control. Switching from Haiku 4.5 was benchmarked on the real dispatch prompt (22 commands): same accuracy and speed at `effort: "low"`, ~8x cheaper per command, ~30% more input tokens (newer tokenizer).
 
 History keeps the last 12 messages, always starting on a user turn. Side results (image analysis, web search, input-folder contents, agent results) are added with `brain.remember()`.
 
-**Prompt caching** — `brain.ask_claude` sends the system prompt as up to three blocks: the fixed action list and the memory block (both marked `cache_control`), then the parts that change per call (time, agenda, Stage panels, coding project, answer length). The agent loop moves one marker to its newest message each step. Haiku 4.5 only caches prompts of 4096+ tokens; the action list is ~3.2k today, so caching switches on by itself once new actions push it past that. Each call logs `[brain] N tokens in (… from cache / written to cache / not cached: under the minimum)`. Keep anything that varies out of `build_system_prompt` — one changed byte there re-writes the cache. `PROMPT_CACHE_TTL` (`config.py`): `"5m"` or `"1h"`.
+**Prompt caching** — `brain.ask_claude` sends the system prompt as up to three blocks: the fixed action list and the memory block (both marked `cache_control`), then the parts that change per call (time, agenda, Stage panels, coding project, answer length). The agent loop moves one marker to its newest message each step. Haiku 5.5 caches prompts of 512+ tokens (`config.CACHE_MIN_TOKENS`), so the action list is always cached. Each call logs `[brain] N tokens in (… from cache / written to cache / not cached: under the minimum)`. Keep anything that varies out of `build_system_prompt` — one changed byte there re-writes the cache. `PROMPT_CACHE_TTL` (`config.py`): `"5m"` or `"1h"`.
 
 **Answer length** — `core/verbosity.py`: short by default (main point, ~20 words); phrases like "explain in depth" / "go into more detail" switch the current command to a full answer. Every prompt that produces speech uses `verbosity.rule()`.

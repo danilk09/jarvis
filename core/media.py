@@ -59,7 +59,7 @@ def analyze_image(image_path, prompt):
     b64, media_type = image_to_base64(image_path)
     try:
         response = config.client.messages.create(
-            model=config.MODEL,
+            model=config.MODEL, **config.NO_THINK,
             max_tokens=verbosity.tokens(200, 600),
             system="You are a voice assistant. Answer only what was asked about the image. " + verbosity.rule()
                    + " No markdown, no bullet points, no headers — plain spoken sentences only.",
@@ -68,7 +68,7 @@ def analyze_image(image_path, prompt):
                 {"type": "text", "text": prompt or "Describe this image concisely."},
             ]}],
         )
-        result = response.content[0].text.strip()
+        result = config.reply_text(response).strip()
         brain.remember(f"[Image analysis request] {prompt}", f"[Image analysis result] {result}")
         return result
     except Exception as e:
@@ -95,7 +95,7 @@ def _pillow_enhance(image_path, prompt):
     try:
         b64, media_type = image_to_base64(image_path)
         response = config.client.messages.create(
-            model=config.MODEL,
+            model=config.MODEL, **config.NO_THINK,
             max_tokens=200,
             messages=[{"role": "user", "content": [
                 {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": b64}},
@@ -106,7 +106,7 @@ def _pillow_enhance(image_path, prompt):
                 )},
             ]}],
         )
-        raw = response.content[0].text.strip()
+        raw = config.reply_text(response).strip()
         params = json.loads(raw[raw.find("{"):raw.rfind("}") + 1])
         img = Image.open(image_path).convert("RGB")
         img = ImageEnhance.Brightness(img).enhance(params.get("brightness", 1.0))
@@ -269,12 +269,12 @@ def process_input_folder(prompt):
     summary_prompt = prompt or "Briefly say what's in these files."
     try:
         resp = config.client.messages.create(
-            model=config.MODEL,
+            model=config.MODEL, **config.NO_THINK,
             max_tokens=verbosity.tokens(250, 600),
             system="You are a voice assistant. " + verbosity.rule() + " No markdown, no lists.",
             messages=[{"role": "user", "content": f"Context:\n{all_context[:5000]}\n\nRequest: {summary_prompt}"}],
         )
-        speech = resp.content[0].text.strip()
+        speech = config.reply_text(resp).strip()
     except Exception:
         speech = f"Processed {len(archived)} item(s) from the input folder."
     brain.remember(f"[Input folder contents]\n{all_context}", speech)

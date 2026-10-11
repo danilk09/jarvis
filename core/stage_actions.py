@@ -23,9 +23,9 @@ _UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.
 
 
 def _ask_json(system, content, max_tokens=800):
-    resp = config.client.messages.create(model=config.MODEL, max_tokens=max_tokens, system=system,
+    resp = config.client.messages.create(model=config.MODEL, **config.NO_THINK, max_tokens=max_tokens, system=system,
                                          messages=[{"role": "user", "content": content}])
-    return brain.parse_json(resp.content[0].text.strip()) or {}
+    return brain.parse_json(config.reply_text(resp).strip()) or {}
 
 
 # ── Text matching ─────────────────────────────────────────────────────────────
@@ -267,11 +267,11 @@ def _point_out(a, chain):
             path = stage.private(pid).get("path")
             b64, media_type = media.image_to_base64(path)
             resp = config.client.messages.create(
-                model=config.MODEL, max_tokens=300, system=_POINT_IMAGE_SYSTEM,
+                model=config.MODEL, **config.NO_THINK, max_tokens=300, system=_POINT_IMAGE_SYSTEM,
                 messages=[{"role": "user", "content": [
                     {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": b64}},
                     {"type": "text", "text": f"Point out: {what}"}]}])
-            res = brain.parse_json(resp.content[0].text.strip()) or {}
+            res = brain.parse_json(config.reply_text(resp).strip()) or {}
             region = [float(v) for v in res.get("region", [])[:4]]
             if len(region) != 4:
                 speak(res.get("speech") or "I can't see that in the image.")
@@ -375,13 +375,13 @@ def _edit_file(a, chain):
     speak("Working on the changes.")
     try:
         resp = config.client.messages.create(
-            model=config.MODEL, max_tokens=6000,
+            model=config.MODEL, **config.NO_THINK, max_tokens=6000,
             system=(f"You edit the {'Markdown note' if is_note else 'file'} '{p['title']}'. Apply the user's "
                     "instruction and output ONLY the complete new content — no explanation, no code fences. "
                     "Keep everything the instruction doesn't ask to change exactly as it is."),
             messages=[{"role": "user", "content": f"Instruction: {a.get('instruction', '')}\n\n"
                                                   f"Current content:\n{current}"}])
-        new = resp.content[0].text
+        new = config.reply_text(resp)
         new = re.sub(r"^```[^\n]*\n|\n```\s*$", "", new.strip()) + "\n"
     except Exception as e:
         speak("Editing failed.")
@@ -448,11 +448,11 @@ def _show_note(a, chain):
     title = a.get("title") or "Note"
     try:
         resp = config.client.messages.create(
-            model=config.MODEL, max_tokens=1500,
+            model=config.MODEL, **config.NO_THINK, max_tokens=1500,
             system=("Write concise, well-structured Markdown for a panel on a display. Use headings, "
                     "bullet lists and tables where they help. No preamble, no closing remarks."),
             messages=[{"role": "user", "content": a.get("prompt", title)}])
-        md = resp.content[0].text.strip()
+        md = config.reply_text(resp).strip()
     except Exception as e:
         speak("I couldn't put that together.")
         return f"Show note failed: {e}"

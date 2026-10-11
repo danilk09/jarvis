@@ -561,10 +561,10 @@ def _ask_date(question):
         return None
     try:
         resp = config.client.messages.create(
-            model=config.MODEL, max_tokens=40,
+            model=config.MODEL, **config.NO_THINK, max_tokens=40,
             system=f"Today is {dt.date.today():%A %Y-%m-%d}. Return ONLY the date the user means as "
                    "YYYY-MM-DD, or NONE.", messages=[{"role": "user", "content": answer}])
-        raw = resp.content[0].text.strip()
+        raw = config.reply_text(resp).strip()
     except Exception:
         return None
     brain.log_usage("agenda", resp.usage)

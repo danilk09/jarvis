@@ -3,8 +3,10 @@ The daily breakdown: "Jarvis, give me a breakdown of today."
 
 Gathers in parallel: weather (Open-Meteo, no key), headlines (Brave News), the agenda
 (overdue, today, the next few days), special days (holidays, sky events, launches —
-events.py) and yesterday's summary from memory. One Haiku call turns it into a spoken
-briefing that opens with whatever makes today special ("Merry Christmas, sir...") and
+events.py) and yesterday's summary from memory. Unread email is checked at the same time by
+a background Claude Code task with the claude.ai Gmail connector (delegate "google"); it
+takes longer, so it's spoken as a short follow-up right after the breakdown. One Haiku call
+turns the rest into a spoken briefing that opens with whatever makes today special ("Merry Christmas, sir...") and
 mentions sky events as an aside; the full breakdown goes on the Stage as a note.
 """
 
@@ -12,10 +14,11 @@ import concurrent.futures
 import datetime as dt
 import os
 import re
+import threading
 
 import requests
 
-from . import agenda, brain, config, events, memory, stage, verbosity
+from . import agenda, brain, config, delegate, events, memory, stage, verbosity
 from .registry import action
 from .tts import speak, wait_tts
 
@@ -42,11 +45,11 @@ def home_city(ask=True):
         if places:
             try:
                 resp = config.client.messages.create(
-                    model=config.MODEL, max_tokens=30,
+                    model=config.MODEL, **config.NO_THINK, max_tokens=30,
                     system="From these facts about a user, return ONLY the city they live in now, as "
                            "'City, State' or 'City, Country' — or NONE if the facts don't say.",
                     messages=[{"role": "user", "content": "\n".join(places)}])
-                city = resp.content[0].text.strip().strip(".")
+                city = config.reply_text(resp).strip().strip(".")
                 _city["city"] = "" if city.upper().startswith("NONE") else city
             except Exception as e:
                 print(f"  [briefing] city lookup failed: {e}")
@@ -123,6 +126,33 @@ def headlines(count=5):
     return out[:count + 2]
 
 
+_INBOX = ("Check my unread email in Gmail from the last day (primary inbox, not promotions or social). "
+          "Don't change anything. Say how many there are, then only the personal or time-sensitive ones — "
+          "who and what, a few words each — in at most two spoken sentences starting \"In your inbox,\". "
+          "If there's nothing unread, just say your inbox is clear.")
+
+
+def check_email():
+    """Start the inbox check in the background. Returns {"done": Event, "summary"}, or None."""
+    from . import coding
+    if not (config.BRIEFING_EMAIL and delegate.google_ready()) or coding.busy("jarvis-google"):
+        return None
+    box = {"done": threading.Event(), "summary": ""}
+
+    def done(status, summary):
+        box["summary"] = summary if status == "done" else ""
+        box["done"].set()
+    started = delegate.run("google", _INBOX, model="haiku", effort="low", quiet=True, on_done=done)
+    return box if started.startswith("Claude Code working") else None
+
+
+def _speak_email(box):
+    """After the breakdown: the inbox summary, once the check finishes (up to two minutes)."""
+    if box["done"].wait(120) and box["summary"]:
+        from .coding import _speakable
+        speak(_speakable(box["summary"]))
+
+
 def _yesterday():
     path = os.path.join(memory._DAILY_DIR, f"{dt.date.today() - dt.timedelta(days=1)}.md")
     try:
@@ -136,7 +166,7 @@ def gather():
     """Everything for the breakdown, fetched in parallel. Missing sources are just left out."""
     today = dt.date.today()
     city = home_city()
-    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as pool:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
         jobs = {"weather": pool.submit(weather, city), "news": pool.submit(headlines),
                 "special": pool.submit(events.on, today), "launches": pool.submit(events.launches, today),
                 "soon": pool.submit(lambda: [(d, n) for d, n in events.upcoming(6) if d > today])}
@@ -208,11 +238,11 @@ def compose(g):
     length = verbosity.rule(short="about 7 to 9 sentences, brisk", long="up to 14 sentences, with more detail")
     known = memory.prompt_block()
     resp = config.client.messages.create(
-        model=config.MODEL, max_tokens=verbosity.tokens(700, 1100),
+        model=config.MODEL, **config.NO_THINK, max_tokens=verbosity.tokens(700, 1100),
         system=_SYSTEM + length + (f"\n\n{known}" if known else ""),
         messages=[{"role": "user", "content": _facts_for_claude(g)}])
     brain.log_usage("briefing", resp.usage)
-    raw = resp.content[0].text.strip()
+    raw = config.reply_text(resp).strip()
     data = brain.parse_json(raw)
     return (data or {}).get("speech") or raw
 
@@ -263,7 +293,8 @@ def _show(title, md):
         schema='{"type":"briefing"}',
         rules=['"give me a breakdown of today", "daily breakdown", "brief me", "morning briefing", "what does today look like", "catch me up on today" → type "briefing" (weather, agenda, news and anything special today). Just "what do I have today" is agenda "list".'])
 def _briefing(a, chain):
-    speak("Pulling together your breakdown.")
+    # speak("Pulling together your breakdown.")
+    inbox = check_email()      # slower than the rest: spoken after the breakdown
     g = gather()
     try:
         speech = compose(g)
@@ -272,5 +303,7 @@ def _briefing(a, chain):
         speech = agenda._speak_list("today")
     _show(f"Today — {g['now']:%A, %B %d}".replace(" 0", " "), markdown(g))
     speak(speech)
+    if inbox:
+        threading.Thread(target=_speak_email, args=(inbox,), daemon=True).start()
     brain.remember("[Daily breakdown]", speech)
     return "Briefing given"

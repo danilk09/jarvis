@@ -276,10 +276,10 @@ _DAY_SYSTEM = ("Summarize one day of conversations between a user and JARVIS, th
 
 def _ask(system, content, max_tokens):
     from . import brain
-    resp = config.client.messages.create(model=config.MODEL, max_tokens=max_tokens, system=system,
+    resp = config.client.messages.create(model=config.MODEL, **config.NO_THINK, max_tokens=max_tokens, system=system,
                                          messages=[{"role": "user", "content": content}])
     brain.log_usage("memory", resp.usage)
-    return resp.content[0].text.strip()
+    return config.reply_text(resp).strip()
 
 
 def _progress():
@@ -419,7 +419,7 @@ def recall(question, days=60):
         rules=['"remember that X", "remember my X is Y", "don\'t forget that X", "my X is Y, remember that" (about the user\'s life — not coding) → memory "remember"; rewrite the fact in the third person',
                '"forget that X", "that\'s not true anymore" → memory "forget" with n; "actually X is Y now" about a saved fact → memory "update" with n and the corrected fact',
                '"what do you remember about me", "what do you know about me", "show my memory" → memory "show"',
-               '"what did I ask you about X", "what did we talk about yesterday/last week", "when did I mention X" → memory "recall" with the question'])
+               '"what did I ask you about X", "what did we talk about yesterday/last week", "when did I mention X" → memory "recall" with the question — only for earlier sessions or days; questions about this conversation ("what did I just ask you?") → mode "chat", answered from the messages above'])
 def _memory(a, chain):
     cmd = a.get("command", "remember")
     if cmd == "remember":
