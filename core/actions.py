@@ -153,7 +153,7 @@ def _input_folder(a, chain):
 
 @action("web_search",
         schema='{"type":"web_search","query":"<search query>"}',
-        rules=["Anything needing current/real-time info WITHOUT file generation: news, weather, sports scores, prices, recent events → type \"web_search\""])
+        rules=["Anything needing current/real-time info WITHOUT file generation: news, weather, sports scores, prices, recent events, \"look up X\" → type \"web_search\" (answers aloud and opens the best source on the Stage)"])
 def _web_search(a, chain):
     if not config.BRAVE_API_KEY:
         msg = "Web search isn't set up. Add BRAVE_API_KEY to your .env file."
@@ -161,10 +161,13 @@ def _web_search(a, chain):
         return msg
     query = a.get("query", a.get("target", ""))
     speak("Let me look that up.")
-    answer = synthesize_search_answer(query, brave_search(query))
+    answer, source = synthesize_search_answer(query, brave_search(query), with_source=True)
     print(f"\n  ── Web Search: {query} ──────────\n  {answer}\n  ────────────────────────────────────\n")
+    if source and source.get("url", "").startswith("http"):
+        stage_actions.open_page(source["url"], source.get("title") or None)   # the source, on the Stage
     speak(answer)
-    brain.remember(f"[Web search] {query}", answer)
+    brain.remember(f"[Web search] {query}", answer + (f" (Source on the stage: {source['title']} — {source['url']})"
+                                                      if source else ""))
     return f"Web search: {query}"
 
 

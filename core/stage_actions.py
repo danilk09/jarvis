@@ -111,6 +111,12 @@ def open_page(url, title=None):
     return pid
 
 
+def _site(url):
+    """ "theverge.com" from a URL, for saying where a page is from."""
+    m = re.match(r"https?://(?:www\.)?([^/]+)", url or "")
+    return m.group(1) if m else ""
+
+
 def _page_from_action(a, speak_first=True):
     """Find or open the page an action refers to. Returns the panel id or None."""
     url, query = (a.get("url") or "").strip(), (a.get("query") or "").strip()
@@ -132,13 +138,15 @@ def _page_from_action(a, speak_first=True):
     elif not url.startswith("http"):
         url = "https://" + url
     if speak_first:
-        speak("Pulling it up.")
+        short = re.sub(r"\s+[-|–—]\s+[^-|–—]{2,40}$", "", title or "")      # " - NASA Science"
+        speak(f"Here's {short}, from {_site(url)}." if short and query else "Pulling it up.")
     return open_page(url, title)
 
 
 @action("show_page",
         schema='{"type":"show_page","url":"<full url, or empty>","query":"<what to search for if no url>"}',
-        rules=['"show me [site/page]", "pull up [page] on the stage", "display [website]" → type "show_page" (a live page on the Stage). Plain "open [website]" stays type "url" (external browser) unless they mention the stage or screen.'])
+        rules=['"show me [site/page]", "pull up [page] on the stage", "display [website]" → type "show_page" (a live page on the Stage). Plain "open [website]" stays type "url" (external browser) unless they mention the stage or screen.',
+               '"find me an article about X", "search for an article/review/guide on X", "get me a page about X" → type "show_page" with query (opens it on the Stage and says its title, no summary). Only when they also ask for a summary, key points, analysis or to read it to them is it "read_article".'])
 def _show_page(a, chain):
     pid = _page_from_action(a)
     return f"Page on stage: {pid}" if pid else "Show page: nothing opened"
@@ -156,7 +164,7 @@ _SUMMARY_SYSTEM = (
 
 @action("read_article",
         schema='{"type":"read_article","url":"<url, or empty>","query":"<topic to find an article about, or empty to use the page on the stage>","focus":"<what the user wants from it, or empty>"}',
-        rules=['"summarize this article/page", "find an article about X and summarize it", "read me the news about X", "what are the key points of X" → type "read_article". Shows the live page plus a key-points panel and reads the summary aloud. Leave url and query empty to summarize the page already on the stage.'])
+        rules=['"summarize this article/page", "find an article about X and summarize it", "read me the news about X", "what are the key points of X", "analyze this article" → type "read_article". Shows the live page plus a key-points panel and reads the summary aloud. Leave url and query empty to summarize the page already on the stage.'])
 def _read_article(a, chain):
     pid = _page_from_action(a)
     if not pid:

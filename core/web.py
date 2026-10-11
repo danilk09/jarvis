@@ -29,10 +29,12 @@ def brave_search(query, count=5):
         return []
 
 
-def synthesize_search_answer(query, results):
-    """Ask Claude to turn raw search snippets into a short spoken answer."""
+def synthesize_search_answer(query, results, with_source=False):
+    """Ask Claude to turn raw search snippets into a short spoken answer. with_source: return
+    (answer, the result that best answers it) so that page can go on the Stage."""
     if not results:
-        return "I couldn't find anything for that. Try again or check your Brave API key."
+        msg = "I couldn't find anything for that. Try again or check your Brave API key."
+        return (msg, None) if with_source else msg
     snippets = "\n".join(f"{i+1}. {r['title']}: {r['description']} ({r['url']})"
                          for i, r in enumerate(results))
     try:
@@ -40,12 +42,20 @@ def synthesize_search_answer(query, results):
             model=config.MODEL, **config.NO_THINK,
             max_tokens=verbosity.tokens(200, 600),
             system="You are a voice assistant. Using the search results below, answer the question. "
-                   + verbosity.rule() + " No markdown, no bullet points — plain conversational sentences only.",
+                   + verbosity.rule() + " No markdown, no bullet points — plain conversational sentences only."
+                   + (" Then, on its own last line, write SOURCE: <number of the result that best answers it — "
+                      "prefer an article over a video or a site's home page>." if with_source else ""),
             messages=[{"role": "user", "content": f"Question: {query}\n\nSearch results:\n{snippets}"}],
         )
-        return config.reply_text(response).strip()
+        answer = config.reply_text(response).strip()
     except Exception as e:
-        return f"Search succeeded but summary failed: {e}"
+        answer = f"Search succeeded but summary failed: {e}"
+    if not with_source:
+        return answer
+    m = re.search(r"\n?\s*SOURCE:\s*(\d+)\s*$", answer)
+    pick = int(m.group(1)) - 1 if m else 0
+    answer = answer[:m.start()].strip() if m else answer
+    return answer, results[pick] if 0 <= pick < len(results) else results[0]
 
 
 def fetch_text(url, limit=4000):
