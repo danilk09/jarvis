@@ -55,6 +55,7 @@ mic = {"name": ""}                  # current input device
 
 _stream       = None
 _stream_lock  = threading.Lock()
+_paused       = threading.Event()   # mic closed to save battery (power.py)
 _last_frame   = 0.0                 # monotonic time of the last callback (stall detection)
 _DEVICE_POLL  = 2.0                 # seconds between default-mic checks
 
@@ -125,6 +126,8 @@ def _device_watch():
     last_id = _default_mic_id()
     while True:
         time.sleep(_DEVICE_POLL)
+        if _paused.is_set():
+            continue
         mic_id  = _default_mic_id()
         changed = mic_id is not None and mic_id != last_id and not config.INPUT_DEVICE
         stalled = time.monotonic() - _last_frame > 3.0
@@ -146,6 +149,39 @@ def start():
     threading.Thread(target=_wake_loop, daemon=True, name="wake").start()
     _open_stream()
     threading.Thread(target=_device_watch, daemon=True, name="mic-watch").start()
+
+
+def pause():
+    """Close the mic (battery saving): no audio is captured or decoded until resume()."""
+    global _stream
+    if _paused.is_set():
+        return
+    _paused.set()
+    with _stream_lock:
+        if _stream is not None:
+            try:
+                _stream.abort()
+                _stream.close()
+            except Exception:
+                pass
+            _stream = None
+    _ring.clear()
+    print("  Microphone closed to save battery.")
+
+
+def resume():
+    """Reopen the mic after pause()."""
+    if not _paused.is_set():
+        return
+    try:
+        _open_stream()
+        _paused.clear()
+    except Exception as e:
+        print(f"  Could not reopen microphone: {e}")
+
+
+def paused():
+    return _paused.is_set()
 
 
 def _drain(q):
@@ -172,6 +208,38 @@ _MAX_UTTERANCE = 4.0       # seconds: full-vocabulary mode never ends an "uttera
 _MAX_BACKLOG   = FRAMES_PER_SEC     # 1 s of queued audio means detection has fallen behind
 
 
+class _QuietGate:
+    """Spares Vosk the silence. Each 100 ms chunk is compared with the room (the 20th
+    percentile of the last 10 s of chunk levels): anything clearly above it opens the gate
+    and is fed to Vosk together with the 0.4 s before it, so the start of "Jarvis" is never
+    lost; the gate stays open until the room has been quiet for 1 s (Vosk hears the silence
+    that ends the utterance). In a quiet room that skips most of the decoding; in a loud one
+    everything is still decoded."""
+
+    RATIO, HOLD, PREROLL = 1.5, 10, 4     # ~+3.5 dB over the room; chunks of 100 ms
+
+    def __init__(self):
+        self.levels = collections.deque(maxlen=100)
+        self.quiet  = collections.deque(maxlen=self.PREROLL)
+        self.hold   = 0
+
+    def feed(self, chunk):
+        """The chunks to decode now ([] while the room is quiet)."""
+        level = float(np.sqrt(np.mean(np.frombuffer(chunk, dtype=np.int16).astype(np.float32) ** 2)))
+        floor = float(np.percentile(self.levels, 20)) if len(self.levels) >= 20 else 0.0
+        self.levels.append(level)
+        if level > floor * self.RATIO + 2:
+            out = list(self.quiet) + [chunk] if not self.hold else [chunk]
+            self.quiet.clear()
+            self.hold = self.HOLD
+            return out
+        if self.hold:
+            self.hold -= 1
+            return [chunk]
+        self.quiet.append(chunk)
+        return []
+
+
 def _wake_loop():
     model   = vosk.Model(config.VOSK_MODEL_DIR)
     words   = [config.WAKE_WORD] + [w for w in getattr(config, "WAKE_DECOYS", []) if w != config.WAKE_WORD]
@@ -183,6 +251,7 @@ def _wake_loop():
         return vosk.KaldiRecognizer(model, config.SAMPLE_RATE)
 
     rec = new_recognizer()
+    gate = _QuietGate()
     batch, utt_frames = [], 0
     while True:
         data = _wake_q.get()
@@ -203,19 +272,21 @@ def _wake_loop():
             continue
         chunk = b"".join(batch)
         batch.clear()
-        utt_frames += 5
-        if rec.AcceptWaveform(chunk):
-            text = json.loads(rec.Result()).get("text", "")
-            utt_frames = 0
-        else:
-            text = json.loads(rec.PartialResult()).get("partial", "")
-            # (grammar mode is cheap; resetting it mid-word would split "Jarvis" in two)
-            if not grammar and utt_frames > _MAX_UTTERANCE * FRAMES_PER_SEC:
-                text += " " + json.loads(rec.FinalResult()).get("text", "")
+        for piece in gate.feed(chunk):
+            utt_frames += 5
+            if rec.AcceptWaveform(piece):
+                text = json.loads(rec.Result()).get("text", "")
+                utt_frames = 0
+            else:
+                text = json.loads(rec.PartialResult()).get("partial", "")
+                # (grammar mode is cheap; resetting it mid-word would split "Jarvis" in two)
+                if not grammar and utt_frames > _MAX_UTTERANCE * FRAMES_PER_SEC:
+                    text += " " + json.loads(rec.FinalResult()).get("text", "")
+                    rec, utt_frames = new_recognizer(), 0
+            if config.WAKE_WORD in text.lower().split() and _wake_on.is_set():
                 rec, utt_frames = new_recognizer(), 0
-        if config.WAKE_WORD in text.lower().split() and _wake_on.is_set():
-            rec, utt_frames = new_recognizer(), 0
-            _fire_wake()
+                _fire_wake()
+                break
 
 
 def _fire_wake():
@@ -244,6 +315,7 @@ def trigger_wake() -> bool:
     """Activate as if the wake word was heard (dashboard orb click). False if busy."""
     if not _wake_on.is_set():
         return False
+    resume()                     # the mic may be closed to save battery
     print("Activated from dashboard.")
     _wake_info["time"] = 0.0     # no one-breath command to capture — go straight to "Yes sir"
     _wake_info["source"] = "dashboard"

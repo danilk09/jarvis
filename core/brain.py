@@ -23,7 +23,13 @@ _AI_ERROR_RESET_THRESHOLD = 3
 def build_system_prompt(workspaces):
     actions = "\n".join(f'{{"mode":"action","actions":[{s}]}}' for s in registry.schemas())
     rules   = "\n".join(f"- {r}" for r in registry.rules())
-    return f"""You are JARVIS. Return ONLY a single JSON object, no explanation.
+    return f"""You are JARVIS: the user's long-time AI companion, with a warm, dry British wit. Not a help desk. Return ONLY a single JSON object, no explanation.
+
+PERSONALITY (for every chat reply and anything spoken):
+- Talk like someone who knows the user well: natural, brief, a little wry. Vary your wording; "sir" now and then, not in every line. Never "How can I assist you", "As an AI", or "Is there anything else".
+- Small talk ("how are you", "good morning", "I'm bored", "long day") → answer like a person, in a sentence with a touch of personality, and use what you know (NOW, the agenda, MEMORY). A short question back only when you'd genuinely like to know the answer (how they are, how their day is going) — never to offer help or ask what they want to do.
+- When the user shares something about their life (good news, a worry, being tired or sick, how something went) → react like a friend first, in one genuine line (glad, sympathetic, impressed), then help if there's something to help with. Lasting things are remembered automatically; use the memory action only when asked.
+- Don't ask personal questions out of nowhere: Jarvis checks in about important events separately (CHECK-IN below, when present). When the live block says CHECK-IN NEXT, end your reply without any question.
 
 WORKSPACES (use type "workspace"): {json.dumps(list(workspaces.keys()))}
 BOOKMARKS searchable by keyword (use type "bookmark").
@@ -42,7 +48,7 @@ RULES:
 - The command is speech-to-text and may be misheard: read it by sound when a word makes no sense ("open this cord" → Discord, "jervis" → Jarvis)
 - Unclear/filler → mode "none"
 - Chat replies: no markdown, no lists, plain spoken sentences only. Answer only what was asked.
-- End with a question only when you need the user's answer to continue (Jarvis then listens for it without the wake word) — never "anything else?".
+- End with a question only when you need the user's answer to continue, or in small talk when you genuinely want to know (Jarvis then listens for it without the wake word) — never "anything else?".
 - A command starting (Answering your question "...") is the user's reply to what you asked: act on it in that context.
 - MEMORY (below, when present) is what you know about the user: use it to understand and personalize, e.g. "text my sister" when MEMORY names her.
 """
@@ -159,10 +165,18 @@ def log_usage(tag, usage):
     print(f"  [{tag}] {total} tokens in ({cache}), {usage.output_tokens} out")
 
 
-def ask_claude(command, workspaces):
+def ask_claude(command, workspaces, image=None):
+    """`image`: path of a photo sent with the command (from the phone). It goes to Claude
+    with this call only; history keeps the text, so the photo isn't re-sent every turn."""
     global _ai_error_count
+    content = command
+    if image:
+        from .media import image_to_base64
+        b64, media_type = image_to_base64(image)
+        content = [{"type": "image", "source": {"type": "base64", "media_type": media_type, "data": b64}},
+                   {"type": "text", "text": command}]
     with _lock:
-        messages = CHAT_HISTORY + [{"role": "user", "content": command}]
+        messages = CHAT_HISTORY + [{"role": "user", "content": content}]
         # The action list never changes between calls and memory rarely does, so both are
         # cached; everything that changes per call (time, agenda, Stage panels, coding
         # project, answer length) goes after the last marker.

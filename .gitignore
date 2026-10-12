@@ -13,6 +13,7 @@ __pycache__/
 jarvis_memory/
 jarvis_input/archive/
 models/speaker/
+models/tts/
 models/whisper-*/
 jarvis_voice_data.zip
 jarvis_delegate/

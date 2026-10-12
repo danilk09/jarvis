@@ -29,7 +29,7 @@ _DAILY_DIR = os.path.join(config.MEMORY_DIR, "daily")
 _PROGRESS  = os.path.join(config.MEMORY_DIR, "review.json")
 
 SECTIONS = {"about": "About me", "people": "People", "preferences": "Preferences",
-            "places": "Places", "other": "Other"}
+            "places": "Places", "ongoing": "Working on", "other": "Other"}
 _AUTO = " (auto)"
 _RECENT_DAYS = 3
 
@@ -37,12 +37,15 @@ _TEMPLATE = """# What Jarvis remembers
 
 Everything in this file goes into Jarvis's prompt, so keep each fact short. Edit freely:
 one fact per bullet, under any heading. Bullets ending in (auto) were picked up from
-conversation rather than told to Jarvis directly.
+conversation rather than told to Jarvis directly. "Working on" is what you're practicing
+or aiming for (from check-ins like "How did the quiz go?"); Jarvis brings it up when relevant.
 """ + "".join(f"\n## {title}\n" for title in SECTIONS.values())
 
 # Lines that carry no information for the conversation log
-_FILLER = {"yes sir.", "ready for your command.", "let me look that up.", "on it.", "pulling it up.",
-           "reading it now.", "i didn't catch that. try again."}
+_FILLER = {"yes sir.", "sir.", "go ahead, sir.", "at your service.", "listening.", "ready for your command.",
+           "let me look that up.", "on it.", "pulling it up.", "reading it now.", "i didn't catch that. try again.",
+           "i didn't catch that. say it again?", "good morning, sir.", "good afternoon, sir.", "good evening, sir.",
+           "burning the midnight oil, sir? i'm here."}
 
 _lock  = threading.RLock()
 _cache = {"mtime": None, "facts": [], "lines": []}
@@ -205,8 +208,9 @@ def prompt_block():
         return ""
     parts = []
     if current:
-        parts.append("MEMORY — what you know about the user (numbered for the memory action). Use it "
-                     "naturally when relevant; never recite it unprompted:\n" +
+        parts.append("MEMORY — what you know about the user (numbered for the memory action). Use it the way "
+                     "a friend would: bring something up only when it's relevant to what's being said (\"working on\" "
+                     "items when they study, plan or ask for help with that subject); never recite it unprompted:\n" +
                      "\n".join(f"[{n}] ({f['section']}) {f['text']}" for n, f in enumerate(current, 1)))
     if days:
         parts.append("RECENT DAYS (summaries of earlier conversations):\n" +
@@ -248,6 +252,15 @@ def _log_days():
     return sorted(n[:-6] for n in os.listdir(_LOG_DIR) if n.endswith(".jsonl"))
 
 
+def last_user_time():
+    """When the user last said anything (epoch), from the newest conversation log; 0 if never."""
+    for day in reversed(_log_days()[-2:]):
+        users = [e.get("ts", 0) for e in _read_log(day) if e.get("role") == "user"]
+        if users:
+            return users[-1]
+    return 0.0
+
+
 def _transcript(entries, limit=12000):
     text = "\n".join(f"{'User' if e['role'] == 'user' else 'Jarvis'}: {e['text']}" for e in entries)
     return text[-limit:]
@@ -257,20 +270,27 @@ def _transcript(entries, limit=12000):
 _REVIEW_SYSTEM = """You maintain the long-term memory of JARVIS, a voice assistant, about its user.
 You get the facts already saved (numbered) and a recent conversation. Return ONLY JSON:
 {"ops":[...]} where each op is one of
-{"op":"add","section":"about|people|preferences|places|other","fact":"<one short third-person sentence, e.g. The user's sister is named Ana.>"}
+{"op":"add","section":"about|people|preferences|places|ongoing|other","fact":"<one short third-person sentence, e.g. The user's sister is named Ana.>"}
 {"op":"update","n":<number>,"fact":"<the corrected fact>"}
 {"op":"delete","n":<number>}
+{"op":"moment","what":"<short name, e.g. internship interview with Google>","date":"YYYY-MM-DD","time":"<HH:MM or empty>","question":"<one short natural question to ask afterwards, with {when} where a time word fits, e.g. How did the interview with Google go {when}?>","after":"event|next_day"}
 Save only LASTING facts the user stated about themselves: their life, work or school, people, places, preferences, routines and ongoing situations.
+Section "ongoing" is what the user is working on or towards: a skill or topic they're struggling with or practicing, a goal, a job hunt, a project that matters to them. Delete an ongoing fact (only if auto) when the user says it's done or no longer true.
 Skip: commands and one-off requests (play music, open an app, search for X), anything only Jarvis said, questions, guesses, moods and other temporary states, and anything already saved.
-Deadlines, appointments and to-dos are handled by the agenda — skip them.
+Deadlines, appointments, exams and to-dos are handled by the agenda — never save them as facts.
+Moments: an event the user mentioned that is worth asking about later (below), upcoming or happening today, that they haven't already said how it went → a "moment" op (date resolved from TODAY). Being sick or hurt → a moment dated today with after "next_day" and a question like "Are you feeling any better?".
+{WORTH}
+The text is speech-to-text: skip anything that looks misheard or makes no sense (e.g. "The user lives in follow me there").
 Never save passwords, codes, account or card numbers, addresses of other people, or keys.
-Write dates as dates (e.g. "since September 2026"), never "recently" or "a month ago" — the fact must stay true as time passes.
+Write dates as dates (e.g. "since September 2026"), never "recently", "this weekend" or "a month ago" — the fact must stay true as time passes.
+An upcoming event is a moment, never a fact: save only what stays true after it ("my sister Ana is flying in from Seattle this weekend" → fact "The user's sister Ana lives in Seattle." + a moment for the visit).
 Update or delete a saved fact only when the user clearly contradicted it.
 Most conversations contain nothing worth saving: then return {"ops":[]}."""
 
 _DAY_SYSTEM = ("Summarize one day of conversations between a user and JARVIS, their voice assistant, in 2-4 "
-               "plain sentences: what the user worked on, asked about, planned or decided, and anything left "
-               "unfinished. Write about 'the user'. Skip small talk and routine commands like playing music. "
+               "plain sentences: what the user worked on, asked about, planned or decided. Don't list unfinished, "
+               "missed or overdue items: the agenda tracks what's due. Write about 'the user'. Skip small talk "
+               "and routine commands like playing music. "
                "If nothing meaningful happened, reply with just: Nothing notable.")
 
 
@@ -297,9 +317,10 @@ def _save_progress(p):
 
 
 def review(force=False):
-    """Look through conversation since the last review for lasting facts. Runs once the
-    conversation has been quiet for MEMORY_REVIEW_IDLE_MIN (or right away with force)."""
-    from . import brain
+    """Look through conversation since the last review for lasting facts and events worth
+    asking about later. Runs once the conversation has been quiet for MEMORY_REVIEW_IDLE_MIN
+    (or right away with force)."""
+    from . import brain, checkins
     progress = _progress()
     since = progress.get("reviewed", 0.0)
     since_day = dt.date.fromtimestamp(since).isoformat() if since else ""
@@ -315,7 +336,8 @@ def review(force=False):
     current = facts()
     saved = "\n".join(f"[{n}] ({f['section']}) {f['text']}" for n, f in enumerate(current, 1)) or "(none yet)"
     try:
-        raw = _ask(_REVIEW_SYSTEM, f"TODAY: {dt.date.today():%A %Y-%m-%d}\n\nSAVED FACTS:\n{saved}\n\n"
+        raw = _ask(_REVIEW_SYSTEM.replace("{WORTH}", checkins.WORTH_ASKING),
+                   f"TODAY: {dt.date.today():%A %Y-%m-%d}\n\nSAVED FACTS:\n{saved}\n\n"
                                    f"CONVERSATION:\n{_transcript(entries)}", 600)
     except Exception as e:
         print(f"  [memory] review failed: {e}")
@@ -328,6 +350,9 @@ def review(force=False):
         kind = op.get("op")
         if kind == "add" and op.get("fact"):
             added += add(op["fact"], op.get("section", "other"), auto=True)
+        elif kind == "moment" and op.get("what"):
+            added += bool(checkins.add_moment(op["what"], op.get("date"), op.get("time", ""),
+                                              op.get("question", ""), op.get("after", "event")))
         elif kind in ("update", "delete") and str(op.get("n", "")).isdigit():
             n = int(op["n"])
             # only facts that were picked up automatically may be changed without asking
@@ -415,7 +440,7 @@ def recall(question, days=60):
 
 # ── Voice ─────────────────────────────────────────────────────────────────────
 @action("memory",
-        schema='{"type":"memory","command":"remember|forget|update|show|recall","fact":"<for remember/update: the fact as one short third-person sentence, e.g. The user\'s sister is named Ana.>","section":"about|people|preferences|places|other","n":<fact number from MEMORY for forget/update, or 0>,"question":"<for recall>"}',
+        schema='{"type":"memory","command":"remember|forget|update|show|recall","fact":"<for remember/update: the fact as one short third-person sentence, e.g. The user\'s sister is named Ana.>","section":"about|people|preferences|places|ongoing|other","n":<fact number from MEMORY for forget/update, or 0>,"question":"<for recall>"}',
         rules=['"remember that X", "remember my X is Y", "don\'t forget that X", "my X is Y, remember that" (about the user\'s life — not coding) → memory "remember"; rewrite the fact in the third person',
                '"forget that X", "that\'s not true anymore" → memory "forget" with n; "actually X is Y now" about a saved fact → memory "update" with n and the corrected fact',
                '"what do you remember about me", "what do you know about me", "show my memory" → memory "show"',

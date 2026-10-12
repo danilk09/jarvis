@@ -1,18 +1,27 @@
 """
-Text-to-speech via Windows SAPI, driven in-process through COM.
+Text-to-speech on one dedicated thread: a Piper voice (config.PIPER_VOICE, natural, offline)
+or Windows SAPI driven in-process through COM.
 
-The old approach spawned a PowerShell process per sentence (~0.7 s of startup
-before any audio). Here one SpVoice object lives on a dedicated thread for the
-whole session, so speech starts almost immediately and can be cut off instantly.
+Piper (via sherpa-onnx) renders a medium voice ~18x faster than real time. Each line is
+split into phrases; the first plays as soon as it's rendered (~50-150 ms) while the rest
+render behind it, into an output stream that stays open (opening one costs 100-300 ms).
+SAPI: one SpVoice lives on this thread for the whole session, so speech starts almost
+immediately. It is also the fallback whenever the Piper voice is missing or fails.
 """
 
+import collections
+import json
+import os
 import queue
+import re
 import threading
 import time
+from xml.sax.saxutils import escape
 
 import comtypes
 import comtypes.client
 import numpy as np
+import sounddevice as sd
 
 from . import config
 from .state import end_speech, push_log, push_state, speech_beat, start_speech
@@ -20,6 +29,7 @@ from .state import end_speech, push_log, push_state, speech_beat, start_speech
 # SpeechVoiceSpeakFlags
 _ASYNC       = 1
 _PURGE       = 2
+_IS_XML      = 8    # SAPI XML: used only for lines with a custom pronunciation
 _IS_NOT_XML  = 16   # treat "<" etc. as plain text
 _SAFT16K     = 18   # SpeechAudioFormatType: 16 kHz 16-bit mono
 
@@ -42,11 +52,108 @@ _LULL       = 0.6                 # seconds of silence before speech counts as f
 # The last question Jarvis asked (a spoken line ending in "?"): jarvis.py listens for the
 # answer without the wake word unless something already listened after it
 last_question = {"text": "", "time": 0.0}
+last_spoken   = [0.0]   # when anything was last queued to be said (checkins: "By the way, ..." or not)
 
 # Callbacks run on the TTS thread when Jarvis starts talking and once it has gone
 # quiet (jarvis.py ducks music with these, for every voice line — not just replies)
 on_speech_start = []
 on_speech_end   = []
+
+
+# ── Pronunciations ────────────────────────────────────────────────────────────
+# Words SAPI says wrong ("Danil" → Duh-NEEL): config.PRONUNCIATIONS plus the ones taught by
+# voice ("pronounce X as Y"), saved in jarvis_memory/pronunciations.json. Each maps to SAPI
+# American English phonemes; only the audio changes, the dashboard and logs keep the spelling.
+PRON_FILE = os.path.join(config.MEMORY_DIR, "pronunciations.json")
+_pron = {"mtime": None, "map": {}, "re": None}
+
+
+def pronunciations():
+    """{word: phonemes}: config first, the saved file on top (re-read when it changes)."""
+    try:
+        mtime = os.path.getmtime(PRON_FILE)
+    except OSError:
+        mtime = 0
+    if mtime != _pron["mtime"]:
+        saved = {}
+        if mtime:
+            try:
+                with open(PRON_FILE, encoding="utf-8") as f:
+                    saved = json.load(f)
+            except (OSError, ValueError) as e:
+                print(f"  Could not read {PRON_FILE}: {e}")
+        words = {**config.PRONUNCIATIONS, **saved}
+        _pron.update(mtime=mtime, map={w.lower(): p for w, p in words.items()},
+                     re=re.compile(r"\b(" + "|".join(re.escape(w) for w in sorted(words, key=len, reverse=True))
+                                   + r")('s)?\b", re.IGNORECASE) if words else None)
+    return dict(_pron["map"])
+
+
+def save_pronunciation(word, phonemes):
+    pronunciations()
+    saved = {}
+    if os.path.exists(PRON_FILE):
+        with open(PRON_FILE, encoding="utf-8") as f:
+            saved = json.load(f)
+    saved[word] = phonemes
+    os.makedirs(os.path.dirname(PRON_FILE), exist_ok=True)
+    with open(PRON_FILE, "w", encoding="utf-8") as f:
+        json.dump(saved, f, indent=1)
+    _pron["mtime"] = None
+
+
+def _sapi_xml(text):
+    """The line as SAPI XML with <pron> tags, or None if it has no custom pronunciation."""
+    pronunciations()
+    if not _pron["re"] or not _pron["re"].search(text):
+        return None
+
+    def tag(m):
+        phones = _pron["map"][m.group(1).lower()] + (" z" if m.group(2) else "")   # "Danil's"
+        return f'<pron sym="{phones}">{m.group(0)}</pron>'
+    return _pron["re"].sub(tag, escape(text))
+
+
+def _say(voice, text, flags):
+    """voice.Speak with custom pronunciations; plain text if SAPI rejects the phonemes."""
+    xml = _sapi_xml(text)
+    if xml:
+        try:
+            return voice.Speak(xml, (flags & ~_IS_NOT_XML) | _IS_XML)
+        except Exception as e:
+            print(f"  Pronunciation not accepted by SAPI ({e}) — check PRONUNCIATIONS / pronunciations.json")
+    return voice.Speak(text, flags)
+
+
+# SAPI phonemes → a sounds-like spelling Piper's phonemizer reads ("d ax n iy 1 l" → "duh-neel")
+_VOWELS  = {"aa": "ah", "ae": "a", "ah": "uh", "ao": "aw", "aw": "ow", "ax": "uh", "ay": "eye",
+            "eh": "e", "er": "er", "ey": "ay", "ih": "i", "iy": "ee", "ow": "oh", "oy": "oy",
+            "uh": "oo", "uw": "oo"}
+_CONSONANTS = {"dh": "th", "jh": "j", "zh": "zh", "hh": "h"}
+
+
+def _respelled(phonemes):
+    phones = [p for p in phonemes.split() if not p.isdigit()]
+    syllables, cur, has_vowel = [], "", False
+    for i, p in enumerate(phones):
+        if p in _VOWELS:
+            cur += _VOWELS[p]
+            has_vowel = True
+            continue
+        if has_vowel and i + 1 < len(phones) and phones[i + 1] in _VOWELS:
+            syllables.append(cur)   # a consonant before a vowel starts the next syllable
+            cur, has_vowel = "", False
+        cur += _CONSONANTS.get(p, p)
+    return "-".join(syllables + [cur])
+
+
+def _piper_text(text):
+    """The line with custom pronunciations swapped for sounds-like spellings."""
+    pronunciations()
+    if not _pron["re"]:
+        return text
+    return _pron["re"].sub(
+        lambda m: _respelled(_pron["map"][m.group(1).lower()]) + ("s" if m.group(2) else ""), text)
 
 
 def _run_hooks(hooks):
@@ -79,8 +186,13 @@ def _envelope(meter, text):
     stream = comtypes.client.CreateObject("SAPI.SpMemoryStream")
     stream.Format.Type = _SAFT16K
     meter.AudioOutputStream = stream
-    meter.Speak(text, _IS_NOT_XML)
+    _say(meter, text, _IS_NOT_XML)
     pcm = np.frombuffer(bytes(stream.GetData()), dtype=np.int16).astype(np.float32) / 32768.0
+    return _reduce(pcm)
+
+
+def _reduce(pcm):
+    """16 kHz audio → per-frame band levels and loudness, 0-99, for the dashboard orb."""
     n = len(pcm) // _ENV_FRAME
     if n == 0:
         return None
@@ -95,6 +207,239 @@ def _envelope(meter, text):
     rms    = np.sqrt((frames ** 2).mean(axis=1))
     level  = np.clip(rms / (np.percentile(rms, 98) + 1e-6), 0, 1)
     return {"bands": (bands * 99).astype(int).tolist(), "level": (level * 99).astype(int).tolist()}
+
+
+# ── Piper ─────────────────────────────────────────────────────────────────────
+_piper        = {"tts": None, "lock": threading.Lock()}
+_piper_loaded = threading.Event()
+
+
+def _load_piper():
+    try:
+        if not config.PIPER_VOICE:
+            return
+        import sherpa_onnx
+        comtypes.CoInitialize()   # _speaker_id() asks Windows (COM) which speakers are the default
+        d = os.path.join(config.TTS_DIR, config.PIPER_VOICE)
+        if not os.path.isdir(d):
+            print(f"  Voice folder {d} not found — using the Windows voice")
+            return
+        onnx = next(f for f in os.listdir(d) if f.endswith(".onnx"))
+        tts = sherpa_onnx.OfflineTts(sherpa_onnx.OfflineTtsConfig(model=sherpa_onnx.OfflineTtsModelConfig(
+            vits=sherpa_onnx.OfflineTtsVitsModelConfig(model=os.path.join(d, onnx),
+                                                       tokens=os.path.join(d, "tokens.txt"),
+                                                       data_dir=os.path.join(d, "espeak-ng-data")),
+            num_threads=4)))
+        tts.generate("Ready.", sid=0)   # the first call is slower; do it now, not on the greeting
+        _piper["tts"] = tts
+        _player(tts.sample_rate)        # open the output stream ahead of time too
+        threading.Thread(target=_watch_speakers, daemon=True, name="tts-speakers").start()
+    except Exception as e:
+        print(f"  Piper voice failed to load ({e}) — using the Windows voice")
+    finally:
+        _piper_loaded.set()
+
+
+_ABBREV = re.compile(r"\b(mr|mrs|ms|dr|st|vs|etc|e\.g|i\.e|approx|no)\.$", re.IGNORECASE)
+
+
+def _phrases(text):
+    """[(phrase, pause after it in seconds)]: whole sentences, also split at dashes. Commas stay
+    inside so Piper keeps one natural intonation through the sentence (rendering comma pieces
+    separately reset it every time); the pauses between sentences are added here."""
+    out = []
+    text = re.sub(r"\s*[—–]\s*|\s+-\s+", "— ", text.strip())   # "clear — mostly" → "clear—" + "mostly"
+    for part in re.split(r"(?<=[.!?—])\s+", text):
+        if out and _ABBREV.search(out[-1][0]):   # "Dr. Smith" is one phrase
+            out[-1] = (f"{out[-1][0]} {part}", out[-1][1])
+        else:
+            out.append((part, 0))
+    phrases = []
+    for phrase, _ in out:
+        if not re.search(r"\w", phrase):
+            continue
+        end = phrase.rstrip()[-1]
+        pause = config.PIPER_DASH_PAUSE if end == "—" else config.PIPER_SENTENCE_PAUSE
+        phrases.append((phrase, pause))
+    return phrases
+
+
+def _speaker_id():
+    """ID of Windows' default speakers. Asks for the endpoint directly: pycaw's
+    GetSpeakers() wraps it in an AudioDevice (~110 ms of CPU reading every property) that
+    has no GetId()."""
+    try:
+        from pycaw.utils import CLSID_MMDeviceEnumerator, EDataFlow, ERole, IMMDeviceEnumerator
+        enum = comtypes.CoCreateInstance(CLSID_MMDeviceEnumerator, IMMDeviceEnumerator,
+                                         comtypes.CLSCTX_INPROC_SERVER)
+        return enum.GetDefaultAudioEndpoint(EDataFlow.eRender.value, ERole.eMultimedia.value).GetId()
+    except Exception:
+        return None
+
+
+class _Player:
+    """An output stream kept open between lines; audio is queued and pulled by its callback."""
+
+    def __init__(self, sr):
+        self.sr, self.chunks, self.queued, self.lock = sr, collections.deque(), 0, threading.Lock()
+        self.device = _speaker_id()
+        self.stale  = False   # set by _watch_speakers when Windows' default speakers change
+        self.stream = sd.OutputStream(samplerate=sr, channels=1, dtype="float32", latency="low",
+                                      callback=self._fill)
+        self.stream.start()
+
+    def _fill(self, out, frames, time_info, status):
+        out.fill(0)
+        i = 0
+        with self.lock:
+            while i < frames and self.chunks:
+                c = self.chunks[0]
+                n = min(len(c), frames - i)
+                out[i:i + n, 0] = c[:n]
+                i += n
+                if n == len(c):
+                    self.chunks.popleft()
+                else:
+                    self.chunks[0] = c[n:]
+            self.queued -= i
+
+    def add(self, pcm):
+        """Queue audio; returns when its first sample will be heard (epoch seconds)."""
+        with self.lock:
+            starts = time.time() + self.queued / self.sr + self.stream.latency
+            self.chunks.append(pcm)
+            self.queued += len(pcm)
+        return starts
+
+    def clear(self):
+        with self.lock:
+            self.chunks.clear()
+            self.queued = 0
+
+    def busy(self):
+        return self.queued > 0
+
+    def usable(self):
+        """False after audio.py re-initialised PortAudio, or when Windows' speakers changed."""
+        try:
+            return self.stream.active and not self.stale
+        except Exception:
+            return False
+
+    def close(self):
+        try:
+            self.stream.abort()
+            self.stream.close()
+        except Exception:
+            pass
+
+
+_out = {"player": None}
+
+
+def _player(sr):
+    p = _out["player"]
+    if p is None or p.sr != sr or not p.usable():
+        if p:
+            p.close()
+        p = _out["player"] = _Player(sr)
+    return p
+
+
+def release_output():
+    """Close the always-open speaker stream (battery saving); the next line reopens it."""
+    p, _out["player"] = _out["player"], None
+    if p:
+        p.close()
+
+
+def _watch_speakers():
+    """Checked here every 2 s rather than per line, so a line never waits on Windows."""
+    comtypes.CoInitialize()
+    while True:
+        time.sleep(2)
+        p = _out["player"]
+        if p and not p.stale and _speaker_id() != p.device:
+            p.stale = True   # the next line reopens the stream on the new speakers
+
+
+def _onsets(level):
+    """Frames where loudness jumps after a dip: syllable-ish beats for the orb (SAPI has words)."""
+    beats, low = [], True
+    for i, v in enumerate(level):
+        if low and v >= 35:
+            beats.append(i)
+            low = False
+        elif v < 20:
+            low = True
+    return beats
+
+
+def _speak_piper(text, update_state):
+    """Say `text` with the Piper voice. False if nothing could be rendered (SAPI takes over)."""
+    tts = _piper["tts"]
+    rendered, cancel = queue.Queue(), threading.Event()
+
+    def render():
+        try:
+            for phrase, pause in _phrases(_piper_text(text)):
+                if cancel.is_set():
+                    break
+                with _piper["lock"]:
+                    audio = tts.generate(phrase.rstrip("—").strip(), sid=0, speed=config.PIPER_SPEED)
+                sr = audio.sample_rate
+                pcm = np.asarray(audio.samples, dtype=np.float32)
+                loud = np.flatnonzero(np.abs(pcm) > 0.01)
+                if len(loud):   # Piper's own leading/trailing silence varies; replace it with `pause`
+                    pcm = pcm[max(0, loud[0] - int(0.02 * sr)):loud[-1] + int(0.03 * sr)]
+                    rendered.put(np.concatenate([pcm, np.zeros(int(pause / config.PIPER_SPEED * sr),
+                                                                np.float32)]))
+        except Exception as e:
+            rendered.put(e)
+        rendered.put(None)
+
+    threading.Thread(target=render, daemon=True, name="tts-render").start()
+    player, beats, played, done = None, [], False, False
+    try:
+        while True:
+            if _interrupt.is_set():
+                if player:
+                    player.clear()
+                end_speech()
+                return True
+            while beats and beats[0] <= time.time():
+                beats.pop(0)
+                speech_beat()
+            if done:
+                if not player or not player.busy():
+                    time.sleep(player.stream.latency if player else 0)   # let the last block play out
+                    return played
+                time.sleep(0.02)
+                continue
+            try:
+                item = rendered.get(timeout=0.02)
+            except queue.Empty:
+                continue
+            if item is None or isinstance(item, Exception):
+                if isinstance(item, Exception):
+                    print(f"  Piper voice error: {item}")
+                done = True
+                continue
+            player = player or _player(tts.sample_rate)
+            starts = player.add(item)
+            played = True
+            if update_state:
+                try:
+                    n16 = int(len(item) * _ENV_RATE / tts.sample_rate)
+                    env = _reduce(np.interp(np.arange(n16) * tts.sample_rate / _ENV_RATE,
+                                            np.arange(len(item)), item).astype(np.float32))
+                    if env:
+                        start_speech(starts, _ENV_FRAME * 1000 // _ENV_RATE, env)
+                        beats += [starts + b * _ENV_FRAME / _ENV_RATE for b in _onsets(env["level"])]
+                except Exception as e:
+                    print(f"  Speech envelope error: {e}")
+    finally:
+        cancel.set()
 
 
 def _worker():
@@ -125,7 +470,11 @@ def _worker():
                     on_start()
                 except Exception as e:
                     print(f"  on_start callback error: {e}")
-            voice.Speak(text, _ASYNC | _IS_NOT_XML)
+            if config.PIPER_VOICE and _piper_loaded.wait(10) and _piper["tts"]:
+                if _speak_piper(text, update_state):
+                    continue
+                print("  Piper voice produced nothing — using the Windows voice")
+            _say(voice, text, _ASYNC | _IS_NOT_XML)
             started = time.time()
             if update_state:
                 try:
@@ -154,6 +503,7 @@ def _worker():
             _queue.task_done()
 
 
+threading.Thread(target=_load_piper, daemon=True, name="tts-load").start()
 threading.Thread(target=_worker, daemon=True, name="tts").start()
 _ready.wait(timeout=10)
 
@@ -167,6 +517,7 @@ def speak(text, update_state=True, on_start=None):
         print(f"  [muted] JARVIS: {text}")
         return
     print(f"  JARVIS: {text}")
+    last_spoken[0] = time.time()
     if str(text).rstrip().endswith("?"):
         last_question.update(text=str(text).strip(), time=time.time())
     if update_state:

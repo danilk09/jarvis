@@ -26,7 +26,7 @@ from .media import guess_file_type
 app = Flask(__name__, static_folder=None)
 CORS(app)
 
-phone_commands = queue.Queue()   # transcribed phone commands for the main loop
+phone_commands = queue.Queue()   # phone commands for the main loop: text, or {"text", "image"}
 
 tls = {"cert": "", "key": ""}
 
@@ -419,11 +419,9 @@ def _phone():
     return send_from_directory(config.STATIC_DIR, "phone.html")
 
 
-@app.route("/phone-command", methods=["POST"])
-def _phone_command():
-    audio_file = request.files.get("audio")
-    if not audio_file:
-        return jsonify({"error": "no audio"}), 400
+def _transcribe_upload(audio_file):
+    """Phone recording (webm/mp4) → 16 kHz WAV via ffmpeg → Whisper. Returns the text ("" if
+    nothing was said); raises RuntimeError if the audio couldn't be converted."""
     ct = audio_file.content_type or ""
     suffix = ".wav" if "wav" in ct else ".mp4" if ("mp4" in ct or "m4a" in ct) else ".webm"
     src_fd, src_path = tempfile.mkstemp(suffix=suffix)
@@ -434,8 +432,23 @@ def _phone_command():
         r = subprocess.run(["ffmpeg", "-y", "-i", src_path, "-ar", "16000", "-ac", "1", "-f", "wav", wav_path],
                            capture_output=True, timeout=15)
         if r.returncode != 0:
-            return jsonify({"error": "audio conversion failed"}), 500
-        command = audio.transcribe(wav_path)
+            raise RuntimeError("audio conversion failed")
+        return audio.transcribe(wav_path)
+    finally:
+        for p in (src_path, wav_path):
+            try:
+                os.remove(p)
+            except Exception:
+                pass
+
+
+@app.route("/phone-command", methods=["POST"])
+def _phone_command():
+    audio_file = request.files.get("audio")
+    if not audio_file:
+        return jsonify({"error": "no audio"}), 400
+    try:
+        command = _transcribe_upload(audio_file)
         if not command:
             return jsonify({"error": "no speech detected"}), 400
         phone_commands.put(command)
@@ -443,12 +456,39 @@ def _phone_command():
         return jsonify({"command": command, "status": "processing"})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-    finally:
-        for p in (src_path, wav_path):
-            try:
-                os.remove(p)
-            except Exception:
-                pass
+
+
+_PHOTO_MAX_BYTES = 25 * 1024 * 1024
+_PHOTO_MAX_SIDE  = 1568      # Claude downsizes anything bigger anyway; smaller = fewer tokens
+
+
+@app.route("/phone-image", methods=["POST"])
+def _phone_image():
+    """A photo from the phone (camera or library) plus an optional question, typed or
+    spoken. Saved as a JPEG in jarvis_output/phone/ and queued like a phone command."""
+    from PIL import Image, ImageOps
+    photo = request.files.get("image")
+    if not photo:
+        return jsonify({"error": "no image"}), 400
+    if (request.content_length or 0) > _PHOTO_MAX_BYTES:
+        return jsonify({"error": "image too large"}), 413
+    try:
+        question = (request.form.get("text") or "").strip()
+        if not question and request.files.get("audio"):
+            question = _transcribe_upload(request.files["audio"])
+        # Re-encode whatever arrived (validates it, applies the EXIF rotation, drops metadata)
+        img = ImageOps.exif_transpose(Image.open(photo.stream))
+        img.thumbnail((_PHOTO_MAX_SIDE, _PHOTO_MAX_SIDE))
+        folder = os.path.join(config.JARVIS_OUTPUT_DIR, "phone")
+        os.makedirs(folder, exist_ok=True)
+        path = os.path.join(folder, f"photo_{time.strftime('%Y%m%d_%H%M%S')}.jpg")
+        img.convert("RGB").save(path, "JPEG", quality=85)
+    except Exception as e:
+        print(f"  Phone photo rejected: {e}")
+        return jsonify({"error": "couldn't read that image"}), 400
+    phone_commands.put({"text": question, "image": path})
+    print(f'  Phone photo queued: {os.path.basename(path)} "{question}"')
+    return jsonify({"command": question, "status": "processing"})
 
 
 # ── Dashboard (React build; client-side routes fall back to index.html) ──────

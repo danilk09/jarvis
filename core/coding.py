@@ -713,6 +713,15 @@ def stop(project=None):
     return targets
 
 
+def stop_all():
+    """Stop every run (Jarvis is shutting down). Returns the names of the projects stopped."""
+    jobs = running()
+    for j in jobs:
+        j["stopped"] = True
+        subprocess.run(["taskkill", "/PID", str(j["proc"].pid), "/T", "/F"], capture_output=True)
+    return [j["project"] for j in jobs]
+
+
 def approve(project=None):
     """Re-run with the commands Claude Code was refused, now allowed: in the named project,
     else the current one, else whichever project asked most recently."""

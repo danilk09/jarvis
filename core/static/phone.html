@@ -3,6 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <title>Jarvis Mic</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -10,10 +12,10 @@
       background: #0a0a0f; color: #e0e0e0;
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
       display: flex; flex-direction: column; align-items: center;
-      justify-content: center; min-height: 100vh; padding: 24px;
+      justify-content: center; min-height: 100vh; padding: 24px 16px;
       -webkit-tap-highlight-color: transparent;
     }
-    h1 { font-size: 1.2rem; letter-spacing: 0.3em; color: #5c9ce6; margin-bottom: 40px; font-weight: 300; }
+    h1 { font-size: 1.2rem; letter-spacing: 0.3em; color: #5c9ce6; margin-bottom: 32px; font-weight: 300; }
     #btn {
       width: 180px; height: 180px; border-radius: 50%;
       border: 2px solid #1e3a5f; background: #111827;
@@ -30,8 +32,42 @@
       0%, 100% { box-shadow: 0 0 0 0 rgba(231,76,60,0.3); }
       50%       { box-shadow: 0 0 0 20px rgba(231,76,60,0); }
     }
-    #status  { margin-top: 32px; font-size: 0.85rem; color: #666; min-height: 1.4em; text-align: center; letter-spacing: 0.05em; }
-    #command { margin-top: 14px; font-size: 0.9rem; color: #9e9e9e; min-height: 1.2em; max-width: 300px; text-align: center; font-style: italic; line-height: 1.5; }
+
+    .row { display: flex; gap: 12px; margin-top: 24px; }
+    .pill {
+      background: #111827; border: 1px solid #1e3a5f; color: #5c9ce6;
+      border-radius: 999px; padding: 10px 18px; font-size: 0.8rem; letter-spacing: 0.08em;
+      cursor: pointer; font-family: inherit;
+    }
+    .pill:active { transform: scale(0.96); }
+    .pill.primary { background: #1e3a5f; color: #e0e0e0; }
+    input[type=file] { display: none; }
+
+    #photo { display: none; margin-top: 24px; width: 100%; max-width: 320px; }
+    #photo.open { display: block; }
+    #preview-wrap { position: relative; }
+    #preview { width: 100%; max-height: 260px; object-fit: contain; border-radius: 12px; border: 1px solid #1e3a5f; background: #050508; display: block; }
+    #discard {
+      position: absolute; top: 8px; right: 8px; width: 30px; height: 30px; border-radius: 50%;
+      border: none; background: rgba(0,0,0,0.6); color: #e0e0e0; font-size: 1rem; cursor: pointer;
+    }
+    #question {
+      width: 100%; margin-top: 12px; padding: 12px 14px; border-radius: 10px;
+      border: 1px solid #1e3a5f; background: #111827; color: #e0e0e0; font-size: 16px; font-family: inherit;
+    }
+    #question::placeholder { color: #555; }
+    #photo .row { justify-content: center; margin-top: 12px; }
+    #photo-hint { margin-top: 10px; font-size: 0.75rem; color: #555; text-align: center; line-height: 1.5; }
+
+    #status  { margin-top: 28px; font-size: 0.85rem; color: #666; min-height: 1.4em; text-align: center; letter-spacing: 0.05em; }
+    #command { margin-top: 12px; font-size: 0.9rem; color: #9e9e9e; min-height: 1.2em; max-width: 320px; text-align: center; font-style: italic; line-height: 1.5; }
+    #reply {
+      margin-top: 14px; max-width: 320px; font-size: 0.95rem; line-height: 1.55; color: #cfd8e3;
+      text-align: left; white-space: pre-wrap; cursor: pointer;
+    }
+    #reply:empty { display: none; }
+    #reply p + p { margin-top: 8px; }
+    #reply-hint { margin-top: 6px; font-size: 0.7rem; color: #444; text-align: center; display: none; }
     .error   { color: #e74c3c !important; }
     .success { color: #2ecc71 !important; }
   </style>
@@ -39,34 +75,127 @@
 <body>
   <h1>J A R V I S</h1>
   <button id="btn">TAP TO<br>SPEAK</button>
+
+  <div class="row" id="photo-buttons">
+    <button class="pill" id="camera-btn">CAMERA</button>
+    <button class="pill" id="library-btn">PHOTOS</button>
+  </div>
+  <!-- capture= opens the camera directly; without it iOS shows the photo library -->
+  <input type="file" id="camera-input" accept="image/*" capture="environment">
+  <input type="file" id="library-input" accept="image/*">
+
+  <div id="photo">
+    <div id="preview-wrap">
+      <img id="preview" alt="Photo to send">
+      <button id="discard" aria-label="Discard photo">✕</button>
+    </div>
+    <input id="question" type="text" placeholder="Ask about it (optional)" enterkeyhint="send" autocomplete="off">
+    <div class="row"><button class="pill primary" id="send-btn">SEND PHOTO</button></div>
+    <div id="photo-hint">Type a question and send — or tap the orb and ask it out loud.</div>
+  </div>
+
   <div id="status">Ready</div>
   <div id="command"></div>
+  <div id="reply"></div>
+  <div id="reply-hint">Tap the reply to hear it</div>
+
   <script>
     const btn = document.getElementById('btn');
     const statusEl = document.getElementById('status');
     const cmdEl = document.getElementById('command');
+    const replyEl = document.getElementById('reply');
+    const replyHint = document.getElementById('reply-hint');
+    const photoEl = document.getElementById('photo');
+    const photoButtons = document.getElementById('photo-buttons');
+    const previewEl = document.getElementById('preview');
+    const questionEl = document.getElementById('question');
+    const cameraInput = document.getElementById('camera-input');
+    const libraryInput = document.getElementById('library-input');
     let recorder = null, chunks = [], recording = false;
+    let photoBlob = null;      // the picked photo, already shrunk to a JPEG
+    let busy = false;
 
+    const MAX_SIDE = 1568;     // Jarvis shrinks to this anyway — smaller uploads are faster on mobile data
+
+    function setStatus(text, cls) { statusEl.textContent = text; statusEl.className = cls || ''; }
+    function idleOrb() {
+      btn.innerHTML = photoBlob ? 'TAP TO<br>ASK' : 'TAP TO<br>SPEAK';
+      btn.classList.remove('recording', 'sending');
+    }
+
+    // ── Photo ────────────────────────────────────────────────────────────────
+    document.getElementById('camera-btn').onclick = () => cameraInput.click();
+    document.getElementById('library-btn').onclick = () => libraryInput.click();
+    cameraInput.onchange = libraryInput.onchange = e => {
+      const file = e.target.files && e.target.files[0];
+      e.target.value = '';     // picking the same photo again still fires change
+      if (file) loadPhoto(file);
+    };
+
+    // Re-encode through a canvas: shrinks it, turns HEIC into JPEG, and Safari applies the
+    // EXIF rotation when drawing
+    function loadPhoto(file) {
+      setStatus('Preparing photo…');
+      const url = URL.createObjectURL(file);
+      const img = new Image();
+      img.onload = () => {
+        const scale = Math.min(1, MAX_SIDE / Math.max(img.naturalWidth, img.naturalHeight));
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.round(img.naturalWidth * scale);
+        canvas.height = Math.round(img.naturalHeight * scale);
+        canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+        URL.revokeObjectURL(url);
+        canvas.toBlob(blob => {
+          if (!blob) { setStatus("Couldn't read that photo.", 'error'); return; }
+          photoBlob = blob;
+          previewEl.src = URL.createObjectURL(blob);
+          photoEl.classList.add('open');
+          photoButtons.style.display = 'none';
+          questionEl.value = '';
+          setStatus('Photo ready');
+          cmdEl.textContent = '';
+          idleOrb();
+        }, 'image/jpeg', 0.85);
+      };
+      img.onerror = () => { URL.revokeObjectURL(url); setStatus("Couldn't open that photo.", 'error'); };
+      img.src = url;
+    }
+
+    function clearPhoto() {
+      photoBlob = null;
+      if (previewEl.src) URL.revokeObjectURL(previewEl.src);
+      previewEl.removeAttribute('src');
+      photoEl.classList.remove('open');
+      photoButtons.style.display = '';
+      idleOrb();
+    }
+    document.getElementById('discard').onclick = () => { clearPhoto(); setStatus('Ready'); };
+    document.getElementById('send-btn').onclick = () => sendPhoto(null);
+    questionEl.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); sendPhoto(null); } });
+
+    // ── Voice ────────────────────────────────────────────────────────────────
     btn.addEventListener('click', async () => {
-      if (btn.classList.contains('sending')) return;
+      if (busy) return;
       if (recording) { stopRecording(); return; }
+      unlockSpeech();
       try {
         const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1 } });
         chunks = [];
         recorder = new MediaRecorder(stream);
         recorder.ondataavailable = e => { if (e.data.size > 0) chunks.push(e.data); };
-        recorder.onstop = () => { stream.getTracks().forEach(t => t.stop()); sendAudio(); };
+        recorder.onstop = () => {
+          stream.getTracks().forEach(t => t.stop());
+          const audio = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' });
+          photoBlob ? sendPhoto(audio) : sendAudio(audio);
+        };
         recorder.start();
         recording = true;
         btn.innerHTML = 'TAP TO<br>STOP';
         btn.classList.add('recording');
-        statusEl.textContent = 'Recording…';
-        statusEl.className = '';
+        setStatus(photoBlob ? 'Ask about the photo…' : 'Recording…');
         cmdEl.textContent = '';
-        cmdEl.className = '';
       } catch(e) {
-        statusEl.textContent = 'Microphone access denied.';
-        statusEl.className = 'error';
+        setStatus('Microphone access denied.', 'error');
       }
     });
 
@@ -76,31 +205,114 @@
       btn.innerHTML = '···';
       btn.classList.remove('recording');
       btn.classList.add('sending');
-      statusEl.textContent = 'Sending…';
+      setStatus('Sending…');
     }
 
-    async function sendAudio() {
-      const blob = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' });
+    function audioName(blob) { return /mp4|m4a/.test(blob.type) ? 'command.mp4' : 'command.webm'; }
+
+    async function sendAudio(audio) {
       const form = new FormData();
-      form.append('audio', blob, 'command.webm');
+      form.append('audio', audio, audioName(audio));
+      await post('/phone-command', form, data => '“' + data.command + '”');
+    }
+
+    async function sendPhoto(audio) {
+      if (!photoBlob || busy) return;
+      unlockSpeech();
+      const form = new FormData();
+      form.append('image', photoBlob, 'photo.jpg');
+      const typed = questionEl.value.trim();
+      if (typed) form.append('text', typed);
+      else if (audio) form.append('audio', audio, audioName(audio));
+      btn.innerHTML = '···';
+      btn.classList.add('sending');
+      setStatus('Sending photo…');
+      const ok = await post('/phone-image', form, data => '📷 ' + (data.command ? '“' + data.command + '”' : 'What is this?'));
+      if (ok) clearPhoto();
+    }
+
+    async function post(url, form, describe) {
+      busy = true;
+      const before = await logSnapshot();
+      let ok = false;
       try {
-        const res = await fetch('/phone-command', { method: 'POST', body: form });
+        const res = await fetch(url, { method: 'POST', body: form });
         const data = await res.json();
         if (res.ok) {
-          statusEl.textContent = 'Command sent!';
-          statusEl.className = 'success';
-          cmdEl.textContent = '“' + data.command + '”';
+          ok = true;
+          setStatus('Sent — Jarvis is on it', 'success');
+          cmdEl.textContent = describe(data);
+          replyEl.textContent = '';
+          replyHint.style.display = 'none';
+          watchReply(before);
         } else {
-          statusEl.textContent = 'Error: ' + (data.error || 'Unknown');
-          statusEl.className = 'error';
+          setStatus('Error: ' + (data.error || 'Unknown'), 'error');
         }
       } catch(e) {
-        statusEl.textContent = 'Network error — same Wi-Fi?';
-        statusEl.className = 'error';
+        setStatus('Network error — is Tailscale on?', 'error');
       }
-      btn.innerHTML = 'TAP TO<br>SPEAK';
-      btn.classList.remove('sending');
+      busy = false;
+      idleOrb();
+      return ok;
     }
+
+    // ── Jarvis's reply (from the dashboard's conversation log) ────────────────
+    let fileCount = -1;
+    async function fetchStatus() {
+      const res = await fetch('/status' + (fileCount >= 0 ? '?files=' + fileCount : ''));
+      const s = await res.json();
+      if (s.files) fileCount = s.files.length;   // later polls skip the file contents
+      return s;
+    }
+    async function logSnapshot() {
+      try { return (await fetchStatus()).log || []; } catch(e) { return null; }
+    }
+    function newEntries(before, log) {
+      if (!before || !before.length) return log;
+      const last = before[before.length - 1];
+      for (let i = log.length - 1; i >= 0; i--) {
+        const e = log[i];
+        if (e.role === last.role && e.text === last.text && e.time === last.time) return log.slice(i + 1);
+      }
+      return log;   // the old entries scrolled out of the log
+    }
+
+    let watchId = 0;
+    async function watchReply(before) {
+      if (!before) return;
+      const id = ++watchId, until = Date.now() + 90000;
+      let quietSince = 0;
+      while (id === watchId && Date.now() < until) {
+        await new Promise(r => setTimeout(r, 1000));
+        let s;
+        try { s = await fetchStatus(); } catch(e) { continue; }
+        const replies = newEntries(before, s.log || []).filter(e => e.role === 'jarvis').map(e => e.text);
+        if (replies.length) {
+          replyEl.innerHTML = '';
+          replies.forEach(t => { const p = document.createElement('p'); p.textContent = t; replyEl.appendChild(p); });
+          replyHint.style.display = 'speechSynthesis' in window ? 'block' : 'none';
+          setStatus('Jarvis replied', 'success');
+        }
+        // done once Jarvis has answered and gone quiet for a few seconds
+        if (replies.length && s.state === 'idle') {
+          if (!quietSince) quietSince = Date.now();
+          if (Date.now() - quietSince > 4000) return;
+        } else quietSince = 0;
+      }
+    }
+
+    // iOS only lets a page speak after a tap has "unlocked" speech
+    let speechUnlocked = false;
+    function unlockSpeech() {
+      if (speechUnlocked || !('speechSynthesis' in window)) return;
+      speechSynthesis.speak(new SpeechSynthesisUtterance(''));
+      speechUnlocked = true;
+    }
+    replyEl.addEventListener('click', () => {
+      if (!('speechSynthesis' in window) || !replyEl.textContent) return;
+      speechSynthesis.cancel();
+      speechSynthesis.speak(new SpeechSynthesisUtterance(replyEl.innerText));
+    });
   </script>
 </body>
 </html>

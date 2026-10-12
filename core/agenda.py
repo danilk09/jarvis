@@ -156,23 +156,9 @@ def upcoming(days=7, now=None):
 
 
 def _tracked(item, o):
-    """Occurrences due before the item was added (earlier weeks of a semester) never count as missed."""
+    """Occurrences due before the item was added (earlier weeks of a semester) don't count."""
     created = item.get("created")
     return not created or o["at"] >= dt.datetime.fromisoformat(created)
-
-
-def overdue(now=None):
-    """Deadlines and to-dos whose due time passed in the last two weeks without being marked done."""
-    now = now or dt.datetime.now()
-    out = []
-    for item in items():
-        if item["kind"] not in ("deadline", "task"):
-            continue
-        for o in occurrences(item, now.date() - dt.timedelta(days=_OVERDUE_DAYS), now.date()):
-            if o["at"] < now and not o["done"] and not o["skipped"] and _tracked(item, o) and \
-                    not (o["time"] is None and o["date"] == now.date()):
-                out.append((o, item))
-    return sorted(out, key=lambda oi: oi[0]["at"])
 
 
 def undated():
@@ -329,7 +315,8 @@ def remove(item_ids):
 
 
 def _current_occurrence(item, now=None):
-    """The occurrence "it" means: the earliest open one that's overdue or due within a week."""
+    """The occurrence "it" means: the earliest open one from the last two weeks or the next week
+    ("I submitted it" after the deadline still marks the right one)."""
     now = now or dt.datetime.now()
     occ = occurrences(item, now.date() - dt.timedelta(days=_OVERDUE_DAYS), now.date() + dt.timedelta(days=7))
     open_ = [o for o in occ if not o["done"] and not o["skipped"] and _tracked(item, o)]
@@ -493,9 +480,6 @@ def context():
                 group = f" [{item['group']}]" if item.get("group") else ""
                 lines.append(f"{item['id']}: {item['kind']} {item['text']}{group} — {describe(item)}")
         soon = [f"{_due_phrase(o, i)} ({i['id']}, {o['key']})" for o, i in upcoming(7)[:12]]
-        late = [f"{_due_phrase(o, i)} ({i['id']}, {o['key']})" for o, i in overdue()[:8]]
-        if late:
-            lines.append("Overdue (not marked done): " + "; ".join(late))
         if soon:
             lines.append("Next 7 days: " + "; ".join(soon))
     return "\n".join(lines)
@@ -509,7 +493,6 @@ def markdown():
         if rows:
             out.extend([f"### {title}", *rows, ""])
 
-    section("Overdue", [f"- **{i['text']}** — was due {when_words(o, now)}" for o, i in overdue(now)])
     up = upcoming(7, now)
     section("Today", [f"- {('**' + _clock(o['time']) + '** ') if o['time'] else ''}{i['text']}"
                       f"{' _(' + i['group'] + ')_' if i.get('group') else ''}"
@@ -589,10 +572,7 @@ def _speak_list(rng):
         up = [oi for oi in up if oi[0]["date"] == now.date()]
     elif rng == "tomorrow":
         up = [oi for oi in up if oi[0]["date"] == now.date() + dt.timedelta(days=1)]
-    late = overdue(now)
     parts = []
-    if late:
-        parts.append("Overdue: " + "; ".join(_due_phrase(o, i, now) for o, i in late[:4]) + ".")
     if up:
         parts.append("; ".join(_due_phrase(o, i, now) for o, i in up[:8]) + ".")
     if not parts:
@@ -608,6 +588,7 @@ def _speak_list(rng):
                '"I did/submitted/finished X", "mark X done", "X is done" → agenda "done" with its id (date empty = the current one); "I didn\'t actually finish X" → "undo_done"; "no X this week", "skip X on <date>" → "skip"',
                '"delete/cancel X", "remove X from my agenda", "clear everything for <class>" → agenda "remove" with id, or group for everything in it; moving or renaming an item → "update" with its id and only the changed fields',
                '"what\'s on my agenda", "what do I have today/tomorrow/this week", "what\'s due", "anything due soon" → agenda "list" with range; "show my agenda/schedule" → agenda "show"',
+               'Talk about the agenda only in terms of what\'s coming up or due today: never say something is overdue, late or missed (past items simply aren\'t mentioned).',
                '"remind me in N minutes to X" / "set a timer" stay type "timer" (they live on the agenda too).'])
 def _agenda(a, chain):
     cmd = a.get("command", "list")

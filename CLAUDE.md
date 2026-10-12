@@ -53,19 +53,20 @@ Optional (for music playback): download mpv from mpv.io (shinchiro Windows build
 |---|---|
 | `config.py` | All settings, paths, the Anthropic client. Edit settings here. |
 | `state.py` | Shared state: dashboard status (`dash_state`), `workspaces` (mutated in place for hot-reload), session archive path |
-| `tts.py` | In-process SAPI speech via `comtypes` on one dedicated thread. `speak()`, `stop_tts()`, `wait_tts()`, `suppressed` |
-| `audio.py` | One shared 16 kHz mic stream → 4 s pre-roll ring + 3 s level history (noise floor), wake-word thread (Vosk, grammar: "jarvis" + decoys), and the command recorder (WebRTC VAD gated by loudness over the room). Whisper transcription (via `asr.py`). The detector runs behind real time, so `_fire_wake` records its lag and keeps 2.5 s before the point it had reached (`wake_audio()` uses the same offset for voice ID); the false-wake check looks for "Jarvis" anywhere in the transcript, or a close spelling ("Travis", "Darvis") in the first two words, and logs real false wakes to `jarvis_memory/voice/false_wakes.jsonl`. `listen_for_command` (every listen: after "Yes sir", answers, confirmations, voice ID) shows LISTENING, pauses the wake word so "Jarvis"/the orb can't queue a second activation, and keeps `state.listening` set so speech ending can't flip the dashboard to STANDBY. Keeps the last recording in `audio.last_capture` for voice ID. |
+| `tts.py` | Speech on one dedicated thread: a Piper voice (`config.PIPER_VOICE`, offline, via sherpa-onnx) or in-process SAPI via `comtypes` (also the fallback if Piper is missing or fails). Piper lines are split into whole sentences and at dashes (`_phrases`; commas stay inside — rendering comma pieces separately reset the intonation each time), each piece's silence replaced by a set pause; the first plays as soon as it renders (~60-150 ms) while the rest render behind it, into an output stream kept open between lines (`_Player`; opening one costs 100-300 ms; reopened after audio.py resets PortAudio or when `_watch_speakers` sees the default speakers change). Piper's orb beats come from loudness onsets. `speak()`, `stop_tts()`, `wait_tts()`, `suppressed`. Custom pronunciations (`config.PRONUNCIATIONS` + `jarvis_memory/pronunciations.json`, taught by voice with the `pronounce` action) become SAPI XML `<pron sym="…">` tags at speak time only — the display text keeps the spelling; bad phonemes fall back to plain speech. For Piper the phonemes become a sounds-like spelling (`_respelled`: "d ax n iy 1 l" → "duh-neel") |
+| `audio.py` | One shared 16 kHz mic stream → 4 s pre-roll ring + 3 s level history (noise floor), wake-word thread (Vosk, grammar: "jarvis" + decoys; `_QuietGate` skips decoding while the room is quiet — 0.4 s pre-roll, 1 s hold — which cut idle CPU without missing any of 85 recorded "Jarvis, …" commands), and the command recorder (WebRTC VAD gated by loudness over the room). Whisper transcription (via `asr.py`). The detector runs behind real time, so `_fire_wake` records its lag and keeps 2.5 s before the point it had reached (`wake_audio()` uses the same offset for voice ID); the false-wake check looks for "Jarvis" anywhere in the transcript, or a close spelling ("Travis", "Darvis") in the first two words, and logs real false wakes to `jarvis_memory/voice/false_wakes.jsonl`. `listen_for_command` (every listen: after "Yes sir", answers, confirmations, voice ID) shows LISTENING, pauses the wake word so "Jarvis"/the orb can't queue a second activation, and keeps `state.listening` set so speech ending can't flip the dashboard to STANDBY. Keeps the last recording in `audio.last_capture` for voice ID. |
 | `asr.py` | Whisper settings shared with `scripts/voice/benchmark.py`: hint prompt = fixed command phrases + workspace names + your vocabulary, prompt-echo stripping, learned fixes applied after decoding |
 | `speech_data.py` | Voice data in `jarvis_memory/voice/`: every command's audio + transcript, labels (true text), "heard → meant" corrections that become automatic fixes, `vocabulary.txt` |
 | `voice_id.py` | Speaker verification: NeMo TitaNet-small (ONNX via sherpa-onnx, ~80 ms on CPU) voiceprints vs. your enrolled profile; modes off / shadow / enforce |
 | `voice.py` | Voice ID in the conversation: `screen()` on every command, the "who is this?" challenge, enrollment ("learn my voice"), `voice` action |
-| `router.py` | Local fast path: music controls, "play X", "open <app>", time/date, timers, agenda questions, "breakdown of today", "what do you remember about me" — handled without calling Claude |
+| `router.py` | Local fast path: music controls, "play X", "open <app>", time/date, timers, agenda questions, "breakdown of today" and "good morning/afternoon/evening" (→ briefing), "good night"/"shut down" (→ `shutdown`), "thanks", "what do you remember about me" — handled without calling Claude |
 | `brain.py` | `ask_claude()` — system prompt (built from the registry) + `CHAT_HISTORY` → one JSON object |
 | `registry.py` | `@action(name, schema, rules)` decorator; schemas/rules are compiled into the system prompt |
 | `actions.py` | All built-in action handlers + `handle_response()` |
 | `memory.py` | Long-term memory: facts in `jarvis_memory/memory.md` (cached prompt block), daily conversation logs, background review that saves facts mentioned in passing, daily summaries, `memory` action (remember / forget / update / show / recall) |
+| `checkins.py` | "How did the quiz go yesterday?": events with real stakes (from the agenda, classified once by Haiku, or mentioned in conversation via the memory review) are asked about once, at a natural moment; the answer becomes a `checkin` action (friendly reply + outcome + "Working on" facts). See "Check-ins" below |
 | `agenda.py` | Deadlines, appointments, to-dos and timers in `jarvis_memory/agenda.json`; recurring rules; reminder thread; `agenda` action; the NOW + agenda lines in the live prompt block |
-| `briefing.py` | "Give me a breakdown of today": weather (Open-Meteo), headlines (Brave News), agenda, special days and yesterday's summary, gathered in parallel; one Haiku call writes the spoken version (opens with a holiday greeting, sky events as an aside); full breakdown as a Stage note. Unread email (`BRIEFING_EMAIL`) is checked in parallel by a quiet `delegate` google run (Haiku) and spoken right after the breakdown |
+| `briefing.py` | "Give me a breakdown of today" or "good morning/afternoon/evening": weather (Open-Meteo), headlines (Brave News), agenda (today and coming up — never anything overdue or yesterday's leftovers), special days, gathered in parallel; one Haiku call writes the spoken version (opens with a holiday greeting, sky events as an aside); full breakdown as a Stage note. Unread email (`BRIEFING_EMAIL`) is checked in parallel by a quiet `delegate` google run (Haiku) and spoken right after the breakdown; a check-in question waits until after it (`checkins.hold`/`release`) |
 | `events.py` | Special days: US holidays + fun observances, daylight saving changes, moon phases and seasons (USNO API), meteor shower peaks, eclipses (2026-28), today's rocket launches (Launch Library 2). Upcoming holidays also go into the agenda prompt so Claude resolves "Thanksgiving week" correctly |
 | `places.py` | `find_places` ("pizza restaurants in Honolulu"): Brave search → Haiku picks named places with one-line descriptions → located with Photon (parallel) → `places` Stage panel; opening hours/websites filled in afterwards from Overpass |
 | `notify.py` | Phone notifications via ntfy: reminders when you're away from the PC (no input/voice for `PHONE_AWAY_MIN`), urgent deadlines always; Mark done / Snooze buttons call `POST /api/notify/action` over Tailscale (secret key in `jarvis_memory/notify.json`); `send_to_phone` action |
@@ -78,11 +79,12 @@ Optional (for music playback): download mpv from mpv.io (shinchiro Windows build
 | `web.py` | Brave search + spoken summary, page fetching |
 | `delegate.py` | `delegate` action: open-ended tasks needing an outside service go to Claude Code (subscription) with only that service's MCP servers — `SERVICES`: `google` (the claude.ai Gmail/Drive/Calendar connectors — no Google Cloud setup), `jobs` (JobSpy; Indeed connector optional), `miro`, `general` (your normal Claude Code setup). Runs through `coding.start(service=...)` |
 | `knowledge.py` | `wolfram` (Spoken Results API → ready-to-say sentence; LLM API + Haiku fallback) and `youtube` (captions via yt-dlp → one Haiku call; transcript saved to `jarvis_output/transcripts/`) |
-| `server.py` | Flask: dashboard, JSON API, Stage API + event stream, `/phone` page (`core/static/phone.html`), Tailscale HTTPS |
+| `server.py` | Flask: dashboard, JSON API, Stage API + event stream, `/phone` page (`core/static/phone.html`), `/phone-command` (voice) and `/phone-image` (photo + optional typed/spoken question → JPEG ≤1568 px in `jarvis_output/phone/`, queued as `{"text", "image"}`; the main loop sends it to `brain.ask_claude(..., image=)`, skipping the router), Tailscale HTTPS |
 | `stage.py` | Stage state (panels, 12×12 layout, highlights) in memory; pushes every change to dashboards over SSE. Auto-tiling, voice references ("panel 2", "the map"), content helpers (`add_image`, `open_file`, `show_places`) |
 | `stage_actions.py` | Stage actions: `show_page`, `read_article` (live page + key points, narrated with highlights), `point_out`, `show_file` / `edit_file` / `file_changes`, `show_image`, `show_note`, `show_map` (Nominatim geocoding), `stage` (layout by voice) |
-| `desktop.py` | Opens the dashboard in the Electron app (`desktop/`), or the browser if it isn't installed |
-| `background.py` | `--background` only: log file, periodic index refresh |
+| `desktop.py` | Opens the dashboard in the Electron app (`desktop/`), or the browser if it isn't installed; `close()` on shutdown |
+| `background.py` | `--background` only: log file, console programs started hidden (`hide_child_consoles`), periodic index refresh |
+| `power.py` | Battery saving: on battery, closes the mic (`audio.pause()`) and the voice's open speaker stream (`tts.release_output()`) when the PC is locked or quiet for `DORMANT_AFTER_MIN`; keyboard/mouse input, unlocking, plugging in or an orb click reopens it. Phone commands, reminders and Claude Code keep working |
 
 Flow of one command:
 
@@ -91,7 +93,7 @@ Flow of one command:
    **Voice ID** — `voice.screen()` scores the recording against your voiceprint, saves it to `jarvis_memory/voice/`, and (in enforce mode) drops or challenges anyone else. "No, I said X" labels the previous recording, learns the fix and runs X instead.
 3. **Routing** — `router.route()` handles common commands locally; otherwise `brain.ask_claude()` returns `{"mode": "action"|"chat"|"none", ...}`.
 4. **Execution** — `actions.handle_response()` looks each action's `type` up in `registry.ACTIONS`. Wake listening is re-enabled during execution so the user can interrupt.
-5. **TTS** — the TTS thread speaks queued text; real SAPI word positions drive the dashboard's `speech_beat`.
+5. **TTS** — the TTS thread speaks queued text (Piper voice, else SAPI); SAPI word positions or Piper loudness onsets drive the dashboard's `speech_beat`.
 6. **Answers without the wake word** — any spoken line ending in "?" is recorded in `tts.last_question`. When a turn ends (or, while idle, when a background job like Claude Code asks), if nothing has listened since (`audio.last_listen`), `jarvis._listen_for_answer` listens for `ANSWER_WINDOW` seconds and sends the reply on as `(Answering your question "...") <answer>`. Up to 3 in a row; "never mind" or silence ends it. Handlers that ask and listen themselves (`agent.confirm`) aren't asked twice. Claude is told to end with a question only when it needs the answer.
 
 **Adding a command:** write a handler in `core/actions.py` decorated with `@action("type", schema='{"type":"type",...}', rules=['"trigger phrase" → type "type"'])`. It appears in Claude's system prompt automatically. If it's common and unambiguous, also add a pattern to `core/router.py` so it skips the API.
@@ -103,7 +105,7 @@ A React app lives in `jarvis-dashboard/`. It is built with Create React App and 
 - `/` — live status orb, transcript display, generated-files panel
 - `/stage` — the Stage (see below); always mounted so live pages keep their state on other tabs
 - `/workspaces` — React workspace manager; reads/writes `workspaces.json` via the Flask API
-- `/phone` — tap-to-speak mobile page (`core/static/phone.html`, not part of the React build)
+- `/phone` — mobile page (`core/static/phone.html`, not part of the React build): tap to speak, CAMERA / PHOTOS (shrunk to a JPEG in the browser, then a typed or spoken question), and Jarvis's reply read from `/status`'s log (tap it to hear it)
 
 To rebuild after frontend changes:
 ```bash
@@ -165,10 +167,19 @@ Three tiers, cheapest first: **direct API calls** in Python where the data is fi
 
 Everything lives in `jarvis_memory/` (git-ignored):
 
-- **`memory.md`** — facts about the user, one bullet each under `## About me / People / Preferences / Places / Other`. The user may edit it freely (on the Stage: "what do you remember about me"); it's re-read when it changes. Every bullet goes into the system prompt as a second cached block, numbered so the `memory` action can forget/update by number. Bullets ending in `(auto)` came from the background review, which may only update/delete `(auto)` facts.
-- **`conversations/YYYY-MM-DD.jsonl`** — everything said (`state.on_log` → `memory.log`). After `MEMORY_REVIEW_IDLE_MIN` quiet minutes, `memory.review()` asks Haiku for add/update/delete ops (never secrets, never agenda items). `daily/YYYY-MM-DD.md` summaries of past days are written hourly; the last 3 go in the prompt. `memory recall` answers "what did we talk about…" from them.
+- **`memory.md`** — facts about the user, one bullet each under `## About me / People / Preferences / Places / Working on / Other` ("Working on" = what they're practicing or aiming for, mostly from check-in answers; Jarvis brings it up when relevant). The user may edit it freely (on the Stage: "what do you remember about me"); it's re-read when it changes. Every bullet goes into the system prompt as a second cached block, numbered so the `memory` action can forget/update by number. Bullets ending in `(auto)` came from the background review, which may only update/delete `(auto)` facts.
+- **`conversations/YYYY-MM-DD.jsonl`** — everything said (`state.on_log` → `memory.log`). After `MEMORY_REVIEW_IDLE_MIN` quiet minutes, `memory.review()` asks Haiku for add/update/delete ops and `moment` ops (events to check in about, → `checkins.add_moment`). Never secrets, agenda items, misheard nonsense, or temporary things phrased as facts ("this weekend"): an upcoming event is a moment, and only what stays true after it is a fact. `daily/YYYY-MM-DD.md` summaries of past days are written hourly (no "unfinished items": the agenda tracks what's due); the last 3 go in the prompt. `memory recall` answers "what did we talk about…" from them.
 - **`chat_history.json`** — `CHAT_HISTORY`, restored at startup if under `CHAT_HISTORY_KEEP_MIN` old.
-- **`agenda.json`** — items `{id, kind: deadline|appointment|task|timer, text, group, when | repeat, remind, done, skip}`. A recurring item is one rule (`repeat: {every, days, time, from, until, interval}`); occurrences are keyed by date, so done/skip apply per week. Occurrences due before the item was created never count as overdue. Python does all date math; the prompt gets `NOW`, every item's id and schedule, overdue items and the next 7 days. Reminder specs: `"30m"`, `"2h"`, `"1d@19:00"` (defaults per kind in `config.AGENDA_REMIND_DEFAULTS`); fired reminders are recorded, so restarts neither repeat nor (within 15 min) miss them. Reminders wait until Jarvis is idle. The `timer` action is stored here too. Recurring adds are read back for a spoken yes/no; "this semester" uses the semester end from memory or asks for it.
+- **`agenda.json`** — items `{id, kind: deadline|appointment|task|timer, text, group, when | repeat, remind, done, skip}`. A recurring item is one rule (`repeat: {every, days, time, from, until, interval}`); occurrences are keyed by date, so done/skip apply per week. Occurrences due before the item was created don't count. Nothing is ever called overdue: past items simply aren't mentioned (prompt, spoken list, Stage, briefing) — Jarvis only talks about what's due today or coming up; "I submitted it" late still marks the right occurrence. Python does all date math; the prompt gets `NOW`, every item's id and schedule and the next 7 days. Reminder specs: `"30m"`, `"2h"`, `"1d@19:00"` (defaults per kind in `config.AGENDA_REMIND_DEFAULTS`); fired reminders are recorded, so restarts neither repeat nor (within 15 min) miss them. Reminders wait until Jarvis is idle. The `timer` action is stored here too. Recurring adds are read back for a spoken yes/no; "this semester" uses the semester end from memory or asks for it.
+
+## Check-ins and personality
+
+`core/checkins.py`, data in `jarvis_memory/checkins.json`. The aim: Jarvis feels like a friend who remembers, not only an assistant.
+
+- **Moments** — events a friend would ask "how did it go?" about (`checkins.WORTH_ASKING`: exams, interviews, appointments, presentations, trips, being sick…; never routine coursework, bills, chores or anything recurring). Dated one-off agenda items are classified once by Haiku (`classify_agenda`, background thread); the memory review adds ones mentioned in conversation (`"op":"moment"` → `add_moment`, deduped by date + similar words). Agenda-linked moments follow their item (moved, deleted, skipped).
+- **When** — from 2 h after a timed event (18:00 for an untimed appointment, next morning for untimed deadlines / `after: next_day`) until `CHECKIN_EXPIRE_DAYS`. Asked once (once more after 6 h if unanswered; "not now" = never), max `CHECKIN_MAX_PER_DAY`, 2 h apart, and only at a natural moment: `before_turn` (first command after `CHECKIN_GAP_MIN` quiet, or small talk) → Claude's live prompt says CHECK-IN NEXT → `shape_reply` drops a trailing question from the chat reply → `after_turn` asks ("By the way, how did the quiz go yesterday?") if the turn was light (`_LIGHT` actions or chat), not from the phone, not a follow-up or a long answer.
+- **Answer** — the normal answer-listening path; `answered()` records it and the live prompt carries CHECK-IN so Claude returns a `checkin` action: a friendly reply (may offer one concrete help as a question), the outcome, and `remember` facts → memory "Working on" (auto). Recent outcomes and big events in the next 2 days are in the live prompt (luck on "good night").
+- **Personality** — `brain.build_system_prompt` opens with PERSONALITY (warm, dry wit; small talk answered like a person; react to life news before helping; no questions to offer help). Also: varied wake acknowledgements (`jarvis._ACKS`), a time-of-day greeting at startup, "thanks" answered locally (`router._THANKS`), and the briefing wishes luck on a big day.
 
 ## Voice ID and voice training
 
@@ -191,8 +202,10 @@ Edit them at `http://localhost:5151/workspaces`. Changes save instantly and hot-
 
 | Variable | Purpose |
 |---|---|
+| `PIPER_VOICE` / `PIPER_SPEED` / `PIPER_SENTENCE_PAUSE` / `PIPER_DASH_PAUSE` | Natural offline voice: a folder in `models/tts/` (`vits-piper-*-medium` from sherpa-onnx's `tts-models` release; "high" voices are ~5x slower). Empty = SAPI |
 | `VOICE_NAME` | SAPI voice name fragment, e.g. `"Zira"` (empty = system default) |
 | `SPEECH_RATE` | TTS rate, -10 to 10 |
+| `PRONUNCIATIONS` | Words Jarvis says wrong → SAPI phonemes (e.g. `"Danil": "d ax n iy 1 l"`); "pronounce X as Y" adds one by voice |
 | `WAKE_WORD` | Defaults to `"jarvis"` |
 | `WAKE_GRAMMAR` / `WAKE_DECOYS` | Vosk listens only for the wake word plus sound-alike decoy words (default). Full-vocabulary mode (`False`) falls behind real time in loud rooms; it's capped to 4 s utterances and a 1 s backlog guard skips ahead |
 | `SPEECH_OVER_NOISE` | How much louder than the room (median of the last 3 s) speech must be, over a 0.4 s window, for end-of-speech detection. Raise if recordings run on in noise, lower if quiet speech gets cut off |
@@ -210,6 +223,7 @@ Edit them at `http://localhost:5151/workspaces`. Changes save instantly and hot-
 | `CODE_PERMISSION_MODE` / `CODE_ALLOWED_TOOLS` | What background Claude Code may do without asking |
 | `CODE_MODEL` / `CODE_EFFORT` | Default Claude Code model and thinking effort (voice overrides per request) |
 | `PROMPT_CACHE_TTL` | Prompt cache lifetime: `"5m"` (cheaper writes, for back-to-back commands) or `"1h"` |
+| `DORMANT_AFTER_MIN` | On battery: minutes with no input/command before the mic closes (locked = right away); 0 = never |
 | `PHONE_PUSH` / `NTFY_SERVER` / `NTFY_TOPIC` / `PHONE_AWAY_MIN` / `PHONE_URGENT_HOURS` | Phone notifications (ntfy): on/off, server, topic (empty = random, saved), how long away before reminders go to the phone, deadlines that always go |
 | `CODE_NOTIFY` | Phone notification when a Claude Code run finishes: `"away"` (default), `"always"` or `"never"` |
 | `REPO_DIRS` / `GITHUB_USER` / `CODE_MAX_PARALLEL` / `CODE_BRANCH_PER_TASK` | Where your repos live, your GitHub user (for cloning), parallel Claude Code runs, branch per task |
@@ -217,14 +231,21 @@ Edit them at `http://localhost:5151/workspaces`. Changes save instantly and hot-
 | `HOME_CITY` / `UNITS` / `BRIEFING_NEWS` | Daily breakdown: weather city (empty = from memory, or ask once), °F/°C, news searches |
 | `MEMORY_REVIEW_IDLE_MIN` / `CHAT_HISTORY_KEEP_MIN` | Quiet minutes before the memory review runs; how recent a conversation must be to survive a restart |
 | `AGENDA_REMIND_DEFAULTS` | Default reminders per agenda kind |
+| `CHECKINS` / `CHECKIN_MAX_PER_DAY` / `CHECKIN_GAP_MIN` / `CHECKIN_EXPIRE_DAYS` | Check-ins on/off, per-day cap, quiet minutes that make the next command a natural moment to ask, days after an event it's still worth asking |
 | `CODE_USE_API_KEY` | `False` = Claude Code uses your Claude login, `True` = bills the `.env` API key |
 | `DELEGATE_MODEL` / `DELEGATE_EFFORT` / `DELEGATE_SESSION_HOURS` | Claude Code model/effort for delegated tasks; idle hours before a service's conversation starts fresh |
 | `JOBS_INDEED_CONNECTOR` / `RESUME_FILE` | Also use the claude.ai Indeed connector for job searches; your resume, without extension (ranks results by fit) |
 | `BRIEFING_EMAIL` | Unread mail in the daily breakdown (needs the Google connectors) |
 
+## Shutting down
+
+"Good night" / "shut down" (router, or the `shutdown` action for other phrasings) → if Claude Code is mid-run, Jarvis asks first (and stops the runs); says good night with good luck for tomorrow's big events (`checkins.tomorrow`), sets `state.shutdown`; the main loop then stops music, saves the Stage, closes the desktop app and exits (Ctrl+C takes the same path). "Shut down my computer" is `agent`.
+
 ## Background mode
 
-Built but **not in use yet** — Jarvis is still in development. `python jarvis.py --background` skips opening the browser, sends all output to `logs/jarvis.log` (rotated), and refreshes the file/bookmark/app indexes hourly. `scripts/install_startup.ps1` registers that command (via `pythonw.exe`, no console) as a login task; `scripts/uninstall_startup.ps1` removes it. Do not install the startup task unless asked.
+**Installed (2026-10-11)** as the `JARVIS` login task. `python jarvis.py --background` skips opening the browser, sends all output to `logs/jarvis.log` (rotated), hides the console windows of programs it runs, and refreshes the file/bookmark/app indexes hourly. `scripts/install_startup.ps1` registers that command (via `pythonw.exe`, no console) as a login task; `scripts/uninstall_startup.ps1` removes it.
+
+Only one Jarvis runs at a time: `jarvis.py` exits if `PORT` is taken. To run a dev copy in a console, stop the task first (`Stop-ScheduledTask -TaskName JARVIS`, then `Start-ScheduledTask` afterwards).
 
 ## Claude API usage
 

@@ -35,3 +35,12 @@ def open_dashboard(url):
         env["JARVIS_URL"] = url
         _proc = subprocess.Popen([exe, config.DESKTOP_DIR], env=env, cwd=config.DESKTOP_DIR,
                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def close():
+    """Close the desktop app Jarvis opened (on shutdown). A browser tab is left alone."""
+    with _lock:
+        if _proc and _proc.poll() is None:
+            # Electron runs several processes: end the whole tree
+            subprocess.run(["taskkill", "/PID", str(_proc.pid), "/T", "/F"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

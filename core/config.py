@@ -43,6 +43,24 @@ CACHE_CONTROL    = {"type": "ephemeral"} if PROMPT_CACHE_TTL == "5m" else {"type
 # Install voices: Settings -> Time & Language -> Speech -> Add voices
 VOICE_NAME  = ""
 SPEECH_RATE = 1        # -10 (slow) to 10 (fast)
+# Natural offline voice (Piper, run by sherpa-onnx): a voice folder in models/tts/. Get more at
+# github.com/k2-fsa/sherpa-onnx/releases/tag/tts-models (vits-piper-*-medium; hear them at
+# rhasspy.github.io/piper-samples). Use "medium" voices — "high" ones are ~5x slower here.
+# Empty, missing or failing = the SAPI voice above.
+PIPER_VOICE = "vits-piper-en_GB-northern_english_male-medium"
+PIPER_SPEED = 1.0      # 0.8 (slower) to 1.3 (faster)
+# Pauses Jarvis takes (seconds) after a sentence (. ! ?) and at a dash. Commas are left to the
+# voice itself: it reads each sentence in one go, which keeps its intonation natural.
+PIPER_SENTENCE_PAUSE = 0.45
+PIPER_DASH_PAUSE     = 0.3
+TTS_DIR     = os.path.join(ROOT, "models", "tts")
+# Words Jarvis says wrong → SAPI American English phonemes (vowels: ax = "uh", ah = "u" in
+# "cut", iy = "ee", ih = "i" in "sit", ey = "ay", ay = "eye", ow = "oh", uw = "oo"; a 1 after
+# a vowel = stressed). Or teach one by voice: "Jarvis, pronounce Danil as Duh-Neil" (saved
+# in jarvis_memory/pronunciations.json, which overrides these).
+PRONUNCIATIONS = {
+    "Danil": "d ax n iy 1 l",    # Duh-NEEL, as in Neil Armstrong
+}
 
 # ── Wake word / audio ─────────────────────────────────────────────────────────
 WAKE_WORD   = "jarvis"
@@ -126,6 +144,13 @@ AGENDA_REMIND_DEFAULTS = {
     "deadline":    ["1d@19:00", "0d@09:00"],
     "task":        [],
 }
+# Check-ins (core/checkins.py): afterwards, Jarvis asks how things with real stakes went (an
+# exam, an interview, a doctor's visit; not routine homework) once, at a natural moment: the
+# first command after a break of CHECKIN_GAP_MIN, or small talk like "good morning".
+CHECKINS            = True
+CHECKIN_MAX_PER_DAY = 2
+CHECKIN_GAP_MIN     = 45     # quiet minutes that make the next command "seeing you again"
+CHECKIN_EXPIRE_DAYS = 3      # too long ago to ask about after this
 # Phone notifications via ntfy (core/notify.py): install the ntfy app and subscribe to the
 # topic Jarvis prints at startup. Reminders go to the phone when you've been away from the
 # PC (no input, no voice command) for PHONE_AWAY_MIN minutes; deadlines due within
@@ -241,5 +266,8 @@ CESIUM_ION_TOKEN = os.environ.get("CESIUM_ION_TOKEN", "")
 # file/bookmark/app indexes refresh periodically.
 BACKGROUND_MODE      = "--background" in sys.argv
 INDEX_REFRESH_SECS   = 60 * 60
+# Battery saving (core/power.py): on battery, close the mic when the PC is locked or nobody
+# has touched it or spoken to Jarvis for this many minutes. Any input wakes it. 0 = never.
+DORMANT_AFTER_MIN    = 10
 
 OS = platform.system()

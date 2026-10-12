@@ -14,14 +14,30 @@ from core import config
 if config.BACKGROUND_MODE:
     from core import background
     background.setup_logging()   # before anything prints (pythonw.exe has no console)
+    background.hide_child_consoles()
+
+import socket
+import sys
+
+# One Jarvis at a time: the login task and a dev run would fight over the mic and the port
+_probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+try:
+    _probe.bind(("0.0.0.0", config.PORT))
+except OSError:
+    print(f"Jarvis is already running (port {config.PORT} is in use). If it's the background "
+          "task, stop it first:  Stop-ScheduledTask -TaskName JARVIS")
+    sys.exit(1)
+finally:
+    _probe.close()
 
 import os
 import queue
+import random
 import re
 import threading
 import time
 
-from core import actions, agenda, audio, brain, coding, desktop, files, memory, music, notify, router, server, stage, state, verbosity
+from core import actions, agenda, audio, brain, checkins, coding, desktop, files, memory, music, notify, power, router, server, stage, state, verbosity
 from core import speech_data, voice, voice_id
 from core import tts
 from core.tts import speak, stop_tts, suppressed, wait_tts
@@ -32,12 +48,24 @@ BYPASS_COMMANDS = {
     "nothing", "nope", "no", "abort", "disregard", "ignore that",
     "never mind that", "scratch that", "skip it",
     "um", "uh", "hmm", "hm", "okay", "ok", "yeah", "yes", "alright",
-    "thanks", "thank you", "cool", "got it",
+    "cool", "got it",
 }
+
+# After the wake word: a little variety instead of "Yes sir." every time (none end in "?",
+# which would count as a question waiting for an answer)
+_ACKS = ["Yes sir.", "Yes sir.", "Sir.", "Go ahead, sir.", "Listening."]
 
 
 def should_bypass_ai(text):
     return text.strip().lower().rstrip(".,!?") in BYPASS_COMMANDS
+
+
+def _greeting():
+    hour = time.localtime().tm_hour
+    if hour < 5:
+        return "Burning the midnight oil, sir? I'm here."
+    part = "morning" if hour < 12 else "afternoon" if hour < 18 else "evening"
+    return f"Good {part}, sir."
 
 
 def _startup():
@@ -83,12 +111,14 @@ def _startup():
     memory.start()     # conversation log + background review of what's worth remembering
     phone_topic = notify.start()   # ntfy topic for reminders on the phone
     agenda.start()     # reminders and timers
+    checkins.start()   # "How did the quiz go?" — asking how important things went
     voice.start()      # voice ID model + profile, prune old recordings
     audio.on_wake.extend([stop_tts, music.duck])   # interrupt speech and duck music instantly
     tts.on_speech_start.append(lambda: music.duck("speech"))   # anything Jarvis says, even unprompted
     tts.on_speech_end.append(lambda: music.unduck("speech"))
     audio.start()
-    speak("Ready for your command.")
+    power.start()      # on battery: close the mic when nobody's around
+    speak(_greeting())
 
     print(f"\n{'='*50}")
     print("  JARVIS is ready" + ("  (background mode)" if config.BACKGROUND_MODE else ""))
@@ -101,7 +131,7 @@ def _startup():
     if config.PHONE_PUSH:
         print(f"  Phone alerts: ntfy app -> subscribe to \"{phone_topic}\" on {config.NTFY_SERVER}")
     print(f"  Workspaces: {list(state.workspaces.keys()) or 'none'}")
-    print(f"  AI: Claude Haiku 4.5   OS: {config.OS}")
+    print(f"  AI: {config.MODEL}   OS: {config.OS}")
     print(f"  Input folder:  {config.JARVIS_INPUT_DIR}")
     print(f"  Output folder: {config.JARVIS_OUTPUT_DIR}")
     print(f"{'='*50}")
@@ -113,6 +143,9 @@ _END_ANSWERS = {"never mind", "nevermind", "forget it", "cancel", "nothing", "no
                 "that's all", "that's it", "not now", "skip it"}
 _MAX_FOLLOWUPS = 3   # questions answered in a row without the wake word
 _RETRY = "I didn't catch that. Say it again?"
+# A photo from the phone goes to Claude with the question; this tells it what the image is
+_PHOTO_NOTE = ("(Photo from my phone attached. Answer about it as chat unless I ask for an action — "
+               "add it to my agenda, remember it, find it nearby…) ")
 
 
 def _open_question(since):
@@ -134,17 +167,20 @@ def _listen_for_answer(question):
     answer = re.sub(r"^\W*(hey |ok |okay )?jarvis\b\W*", "", heard or "", flags=re.IGNORECASE).strip()
     if not answer and audio._WAKE_ANYWHERE.search(heard or ""):
         # Just "Jarvis" instead of an answer: a fresh activation, not a reply
-        speak("Yes sir.")
+        checkins.unanswered(question)
+        speak(random.choice(_ACKS))
         wait_tts()
         command = audio.listen_for_command()
         return voice.screen(command, "prompted") if command else None
     if not answer or answer.lower().rstrip(".!?") in _END_ANSWERS:
+        checkins.unanswered(question, dismissed=bool(answer))   # "not now" → never asked again
         return None
     answer = voice.screen(answer, "answer")      # someone else answering → "Who is this?"
     if not answer:
         return None
     if question == _RETRY:       # a second try at the same command, not an answer
         return answer
+    checkins.answered(question, answer)
     return f'(Answering your question "{question}") {answer}'
 
 
@@ -181,7 +217,7 @@ def _next_command():
     if voice.wake_is_stranger():
         return None, False
 
-    speak("Yes sir.")
+    speak(random.choice(_ACKS))
     wait_tts()
     state.push_state("activated")
     command = audio.listen_for_command()
@@ -205,6 +241,16 @@ def _finish(since=None, followups=0):
     return None
 
 
+def _shutdown():
+    """Finish saying goodbye, save the Stage, close the desktop app."""
+    audio.disable_wake()
+    music.stop()
+    stage.flush()
+    wait_tts()
+    desktop.close()
+    print("\n  JARVIS shutting down. Goodbye.")
+
+
 def main():
     _startup()
     followup, followups = None, 0
@@ -216,7 +262,12 @@ def main():
             else:
                 print("Waiting for wake-word or phone command...")
                 command, from_phone = _next_command()
-                followups = 1 if command and command.startswith("(Answering your question") else 0
+                followups = 1 if isinstance(command, str) and command.startswith("(Answering your question") else 0
+            image = None
+            if isinstance(command, dict):   # a photo from the phone, with an optional question
+                image, command = command["image"], command["text"] or "What is this?"
+                stage.add_image(image, caption=command, title="Photo from phone")
+                command = _PHOTO_NOTE + command
             audio.disable_wake()
             turn_start = time.time()
             if command is None:
@@ -245,37 +296,46 @@ def main():
                     command = fixed
 
             # the dashboard and the conversation log show just what was said, not the question
-            state.push_state("thinking", transcript=re.sub(r'^\(Answering your question ".*?"\) ', "", command),
+            shown = re.sub(r'^\(Answering your question ".*?"\) ', "", command)
+            state.push_state("thinking", transcript=f"[Photo] {command[len(_PHOTO_NOTE):]}" if image else shown,
                              sample="" if from_phone or fixed else voice_id.current.get("sample", ""))
             if verbosity.update(command):
                 print("  Detailed answer requested.")
-            if should_bypass_ai(command):
+            if not image and should_bypass_ai(command):
                 print("  Bypassed AI (dismissal command).")
                 _finish()
                 continue
 
-            response = router.route(command)
+            checkins.before_turn(command, from_phone, followups)   # back after a break / small talk?
+            response = None if image else router.route(command)
             if response:
                 print("  Handled locally (no AI call).")
             else:
                 print("  Thinking...")
-                response = brain.ask_claude(command, state.workspaces)
+                response = brain.ask_claude(command, state.workspaces, image=image)
             if voice_id.current.get("guest") and (response or {}).get("mode") == "action":
                 response = voice.guest_reply()   # strangers may chat, not act
+            response = checkins.shape_reply(response)   # one question at a time
 
             audio.enable_wake()   # let the user interrupt Jarvis mid-response
             try:
                 actions.handle_response(response)
             except Exception as e:
                 print(f"  Error in handle_response: {e}")
+            if state.shutdown.is_set():          # "good night" / "shut down"
+                _shutdown()
+                break
+            # a natural moment (back after a break, small talk)? ask how something important went
+            if not audio.activated.is_set():
+                try:
+                    checkins.after_turn(response, turn_start)
+                except Exception as e:
+                    print(f"  Check-in error: {e}")
             followup = _finish(turn_start, followups)
 
         except KeyboardInterrupt:
             speak("Shutting down. Goodbye.")
-            music.stop()
-            stage.flush()
-            wait_tts()
-            print("\n  JARVIS shutting down. Goodbye.")
+            _shutdown()
             break
         except Exception as e:
             print(f"  Unexpected main loop error: {e}")
@@ -285,3 +345,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    os._exit(0)   # don't wait on background threads (a voice download, a stuck request)

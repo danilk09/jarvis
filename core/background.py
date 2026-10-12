@@ -4,12 +4,15 @@
 
 - stdout/stderr go to logs/jarvis.log (rotated) — pythonw.exe has no console,
   and printing with no console would crash
+- console programs Jarvis runs (tailscale, ffmpeg, git, PowerShell…) start hidden instead
+  of flashing a window each time
 - the file, bookmark and app indexes refresh periodically so they stay current
 """
 
 import logging
 import logging.handlers
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -36,6 +39,11 @@ class _LogStream:
             self.logger.log(self.level, self._buf.rstrip())
         self._buf = ""
 
+    def isatty(self):          # libraries check this before drawing progress bars/colours
+        return False
+
+    encoding = "utf-8"
+
 
 def setup_logging():
     os.makedirs(config.LOG_DIR, exist_ok=True)
@@ -47,6 +55,19 @@ def setup_logging():
     logger.addHandler(handler)
     sys.stdout = _LogStream(logger, logging.INFO)
     sys.stderr = _LogStream(logger, logging.ERROR)
+
+
+def hide_child_consoles():
+    """pythonw.exe has no console, so every console program started without one gets its own
+    window. Default them to CREATE_NO_WINDOW; calls that ask for a console keep theirs."""
+    original = subprocess.Popen.__init__
+
+    def init(self, *args, creationflags=0, **kwargs):
+        if not creationflags & subprocess.CREATE_NEW_CONSOLE:
+            creationflags |= subprocess.CREATE_NO_WINDOW
+        original(self, *args, creationflags=creationflags, **kwargs)
+
+    subprocess.Popen.__init__ = init
 
 
 def start_index_refresh():

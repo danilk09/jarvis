@@ -4,10 +4,16 @@ Claude — zero tokens and roughly a second faster. Anything not matched with
 confidence returns None and goes to Claude as usual.
 """
 
+import random
 import re
 import time
 
 from . import files, state
+
+# "Thanks, Jarvis" deserves a reply, not silence (and not an API call)
+_THANKS = re.compile(r"(thanks|thank you|thank you so much|thanks a lot|thanks so much|cheers|much appreciated|"
+                     r"appreciate it|i appreciate it)( jarvis| buddy| man| sir| mate)?( (that's|that is) (all|it))?")
+_YOURE_WELCOME = ["You're welcome, sir.", "Anytime.", "Of course, sir.", "My pleasure.", "Happy to help, sir."]
 
 _NUMBER_WORDS = {"a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
                  "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10, "fifteen": 15,
@@ -68,6 +74,15 @@ def route(command):
     reply = _time_reply(text)
     if reply:
         return {"mode": "chat", "reply": reply}
+    if _THANKS.fullmatch(text):
+        return {"mode": "chat", "reply": random.choice(_YOURE_WELCOME)}
+    # "Good morning" gets the day's breakdown; "good night" / "shut down" turns Jarvis off
+    if re.fullmatch(r"(good )?(morning|afternoon|evening)( jarvis| sir)?", text):
+        return {"mode": "action", "actions": [{"type": "briefing"}]}
+    m = re.fullmatch(r"(good ?night|night night|shut ?down|shut yourself (down|off)|power down|go to sleep)"
+                     r"( jarvis| sir)?", text)
+    if m:
+        return {"mode": "action", "actions": [{"type": "shutdown", "night": "night" in m.group(1)}]}
 
     m = re.fullmatch(r"what('s| is| do i have)( on)? (my agenda|my schedule|due)( (for )?(today|tomorrow|this week))?"
                      r"|what do i have( on| due)? (today|tomorrow|this week)", text)

@@ -4,14 +4,15 @@ that go into Claude's system prompt (see registry.py).
 """
 
 import os
+import re
 import subprocess
 import threading
 import time
 import webbrowser
 from urllib.parse import quote_plus
 
-from . import agenda, agent, audio, brain, config, files, media, music, stage, state
-from . import briefing, coding, delegate, knowledge, memory, notify, places, stage_actions  # noqa: F401  (register their actions)
+from . import agenda, agent, audio, brain, config, files, media, music, stage, state, tts
+from . import briefing, checkins, coding, delegate, knowledge, memory, notify, places, stage_actions  # noqa: F401  (register their actions)
 from .generate import generate_file_content, summarize_for_speech
 from .registry import ACTIONS, action
 from .tts import speak
@@ -294,6 +295,40 @@ def _agent(a, chain):
     speak(result)
     brain.remember(f"[Task] {a.get('task', '')}", result)
     return f"Agent: {result}"
+
+
+@action("pronounce",
+        schema='{"type":"pronounce","word":"<the word as written, e.g. Danil>","phonemes":"<how to say it in SAPI American English phonemes, space-separated, 1 after the stressed vowel, e.g. Duh-Neil → d ax n iy 1 l>"}',
+        rules=['"pronounce X as Y", "you\'re saying X wrong, it\'s Y", "X is pronounced Y", "say my name like Y" → type "pronounce": word = the spelling (a name from MEMORY when it\'s theirs), phonemes from the sounds-like spelling (SAPI phone set: aa ae ah ao aw ax ay b ch d dh eh er ey f g h ih iy jh k l m n ng ow oy p r s sh t th uh uw v w y z zh)'])
+def _pronounce(a, chain):
+    word = re.sub(r"[^\w'-]", "", a.get("word", ""))
+    phonemes = re.sub(r"\s+", " ", str(a.get("phonemes", ""))).strip().lower()
+    if not word or not re.fullmatch(r"[a-z]+( [a-z]+| 1| 2)*", phonemes):
+        speak("Sorry, I didn't get how to say that. Try spelling out how it sounds.")
+        return "Pronounce: unclear"
+    tts.save_pronunciation(word, phonemes)
+    speak(f"Got it. {word}. Is that right?")
+    return f"Pronounce: {word} = {phonemes}"
+
+
+@action("shutdown",
+        schema='{"type":"shutdown","night":true}',
+        rules=['"good night", "shut down", "shut yourself down", "go to sleep", "that\'s all for tonight" → type "shutdown" (Jarvis itself; night = true for good night). Shutting down or restarting the computer is "agent".'])
+def _shutdown(a, chain):
+    busy = sorted({j["project"].removeprefix("jarvis-") for j in coding.running()})
+    if busy and not agent.confirm(f"Claude Code is still working on {' and '.join(busy)}, "
+                                  "and shutting down will stop it"):
+        speak("Very good, I'll stay on.")
+        return "Shutdown cancelled"
+    coding.stop_all()
+    night = a.get("night") or not 5 <= time.localtime().tm_hour < 18
+    line = "Good night, sir." if night else "Shutting down. Goodbye, sir."
+    big = [checkins.spoken_name(m) for m in checkins.tomorrow()]
+    if big:
+        line += f" Good luck with {' and '.join(big)} tomorrow."
+    speak(line)
+    state.shutdown.set()      # jarvis.py exits once this turn is over
+    return "Shutting down"
 
 
 @action("none")

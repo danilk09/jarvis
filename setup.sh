@@ -34,6 +34,18 @@ else
 fi
 
 echo ""
+echo "Downloading Jarvis's voice (Piper, offline: northern_english_male)..."
+mkdir -p models/tts
+if [ ! -d "models/tts/vits-piper-en_GB-northern_english_male-medium" ]; then
+    curl -L -o models/tts/voice.tar.bz2         https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/vits-piper-en_GB-northern_english_male-medium.tar.bz2
+    tar xjf models/tts/voice.tar.bz2 -C models/tts/
+    rm models/tts/voice.tar.bz2
+    echo "  Voice downloaded (PIPER_VOICE in core/config.py picks it)."
+else
+    echo "  Voice already present, skipping."
+fi
+
+echo ""
 echo "Installing the desktop app (Electron — lets the Stage show live web pages)..."
 if command -v npm >/dev/null 2>&1; then
     (cd desktop && npm install && node node_modules/electron/install.js)

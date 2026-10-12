@@ -15,7 +15,7 @@ _DETAIL_RE = re.compile(
 )
 
 SHORT = ("Give only the main point: one short sentence, two at most, about 20 words in total. "
-         "No background, caveats or pleasantries — it is read aloud.")
+         "No background or caveats — it is read aloud. A touch of warmth or wit is fine; filler isn't.")
 LONG  = ("The user asked for detail: explain thoroughly, up to 8 spoken sentences, "
          "covering the main point first and then the useful specifics.")
 

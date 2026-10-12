@@ -71,10 +71,14 @@ def idle_seconds():
         return 0.0
 
 
+def quiet_seconds():
+    """Seconds since anyone last touched the PC or gave Jarvis a command."""
+    return min(idle_seconds(), time.time() - _last_voice[0])
+
+
 def away():
     """True when nobody has touched the PC or spoken to Jarvis for PHONE_AWAY_MIN minutes."""
-    limit = config.PHONE_AWAY_MIN * 60
-    return idle_seconds() > limit and time.time() - _last_voice[0] > limit
+    return quiet_seconds() > config.PHONE_AWAY_MIN * 60
 
 
 def _on_log(role, text):

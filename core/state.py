@@ -35,6 +35,9 @@ dash_url = ""
 # Set while the mic is recording a command or answer (audio.listen_for_command)
 listening = threading.Event()
 
+# Set by the "shutdown" action ("good night", "shut down"): the main loop exits after this turn
+shutdown = threading.Event()
+
 
 def push_state(state, transcript="", sample=""):
     """sample: id of the recording the transcript came from (lets the dashboard correct it)."""

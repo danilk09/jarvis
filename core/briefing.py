@@ -2,23 +2,23 @@
 The daily breakdown: "Jarvis, give me a breakdown of today."
 
 Gathers in parallel: weather (Open-Meteo, no key), headlines (Brave News), the agenda
-(overdue, today, the next few days), special days (holidays, sky events, launches —
-events.py) and yesterday's summary from memory. Unread email is checked at the same time by
-a background Claude Code task with the claude.ai Gmail connector (delegate "google"); it
-takes longer, so it's spoken as a short follow-up right after the breakdown. One Haiku call
+(today and the next few days — never anything overdue) and special days (holidays, sky
+events, launches — events.py). Also given for "good morning / afternoon / evening".
+Unread email is checked at the same time by a background Claude Code task with the claude.ai
+Gmail connector (delegate "google"); it takes longer, so it's spoken as a short follow-up right
+after the breakdown (then any check-in question, see checkins.hold). One Haiku call
 turns the rest into a spoken briefing that opens with whatever makes today special ("Merry Christmas, sir...") and
 mentions sky events as an aside; the full breakdown goes on the Stage as a note.
 """
 
 import concurrent.futures
 import datetime as dt
-import os
 import re
 import threading
 
 import requests
 
-from . import agenda, brain, config, delegate, events, memory, stage, verbosity
+from . import agenda, brain, checkins, config, delegate, events, memory, stage, verbosity
 from .registry import action
 from .tts import speak, wait_tts
 
@@ -61,6 +61,10 @@ def home_city(ask=True):
     answer = audio.listen_for_command(max_duration=6, silence_duration=0.8)
     city = re.sub(r"^(i live in|i'm in|i am in|it's|in|use)\s+", "", (answer or "").strip().rstrip(".!?"),
                   flags=re.IGNORECASE).strip()
+    from .stage_actions import geocode
+    if city and not geocode(city):        # misheard ("follow me there"): don't remember it
+        speak(f"I couldn't find a place called {city}. I'll ask again next time.")
+        return ""
     if city:
         memory.add(f"The user lives in {city}.", "places")
         _city.update(key=None, city=city)
@@ -148,18 +152,12 @@ def check_email():
 
 def _speak_email(box):
     """After the breakdown: the inbox summary, once the check finishes (up to two minutes)."""
-    if box["done"].wait(120) and box["summary"]:
-        from .coding import _speakable
-        speak(_speakable(box["summary"]))
-
-
-def _yesterday():
-    path = os.path.join(memory._DAILY_DIR, f"{dt.date.today() - dt.timedelta(days=1)}.md")
     try:
-        with open(path, encoding="utf-8") as f:
-            return f.read().strip()
-    except OSError:
-        return ""
+        if box["done"].wait(120) and box["summary"]:
+            from .coding import _speakable
+            speak(_speakable(box["summary"]))
+    finally:
+        checkins.release()
 
 
 def gather():
@@ -181,11 +179,9 @@ def gather():
     up = agenda.upcoming(3, now)
     got.update(
         now=now,
-        overdue=agenda.overdue(now),
         today=[oi for oi in up if oi[0]["date"] == now.date()],
         coming=[oi for oi in up if oi[0]["date"] != now.date() and oi[1]["kind"] in ("deadline", "appointment")],
         todo=agenda.undated(),
-        yesterday=_yesterday(),
     )
     return got
 
@@ -209,16 +205,13 @@ def _facts_for_claude(g):
                                                           for l in g["launches"]))
     if g.get("soon"):
         parts.append("HOLIDAYS IN THE NEXT FEW DAYS: " + "; ".join(f"{n} ({d:%A})" for d, n in g["soon"]))
-    agenda_lines = [f"OVERDUE: {agenda._due_phrase(o, i, now)}" for o, i in g["overdue"]]
-    agenda_lines += [f"TODAY: {agenda._due_phrase(o, i, now)}" for o, i in g["today"]]
+    agenda_lines = [f"TODAY: {agenda._due_phrase(o, i, now)}" for o, i in g["today"]]
     agenda_lines += [f"COMING UP: {agenda._due_phrase(o, i, now)}" for o, i in g["coming"]]
     agenda_lines += [f"TO-DO (no date): {i['text']}" for i in g["todo"][:5]]
     parts.append("AGENDA:\n" + ("\n".join(agenda_lines) if agenda_lines else "nothing scheduled"))
     if g.get("news"):
         parts.append("HEADLINES:\n" + "\n".join(f"- {n['title']} ({n['source']}): {n['description']}"
                                                 for n in g["news"][:6]))
-    if g.get("yesterday"):
-        parts.append(f"YESTERDAY (summary of the user's conversations with you): {g['yesterday']}")
     return "\n\n".join(parts)
 
 
@@ -226,10 +219,9 @@ _SYSTEM = """You are JARVIS, a witty, warm British butler of an AI, giving the u
 Return ONLY JSON: {"speech": "<what you say>"}.
 - Open with what makes today special, if anything, as a natural greeting: a holiday ("Merry Christmas, sir. Here's the breakdown..."), the user's birthday or another personal occasion from MEMORY. Otherwise just a short good morning/afternoon/evening that fits the time.
 - Then the weather in one sentence, with a practical tip only if it matters (umbrella, jacket).
-- Then the agenda: anything overdue first, gently; then today's items with times; then deadlines in the next couple of days. If it's empty, say the schedule is clear.
+- Then the agenda: today's items with times, then deadlines in the next couple of days. Never mention anything overdue, missed or unfinished from earlier days; if it's empty, say the schedule is clear. A big one today (an exam, an interview): wish them luck, and if MEMORY has something they're working on for it, mention it in a clause ("overflow's worth one more look").
 - Then two or three headlines, one short clause each.
 - Sky events, launches and upcoming holidays go near the end as a light aside, e.g. "If you're interested, the Orionid meteor shower peaks tonight." Make them sound fun, not like a list.
-- Mention yesterday only if something was left unfinished.
 - Plain spoken sentences: no markdown, lists, URLs or emoji. Say "sir" once or twice at most.
 - LENGTH: """
 
@@ -261,8 +253,7 @@ def markdown(g):
         out += [f"### Weather — {w['city']}",
                 f"**{w['now']}{w['unit']}** now, {w['now_sky']} (feels like {w['feels']}{w['unit']})  ",
                 f"High {w['high']}{w['unit']} / low {w['low']}{w['unit']}, {w['sky']}{rain}. Sunset {w['sunset']}.", ""]
-    rows = [f"- **Overdue:** {i['text']} — was due {agenda.when_words(o, now)}" for o, i in g["overdue"]]
-    rows += [f"- {('**' + ('due ' if i['kind'] == 'deadline' else '') + agenda._clock(o['time']) + '** ') if o['time'] else ''}{i['text']}"
+    rows = [f"- {('**' + ('due ' if i['kind'] == 'deadline' else '') + agenda._clock(o['time']) + '** ') if o['time'] else ''}{i['text']}"
              f"{' _(' + i['group'] + ')_' if i.get('group') else ''}" for o, i in g["today"]]
     out += ["### Today", *(rows or ["- Nothing scheduled"]), ""]
     if g["coming"]:
@@ -291,7 +282,7 @@ def _show(title, md):
 
 @action("briefing",
         schema='{"type":"briefing"}',
-        rules=['"give me a breakdown of today", "daily breakdown", "brief me", "morning briefing", "what does today look like", "catch me up on today" → type "briefing" (weather, agenda, news and anything special today). Just "what do I have today" is agenda "list".'])
+        rules=['"give me a breakdown of today", "daily breakdown", "brief me", "morning briefing", "what does today look like", "catch me up on today", "good morning/afternoon/evening" → type "briefing" (weather, agenda, news and anything special today). Just "what do I have today" is agenda "list".'])
 def _briefing(a, chain):
     # speak("Pulling together your breakdown.")
     inbox = check_email()      # slower than the rest: spoken after the breakdown
@@ -304,6 +295,7 @@ def _briefing(a, chain):
     _show(f"Today — {g['now']:%A, %B %d}".replace(" 0", " "), markdown(g))
     speak(speech)
     if inbox:
+        checkins.hold()      # a check-in question waits until after the inbox summary
         threading.Thread(target=_speak_email, args=(inbox,), daemon=True).start()
     brain.remember("[Daily breakdown]", speech)
     return "Briefing given"
