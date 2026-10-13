@@ -82,7 +82,7 @@ Optional (for music playback): download mpv from mpv.io (shinchiro Windows build
 | `server.py` | Flask: dashboard, JSON API, Stage API + event stream, `/phone` page (`core/static/phone.html`), `/phone-command` (voice) and `/phone-image` (photo + optional typed/spoken question → JPEG ≤1568 px in `jarvis_output/phone/`, queued as `{"text", "image"}`; the main loop sends it to `brain.ask_claude(..., image=)`, skipping the router), Tailscale HTTPS |
 | `stage.py` | Stage state (panels, 12×12 layout, highlights) in memory; pushes every change to dashboards over SSE. Auto-tiling, voice references ("panel 2", "the map"), content helpers (`add_image`, `open_file`, `show_places`) |
 | `stage_actions.py` | Stage actions: `show_page`, `read_article` (live page + key points, narrated with highlights), `point_out`, `show_file` / `edit_file` / `file_changes`, `show_image`, `show_note`, `show_map` (Nominatim geocoding), `stage` (layout by voice) |
-| `desktop.py` | Opens the dashboard in the Electron app (`desktop/`), or the browser if it isn't installed; `close()` on shutdown |
+| `desktop.py` | Opens the dashboard in the Electron app (`desktop/`), or the browser if it isn't installed; `close()` on shutdown. Closing the window yourself (Electron exits 0) runs `on_closed` → `jarvis._window_closed` (stops Claude Code runs, says goodbye, sets `state.shutdown`) when `QUIT_WITH_WINDOW` |
 | `background.py` | `--background` only: log file, console programs started hidden (`hide_child_consoles`), periodic index refresh |
 | `power.py` | Battery saving: on battery, closes the mic (`audio.pause()`) and the voice's open speaker stream (`tts.release_output()`) when the PC is locked or quiet for `DORMANT_AFTER_MIN`; keyboard/mouse input, unlocking, plugging in or an orb click reopens it. Phone commands, reminders and Claude Code keep working |
 
@@ -209,6 +209,7 @@ Edit them at `http://localhost:5151/workspaces`. Changes save instantly and hot-
 | `WAKE_WORD` | Defaults to `"jarvis"` |
 | `WAKE_GRAMMAR` / `WAKE_DECOYS` | Vosk listens only for the wake word plus sound-alike decoy words (default). Full-vocabulary mode (`False`) falls behind real time in loud rooms; it's capped to 4 s utterances and a 1 s backlog guard skips ahead |
 | `SPEECH_OVER_NOISE` | How much louder than the room (median of the last 3 s) speech must be, over a 0.4 s window, for end-of-speech detection. Raise if recordings run on in noise, lower if quiet speech gets cut off |
+| `SPEECH_END_DROP` | Once you're talking, frames quieter than this fraction of your own voice (80th percentile of your speech frames so far) count as background, and the end is `silence_duration` of ≥90% quiet frames — so a TV or people nearby don't hold a command open until the 8 s timeout. 0.15 matched the old clipping rate on noisy simulations while removing the timeouts |
 | `WHISPER_MODEL` | faster-whisper model (`base.en`) or a fine-tuned model folder. Transcription runs with no temperature fallback (noisy audio otherwise took 20-40 s) and strips echoes of the hint prompt (`asr.strip_prompt_echo`). Pick with `scripts/voice/benchmark.py` |
 | `WHISPER_BEAM` / `WHISPER_VOCAB_PROMPT` | Beam size (1 = greedy); whether your vocabulary goes into the hint prompt |
 | `VOICE_ID_MODE` | `"off"` / `"shadow"` (score only) / `"enforce"` (only your voice) — voice "turn on/off voice lock" overrides it |
@@ -218,7 +219,7 @@ Edit them at `http://localhost:5151/workspaces`. Changes save instantly and hot-
 | `INPUT_DEVICE` | Mic name fragment to pin (e.g. `"AirPods"`); empty = follow the Windows default, switching automatically when it changes |
 | `FOLLOWUP_WINDOW` | Seconds to wait after the wake word for a one-breath command before saying "Yes sir" (0.9 — a natural pause after "Jarvis," is ~0.3 s) |
 | `MPV_EXE` / `ESRGAN_EXE` | Paths to optional external tools |
-| `USE_DESKTOP_APP` | Open the dashboard in the Electron app (`desktop/`) instead of a browser tab |
+| `USE_DESKTOP_APP` / `QUIT_WITH_WINDOW` | Open the dashboard in the Electron app (`desktop/`) instead of a browser tab; closing that window shuts Jarvis down |
 | `CESIUM_ION_TOKEN` (`.env`) | Optional: 3-D terrain and holographic buildings on the Stage globe |
 | `CODE_PERMISSION_MODE` / `CODE_ALLOWED_TOOLS` | What background Claude Code may do without asking |
 | `CODE_MODEL` / `CODE_EFFORT` | Default Claude Code model and thinking effort (voice overrides per request) |
@@ -244,6 +245,8 @@ Edit them at `http://localhost:5151/workspaces`. Changes save instantly and hot-
 ## Background mode
 
 **Installed (2026-10-11)** as the `JARVIS` login task. `python jarvis.py --background` skips opening the browser, sends all output to `logs/jarvis.log` (rotated), hides the console windows of programs it runs, and refreshes the file/bookmark/app indexes hourly. `scripts/install_startup.ps1` registers that command (via `pythonw.exe`, no console) as a login task; `scripts/uninstall_startup.ps1` removes it.
+
+**Shortcut** — `scripts/install_shortcut.ps1` puts a "Jarvis" shortcut (icon `desktop/icon.ico`, drawn by `scripts/make_icon.py`) on the Desktop and in the Start menu. It runs `scripts/jarvis_launcher.pyw`: if Jarvis is running, `POST /api/window` opens/focuses its window; otherwise it starts `pythonw jarvis.py --background --window` (background mode, but with the window — `config.OPEN_WINDOW`).
 
 Only one Jarvis runs at a time: `jarvis.py` exits if `PORT` is taken. To run a dev copy in a console, stop the task first (`Stop-ScheduledTask -TaskName JARVIS`, then `Start-ScheduledTask` afterwards).
 

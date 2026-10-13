@@ -293,6 +293,14 @@ def _notify_action():
     return jsonify({"ok": ok, "message": message}), (200 if ok else 403 if message == "bad key" else 400)
 
 
+@app.route("/api/window", methods=["POST"])
+def _window():
+    """Open (or bring forward) the desktop app — the Jarvis shortcut when Jarvis is already running."""
+    if stage.open_dashboard:
+        stage.open_dashboard()
+    return jsonify({"ok": bool(stage.open_dashboard)})
+
+
 @app.route("/api/activate", methods=["POST"])
 def _activate():
     return jsonify({"ok": audio.trigger_wake()})

@@ -53,6 +53,7 @@ async function start() {
     minWidth: 960,
     minHeight: 600,
     title: 'J.A.R.V.I.S',
+    icon: path.join(__dirname, 'icon.ico'),
     backgroundColor: '#020806',
     autoHideMenuBar: true,
     webPreferences: {

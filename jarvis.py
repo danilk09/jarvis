@@ -95,7 +95,8 @@ def _startup():
     coding.init()                                     # Claude Code projects + preferences file
     stage.open_dashboard = lambda: desktop.open_dashboard(dash_url)   # Stage content with no window open
     server.start()
-    if not config.BACKGROUND_MODE:
+    desktop.on_closed.append(_window_closed)
+    if config.OPEN_WINDOW:
         time.sleep(0.6)   # give Flask a moment to bind before opening the window
         desktop.open_dashboard(dash_url)
 
@@ -189,6 +190,8 @@ def _next_command():
     audio.enable_wake()
     waiting_since = time.time()
     while not audio.activated.wait(timeout=0.1):
+        if state.shutdown.is_set():   # the desktop window was closed
+            return None, False
         try:
             return server.phone_commands.get_nowait(), True
         except queue.Empty:
@@ -241,6 +244,16 @@ def _finish(since=None, followups=0):
     return None
 
 
+def _window_closed():
+    """You closed the desktop app: shut down, as if you'd said "shut down" (the main loop
+    notices between commands)."""
+    stopped = coding.stop_all()
+    if stopped:
+        print(f"  Stopped Claude Code: {', '.join(stopped)}")
+    speak("Shutting down. Goodbye, sir.")
+    state.shutdown.set()
+
+
 def _shutdown():
     """Finish saying goodbye, save the Stage, close the desktop app."""
     audio.disable_wake()
@@ -256,6 +269,9 @@ def main():
     followup, followups = None, 0
     while True:
         try:
+            if state.shutdown.is_set():  # the desktop window was closed
+                _shutdown()
+                break
             if followup:                 # the answer to a question Jarvis just asked
                 command, from_phone, followup = followup, False, None
                 followups += 1

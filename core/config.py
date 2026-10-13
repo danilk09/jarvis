@@ -85,6 +85,11 @@ WHISPER_MODEL = "base.en"
 # when deciding you've stopped talking (2.0 ≈ +6 dB). Raise it if recordings run on in a
 # loud place; lower it if Jarvis cuts you off when you speak quietly.
 SPEECH_OVER_NOISE = 2.0
+# Once you're talking, sound quieter than this fraction of your own voice counts as
+# background (0.15 ≈ 16 dB below you), so a TV or people nearby don't keep a command
+# recording until it times out. Raise it (0.25) if that still happens; lower it if your last
+# word gets cut off.
+SPEECH_END_DROP = 0.15
 # Microphone: name fragment to pin a specific input (e.g. "AirPods"). Empty = follow the
 # Windows default recording device, switching automatically when it changes.
 INPUT_DEVICE = ""
@@ -253,6 +258,9 @@ PORT = 5151
 # The desktop app is what lets the Stage show live web pages. Falls back to the
 # browser when the app isn't installed (cd desktop && npm install).
 USE_DESKTOP_APP = True
+# Closing the desktop app's window shuts Jarvis down (stopping any Claude Code runs).
+# False = Jarvis keeps running in the background; the Jarvis shortcut reopens the window.
+QUIT_WITH_WINDOW = True
 DESKTOP_DIR     = os.path.join(ROOT, "desktop")
 # The Stage is saved here and restored on the next start ("clear the stage" resets it)
 STAGE_STATE_FILE = os.path.join(ROOT, "stage_state.json")
@@ -265,6 +273,8 @@ CESIUM_ION_TOKEN = os.environ.get("CESIUM_ION_TOKEN", "")
 # When on: no browser on startup, all output goes to logs/jarvis.log, and the
 # file/bookmark/app indexes refresh periodically.
 BACKGROUND_MODE      = "--background" in sys.argv
+# --window: open the dashboard at startup even in background mode (the Jarvis shortcut)
+OPEN_WINDOW          = not BACKGROUND_MODE or "--window" in sys.argv
 INDEX_REFRESH_SECS   = 60 * 60
 # Battery saving (core/power.py): on battery, close the mic when the PC is locked or nobody
 # has touched it or spoken to Jarvis for this many minutes. Any input wakes it. 0 = never.

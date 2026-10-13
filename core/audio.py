@@ -66,7 +66,7 @@ def _callback(indata, frames, time_info, status):
     _last_frame = time.monotonic()
     data = bytes(indata)
     _ring.append(data)
-    _levels.append(float(np.sqrt(np.mean(np.frombuffer(data, dtype=np.int16).astype(np.float32) ** 2))))
+    _levels.append(_level(data))
     if _wake_on.is_set():
         _wake_q.put(data)
     if _capturing.is_set():
@@ -341,6 +341,10 @@ _GATE_MIN    = _GATE_WINDOW // 5            # ...speech if ≥20% of it is clear
 _loud        = collections.deque(maxlen=_GATE_WINDOW)
 
 
+def _level(frame: bytes) -> float:
+    return float(np.sqrt(np.mean(np.frombuffer(frame, dtype=np.int16).astype(np.float32) ** 2)))
+
+
 def _is_speech(frame: bytes) -> bool:
     """
     Speech = the VAD says so AND enough of the last 0.4 s is clearly louder than the room's
@@ -348,7 +352,7 @@ def _is_speech(frame: bytes) -> bool:
     level check a recording never ends until it times out. A single frame is too jumpy to
     judge (crowd noise has loud moments too), hence the short window.
     """
-    level = float(np.sqrt(np.mean(np.frombuffer(frame, dtype=np.int16).astype(np.float32) ** 2)))
+    level = _level(frame)
     _loud.append(level > max(_noise["floor"] * config.SPEECH_OVER_NOISE, 120.0))
     if sum(_loud) < min(_GATE_MIN, len(_loud)):
         return False
@@ -365,12 +369,21 @@ def _record(max_duration, silence_duration, preroll=(), onset_deadline=None, ign
     Pull frames from the capture queue until speech starts and then stops.
     Returns the speech frames, or None if no speech started (before onset_deadline, if given).
     With a preroll, the whole buffer from the preroll onward is kept once speech is confirmed.
+
+    Once you've started talking, your own loudness is the yardstick: a frame much quieter than
+    your voice (config.SPEECH_END_DROP) is background, however speech-like it sounds. You're
+    close to the mic and the room isn't, so this ends a command on time even next to a TV or
+    other people talking, where the room-level gate alone keeps hearing "speech". The end is
+    `silence_duration` of mostly quiet frames (a stray noise burst no longer restarts the count).
     """
     frames       = list(preroll)
     silence_end  = int(silence_duration * FRAMES_PER_SEC)
     max_new      = int(max_duration * FRAMES_PER_SEC)
     speech_start = None
-    consec_speech = consec_silence = new = 0
+    consec_speech = new = 0
+    voiced = []                                   # loudness of your speech frames so far
+    recent = collections.deque(maxlen=silence_end)   # speech? for the last silence_duration
+    last_voiced = 0                               # len(frames) after the last speech frame
     deadline = time.monotonic() + max_duration + 1.0
 
     while new < max_new and time.monotonic() < deadline:
@@ -384,22 +397,26 @@ def _record(max_duration, silence_duration, preroll=(), onset_deadline=None, ign
         new += 1
         if new <= ignore_first:
             continue
-        if _is_speech(frame):
+        speech = _is_speech(frame)
+        if speech and speech_start is not None and len(voiced) >= 10:
+            speech = _level(frame) >= np.percentile(voiced, 80) * config.SPEECH_END_DROP
+        if speech:
             consec_speech += 1
-            consec_silence = 0
+            voiced.append(_level(frame))
+            last_voiced = len(frames)
             if speech_start is None and consec_speech >= 4:   # ~80 ms of speech confirms onset
                 speech_start = 0 if preroll else max(0, len(frames) - 6)
         else:
             consec_speech = 0
-            if speech_start is not None:
-                consec_silence += 1
-                if consec_silence >= silence_end:
-                    break
+        if speech_start is not None:
+            recent.append(speech)
+            if len(recent) == silence_end and sum(recent) <= silence_end // 10:
+                break
 
     _capturing.clear()
     if speech_start is None:
         return None
-    return frames[speech_start:len(frames) - consec_silence]
+    return frames[speech_start:max(last_voiced, speech_start + 1)]
 
 
 def transcribe_full(audio):
