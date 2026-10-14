@@ -6,6 +6,10 @@ A single 16 kHz input stream feeds everything. Each 20 ms frame goes to:
     the wake-word detector is running behind)
   - the wake-word thread, while wake listening is enabled
   - the command recorder, while a capture is running
+
+Headless (config.HEADLESS, the Pi brain) there is no mic: Whisper still transcribes phone
+recordings, and a "listen" (answering Jarvis's question, a yes/no) waits for the next message
+from the phone instead.
 """
 
 import collections
@@ -16,11 +20,14 @@ import threading
 import time
 
 import numpy as np
-import sounddevice as sd
-import vosk
 from faster_whisper import WhisperModel
 
 from . import asr, config
+
+if not config.HEADLESS:
+    import sounddevice as sd
+    import vosk
+    vosk.SetLogLevel(-1)
 
 try:
     import webrtcvad as _webrtcvad
@@ -28,8 +35,6 @@ try:
 except ImportError:
     _vad = None
     print("  webrtcvad not installed — falling back to amplitude VAD. Run setup.sh to fix.")
-
-vosk.SetLogLevel(-1)
 
 print("  Loading Whisper model (first run may take a moment)...")
 WHISPER_MODEL = WhisperModel(config.WHISPER_MODEL, device="cpu", compute_type="int8")
@@ -146,6 +151,8 @@ def _device_watch():
 
 def start():
     """Open the shared microphone stream and start the wake-word and device-watch threads."""
+    if config.HEADLESS:
+        return
     threading.Thread(target=_wake_loop, daemon=True, name="wake").start()
     _open_stream()
     threading.Thread(target=_device_watch, daemon=True, name="mic-watch").start()
@@ -171,7 +178,7 @@ def pause():
 
 def resume():
     """Reopen the mic after pause()."""
-    if not _paused.is_set():
+    if not _paused.is_set() or config.HEADLESS:
         return
     try:
         _open_stream()
@@ -313,7 +320,7 @@ def _fire_wake():
 
 def trigger_wake() -> bool:
     """Activate as if the wake word was heard (dashboard orb click). False if busy."""
-    if not _wake_on.is_set():
+    if not _wake_on.is_set() or config.HEADLESS:     # no mic to listen with
         return False
     resume()                     # the mic may be closed to save battery
     print("Activated from dashboard.")
@@ -532,12 +539,34 @@ def listen_for_command(max_duration=8, silence_duration=0.8, onset_timeout=None)
     state.listening.set()
     state.push_state("activated")
     try:
+        if config.HEADLESS:
+            return _next_message()
         return _listen(max_duration, silence_duration, onset_timeout)
     finally:
         state.listening.clear()
         state.push_state("thinking")     # whoever asked now works with the answer
         if wake_was_on:
             enable_wake()
+
+
+def _next_message():
+    """Headless: the next text sent from the phone, or "" after HEADLESS_ANSWER_WAIT. A photo
+    isn't an answer: it goes back in the queue for the main loop."""
+    from . import server
+    last_listen[0] = time.time()
+    _keep([], "", "")
+    print("  Waiting for an answer from the phone...")
+    try:
+        message = server.phone_commands.get(timeout=config.HEADLESS_ANSWER_WAIT)
+    except queue.Empty:
+        print("  No answer.")
+        return ""
+    if isinstance(message, dict):
+        server.phone_commands.put(message)
+        return ""
+    _keep([], message, message)
+    print(f'  Answer: "{message}"')
+    return message
 
 
 def _listen(max_duration, silence_duration, onset_timeout):

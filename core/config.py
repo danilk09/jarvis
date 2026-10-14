@@ -12,6 +12,20 @@ from dotenv import load_dotenv
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 load_dotenv(os.path.join(ROOT, ".env"))
 
+OS      = platform.system()
+WINDOWS = OS == "Windows"
+HOME    = os.path.expanduser("~")
+
+# ── Headless brain (the Raspberry Pi 5) ───────────────────────────────────────
+# No mic, wake word, speakers or desktop window: commands arrive from the phone page and the
+# dashboard, replies are shown there (and in phone notifications). Actions that need the PC
+# (apps, workspaces, music, screenshots, the "agent") answer that the PC is needed. On by
+# default on Linux; `python jarvis.py --headless` forces it on Windows too (for testing).
+HEADLESS = "--headless" in sys.argv or OS == "Linux"
+# Headless, Jarvis's questions ("Should I go ahead?") are answered from the phone, which takes
+# longer than saying it: seconds to wait for that answer.
+HEADLESS_ANSWER_WAIT = 90
+
 # ── Claude ────────────────────────────────────────────────────────────────────
 MODEL         = "claude-haiku-5-5"
 client        = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
@@ -132,7 +146,8 @@ JARVIS_INPUT_DIR  = os.path.join(ROOT, "jarvis_input")
 JARVIS_OUTPUT_DIR = os.path.join(ROOT, "jarvis_output")
 INPUT_ARCHIVE_DIR = os.path.join(JARVIS_INPUT_DIR, "archive")
 LOG_DIR           = os.path.join(ROOT, "logs")
-CODING_DIR        = os.path.join(os.path.expanduser("~"), "OneDrive", "Desktop", "jarvis_coding")
+CODING_DIR        = (os.path.join(HOME, "OneDrive", "Desktop", "jarvis_coding") if WINDOWS
+                     else os.path.join(HOME, "jarvis_coding"))
 # Everything Jarvis remembers: memory.md (facts — edit it freely), agenda.json,
 # conversation logs and daily summaries. Git-ignored; back this folder up.
 MEMORY_DIR        = os.path.join(ROOT, "jarvis_memory")
@@ -183,7 +198,8 @@ CODE_USE_API_KEY     = False
 # Your repos: "work on murphys next js" finds ~/OneDrive/Desktop/GitHub/murphys-nextjs, and
 # "clone my X repo" clones github.com/<GITHUB_USER>/X into the first folder. GITHUB_TOKEN in
 # .env (optional) lets Jarvis see your private repos too.
-REPO_DIRS            = [os.path.join(os.path.expanduser("~"), "OneDrive", "Desktop", "GitHub")]
+REPO_DIRS            = [os.path.join(HOME, "OneDrive", "Desktop", "GitHub") if WINDOWS
+                        else os.path.join(HOME, "GitHub")]
 GITHUB_USER          = "danilk09"
 GITHUB_TOKEN         = os.environ.get("GITHUB_TOKEN", "")
 CODE_MAX_PARALLEL    = 3       # Claude Code runs at once (one per project)
@@ -247,17 +263,17 @@ BRIEFING_EMAIL    = True
 WOLFRAM_APP_ID = os.environ.get("WOLFRAM_APP_ID", "")
 
 # External tools
-MPV_EXE    = r"C:\Users\paten\OneDrive\Desktop\Tools\mpv\mpv.exe"   # or just "mpv" if it's on PATH
+MPV_EXE    = r"C:\Users\paten\OneDrive\Desktop\Tools\mpv\mpv.exe" if WINDOWS else "mpv"   # or just "mpv" if it's on PATH
 # Real-ESRGAN upscaler (runs on any Vulkan GPU); Pillow is used as a fallback when missing.
 # Download from: https://github.com/xinntao/Real-ESRGAN-ncnn-vulkan/releases
-ESRGAN_EXE = r"C:\Users\paten\OneDrive\Desktop\Tools\ESRGAN\realesrgan-ncnn-vulkan.exe"
+ESRGAN_EXE = r"C:\Users\paten\OneDrive\Desktop\Tools\ESRGAN\realesrgan-ncnn-vulkan.exe" if WINDOWS else ""
 
 # ── Server / desktop app ──────────────────────────────────────────────────────
 PORT = 5151
 # Open the dashboard in the Electron desktop app (desktop/) instead of a browser tab.
 # The desktop app is what lets the Stage show live web pages. Falls back to the
 # browser when the app isn't installed (cd desktop && npm install).
-USE_DESKTOP_APP = True
+USE_DESKTOP_APP = not HEADLESS
 # Closing the desktop app's window shuts Jarvis down (stopping any Claude Code runs).
 # False = Jarvis keeps running in the background; the Jarvis shortcut reopens the window.
 QUIT_WITH_WINDOW = True
@@ -274,10 +290,28 @@ CESIUM_ION_TOKEN = os.environ.get("CESIUM_ION_TOKEN", "")
 # file/bookmark/app indexes refresh periodically.
 BACKGROUND_MODE      = "--background" in sys.argv
 # --window: open the dashboard at startup even in background mode (the Jarvis shortcut)
-OPEN_WINDOW          = not BACKGROUND_MODE or "--window" in sys.argv
+OPEN_WINDOW          = not HEADLESS and (not BACKGROUND_MODE or "--window" in sys.argv)
 INDEX_REFRESH_SECS   = 60 * 60
 # Battery saving (core/power.py): on battery, close the mic when the PC is locked or nobody
 # has touched it or spoken to Jarvis for this many minutes. Any input wakes it. 0 = never.
 DORMANT_AFTER_MIN    = 10
 
-OS = platform.system()
+# ── Moving between machines ───────────────────────────────────────────────────
+# Saved state (stage_state.json, coding_state.json) copied from the PC holds Windows paths.
+# Where those folders live on the PC → where they are here; local_path() translates them.
+PC_PATHS = {
+    r"C:\Users\paten\OneDrive\Desktop\GitHub\jarvis": ROOT,
+    r"C:\Users\paten\OneDrive\Desktop\GitHub":        REPO_DIRS[0],
+    r"C:\Users\paten\OneDrive\Desktop\jarvis_coding": CODING_DIR,
+}
+
+
+def local_path(path):
+    """A path saved on the PC, as it is on this machine (unchanged on Windows or if unknown)."""
+    if WINDOWS or not isinstance(path, str) or not (len(path) > 2 and path[1] == ":" and "\\" in path):
+        return path
+    for pc, here in sorted(PC_PATHS.items(), key=lambda kv: -len(kv[0])):   # longest prefix first
+        if path.lower() == pc.lower() or path.lower().startswith(pc.lower() + "\\"):
+            rest = path[len(pc):].strip("\\")
+            return os.path.join(here, *rest.split("\\")) if rest else here
+    return path

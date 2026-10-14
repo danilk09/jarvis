@@ -7,6 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 python jarvis.py                # development mode (console output, opens the dashboard)
 python jarvis.py --background   # 24/7 mode — see "Background mode" below
+python jarvis.py --headless     # the brain alone: no mic, speakers or window (default on Linux — see "Pi brain")
 ```
 
 Requires a `.env` file with:
@@ -249,6 +250,16 @@ Edit them at `http://localhost:5151/workspaces`. Changes save instantly and hot-
 **Shortcut** — `scripts/install_shortcut.ps1` puts a "Jarvis" shortcut (icon `desktop/icon.ico`, drawn by `scripts/make_icon.py`) on the Desktop and in the Start menu. It runs `scripts/jarvis_launcher.pyw`: if Jarvis is running, `POST /api/window` opens/focuses its window; otherwise it starts `pythonw jarvis.py --background --window` (background mode, but with the window — `config.OPEN_WINDOW`).
 
 Only one Jarvis runs at a time: `jarvis.py` exits if `PORT` is taken. To run a dev copy in a console, stop the task first (`Stop-ScheduledTask -TaskName JARVIS`, then `Start-ScheduledTask` afterwards).
+
+## Pi brain (headless mode)
+
+Mobile Jarvis Phase 2: the brain runs 24/7 on a Raspberry Pi 5 (`config.HEADLESS`, on by default on Linux, `--headless` forces it on Windows for testing). Commands come from the `/phone` page and the dashboard over Tailscale; nothing listens or plays on the Pi.
+
+- **No mic, wake word or speakers** — `audio.start()` does nothing; `audio.listen_for_command()` (confirmations, answers to Jarvis's questions) waits up to `HEADLESS_ANSWER_WAIT` s for the next phone message instead (a photo goes back in the queue). `tts` runs `_headless_worker`: lines are logged/shown and `on_start` callbacks fire, no audio (no SAPI/comtypes/sounddevice imports). Voice ID is skipped (`voice.screen`), voice enroll/test say the PC is needed.
+- **PC-only actions** — `@action(..., pc_only=True)` (workspace, app, url, search, vscode, find_files/file, bookmark, screenshot, music, agent): left out of the prompt by `registry.schemas()/rules()`, and `handle_response` answers "needs your PC" if the router or model asks anyway. The prompt gets `_HEADLESS_NOTE` instead of the workspace/bookmark/file lines. Phase 3 will route these back to the PC.
+- **Differences** — `notify.away()` is always True (every reminder and finished Claude Code run goes to the phone); "good night" says good night but keeps running; SIGTERM (systemd stop) takes the Ctrl+C exit path. "Continue on my phone" runs Claude Code Remote Control in a detached `tmux` session (`coding._tmux`; `tmux attach -t jarvis-<project>` to answer a trust prompt); VS Code is PC-only.
+- **Paths** — on Linux `CODING_DIR` = `~/jarvis_coding`, `REPO_DIRS` = `~/GitHub`, `MPV_EXE` = `mpv`. State copied from the PC is translated on load by `config.local_path()` using `config.PC_PATHS` (`stage._localize`, `coding.init`); a moved coding project loses its Claude Code session id and pending PowerShell approvals (sessions live on the machine that ran them).
+- **Setup** — on the Pi, in `~/jarvis`: `bash scripts/pi/setup_pi.sh` (apt packages, `.venv` without sounddevice/vosk/pycaw/comtypes, Whisper + speaker models, `tailscale set --operator` so `tailscale cert` works without sudo), copy `.env`/`jarvis_memory`/`workspaces.json`/state from the PC, then `bash scripts/pi/install_service.sh` (systemd unit from `scripts/pi/jarvis.service`: restarts always, logs via `journalctl -u jarvis -f`; `remove` uninstalls).
 
 ## Claude API usage
 

@@ -5,6 +5,7 @@ Say "Jarvis" -> speak your command -> Claude figures out what to do.
 
     python jarvis.py                # normal (development) mode
     python jarvis.py --background   # 24/7 mode: no browser, logs to logs/jarvis.log
+    python jarvis.py --headless     # the brain without mic/speakers/window (default on Linux: the Pi)
 
 The modules live in core/ — see CLAUDE.md for the layout.
 """
@@ -25,7 +26,8 @@ try:
     _probe.bind(("0.0.0.0", config.PORT))
 except OSError:
     print(f"Jarvis is already running (port {config.PORT} is in use). If it's the background "
-          "task, stop it first:  Stop-ScheduledTask -TaskName JARVIS")
+          "task, stop it first:  " + ("Stop-ScheduledTask -TaskName JARVIS" if config.WINDOWS
+                                      else "sudo systemctl stop jarvis"))
     sys.exit(1)
 finally:
     _probe.close()
@@ -34,6 +36,7 @@ import os
 import queue
 import random
 import re
+import signal
 import threading
 import time
 
@@ -93,15 +96,17 @@ def _startup():
     if restored:
         print(f"  Stage: restored {restored} panel{'s' if restored != 1 else ''} from last time")
     coding.init()                                     # Claude Code projects + preferences file
-    stage.open_dashboard = lambda: desktop.open_dashboard(dash_url)   # Stage content with no window open
+    if not config.HEADLESS:   # Stage content with no window open (the Pi has no screen: it waits)
+        stage.open_dashboard = lambda: desktop.open_dashboard(dash_url)
     server.start()
     desktop.on_closed.append(_window_closed)
     if config.OPEN_WINDOW:
         time.sleep(0.6)   # give Flask a moment to bind before opening the window
         desktop.open_dashboard(dash_url)
 
-    # Indexes build in the background so startup isn't slow
-    for build in (files.build_file_index, files.build_bookmark_index, files.build_app_index):
+    # Indexes build in the background so startup isn't slow (the PC's files and apps only)
+    for build in () if config.HEADLESS else (files.build_file_index, files.build_bookmark_index,
+                                             files.build_app_index):
         threading.Thread(target=build, daemon=True).start()
     if config.BACKGROUND_MODE:
         background.start_index_refresh()
@@ -114,15 +119,17 @@ def _startup():
     agenda.start()     # reminders and timers
     checkins.start()   # "How did the quiz go?" — asking how important things went
     voice.start()      # voice ID model + profile, prune old recordings
-    audio.on_wake.extend([stop_tts, music.duck])   # interrupt speech and duck music instantly
-    tts.on_speech_start.append(lambda: music.duck("speech"))   # anything Jarvis says, even unprompted
-    tts.on_speech_end.append(lambda: music.unduck("speech"))
-    audio.start()
-    power.start()      # on battery: close the mic when nobody's around
-    speak(_greeting())
+    if not config.HEADLESS:
+        audio.on_wake.extend([stop_tts, music.duck])   # interrupt speech and duck music instantly
+        tts.on_speech_start.append(lambda: music.duck("speech"))   # anything Jarvis says, even unprompted
+        tts.on_speech_end.append(lambda: music.unduck("speech"))
+        audio.start()
+        power.start()  # on battery: close the mic when nobody's around
+        speak(_greeting())
 
     print(f"\n{'='*50}")
-    print("  JARVIS is ready" + ("  (background mode)" if config.BACKGROUND_MODE else ""))
+    print("  JARVIS is ready" + ("  (headless brain)" if config.HEADLESS
+                                 else "  (background mode)" if config.BACKGROUND_MODE else ""))
     print(f"  Dashboard:  {dash_url}")
     if phone_url:
         tls_note = "" if server.tls["cert"] else " (no HTTPS — mic may be blocked; run 'tailscale cert' manually)"
@@ -136,7 +143,10 @@ def _startup():
     print(f"  Input folder:  {config.JARVIS_INPUT_DIR}")
     print(f"  Output folder: {config.JARVIS_OUTPUT_DIR}")
     print(f"{'='*50}")
-    print("\n  Say 'Jarvis' to activate — or all at once: 'Jarvis, open Discord'.\n")
+    if config.HEADLESS:
+        print("\n  Waiting for commands from the phone page.\n")
+    else:
+        print("\n  Say 'Jarvis' to activate — or all at once: 'Jarvis, open Discord'.\n")
 
 
 # An answer that means "never mind" ends the exchange instead of going to Claude
@@ -264,7 +274,13 @@ def _shutdown():
     print("\n  JARVIS shutting down. Goodbye.")
 
 
+def _stop_signal(signum, frame):
+    raise KeyboardInterrupt   # systemctl stop / restart: the same clean exit as Ctrl+C
+
+
 def main():
+    if not config.WINDOWS:
+        signal.signal(signal.SIGTERM, _stop_signal)
     _startup()
     followup, followups = None, 0
     while True:

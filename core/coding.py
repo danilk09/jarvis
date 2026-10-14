@@ -21,6 +21,7 @@ project folder and every folder above it, so they apply to every project automat
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import threading
@@ -70,6 +71,12 @@ def init():
             _state = {"current": None, "projects": {}, **json.load(f)}
     except (OSError, ValueError):
         pass
+    for proj in _state["projects"].values():   # copied from the PC: its folders are elsewhere here
+        here = config.local_path(proj.get("path"))
+        if here != proj.get("path"):
+            # a Claude Code conversation lives on the machine that had it, and the refused
+            # commands were PowerShell ones: both start fresh
+            proj.update(path=here, session=None, pending=[])
     ensure_prefs()
     for p in stage.panels():                 # a run can't survive a restart
         if p["kind"] == "code" and p["data"].get("status") == "running":
@@ -767,9 +774,29 @@ def _project_or_current(project=None):
     return current()
 
 
+def _tmux(session, path, argv):
+    """Linux (the Pi has no screen): run an interactive Claude Code in a detached tmux session —
+    `tmux attach -t <session>` over SSH to see it. Returns True if it started."""
+    if not shutil.which("tmux"):
+        print("  tmux isn't installed (sudo apt install tmux)")
+        return False
+    subprocess.run(["tmux", "kill-session", "-t", session], capture_output=True)
+    # A tmux server already running keeps its own environment, so strip the API key here too
+    unset = [a for k in sorted(set(os.environ) - set(_env())) for a in ("-u", k)]
+    r = subprocess.run(["tmux", "new-session", "-d", "-s", session, "-c", path,
+                        shlex.join(["env", *unset, "MCP_DISCOVERY_CACHE=1", *argv])], capture_output=True, text=True)
+    if r.returncode:
+        print(f"  tmux failed: {r.stderr.strip()}")
+    return r.returncode == 0
+
+
+def _tmux_session(name):
+    return "jarvis-" + re.sub(r"[^\w-]", "-", name.removeprefix("jarvis-"))
+
+
 def open_vscode(project=None):
     name, proj = _project_or_current(project)
-    if not proj:
+    if not proj or not config.WINDOWS:    # the Pi has no screen
         return False
     subprocess.Popen(["code", proj["path"]], shell=True)
     return True
@@ -781,6 +808,13 @@ def open_terminal(project=None):
     exe = claude_exe()
     if not proj or not exe:
         return False
+    if not config.WINDOWS:
+        session = _tmux_session(name) + "-term"
+        ok = _tmux(session, proj["path"], [exe, *(["--resume", proj["session"]] if proj.get("session") else []),
+                                           *mcp_flags(proj)])
+        if ok:
+            print(f"  {name}: Claude Code is running in tmux — attach with: tmux attach -t {session}")
+        return ok
     resume = f" --resume {proj['session']}" if proj.get("session") else ""
     q = proj["path"].replace("'", "''")
     subprocess.Popen(["powershell", "-NoExit", "-Command",
@@ -790,7 +824,7 @@ def open_terminal(project=None):
 
 
 # ── Continuing on the phone (Remote Control) ──────────────────────────────────
-_remote: dict = {}      # project name -> the minimized window hosting its Remote Control session
+_remote: dict = {}      # project name -> the minimized window (Windows) or tmux session (Linux) hosting its Remote Control session
 
 
 def trusted(path):
@@ -824,8 +858,17 @@ def open_on_phone(project=None):
         return None, True
     _close_remote(name)
     ok = trusted(proj["path"])
-    q = proj["path"].replace("'", "''")
     label = f"Jarvis - {pretty(name)}".replace("'", "")
+    if not config.WINDOWS:
+        session = _tmux_session(name)
+        if not _tmux(session, proj["path"], [exe, "--resume", proj["session"], "--remote-control", label,
+                                             *mcp_flags(proj)]):
+            return None, True
+        _remote[name] = session
+        print(f"  {name}: Remote Control session opened ({label}, tmux session {session})"
+              + ("" if ok else f" — answer the folder trust prompt: tmux attach -t {session}"))
+        return name, ok
+    q = proj["path"].replace("'", "''")
     info = subprocess.STARTUPINFO()
     if ok:
         info.dwFlags |= subprocess.STARTF_USESHOWWINDOW
@@ -843,6 +886,11 @@ def _close_remote(name):
     """Jarvis is about to run in this project: close its phone session so the two don't both
     write to the same conversation."""
     proc = _remote.pop(name, None)
+    if isinstance(proc, str):      # a tmux session (Linux)
+        if subprocess.run(["tmux", "kill-session", "-t", proc], capture_output=True).returncode == 0:
+            print(f"  {name}: closed its Remote Control session")
+            return True
+        return False
     if proc and proc.poll() is None:
         subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True)
         print(f"  {name}: closed its Remote Control session")
@@ -1049,6 +1097,9 @@ def _code(a, chain):
         name, ok = open_on_phone(target)
         if not name:
             speak("There's no conversation to hand over yet. Give it a task first.")
+        elif not ok and not config.WINDOWS:
+            speak(f"Claude Code hasn't been trusted in {pretty(name)} yet. Answer its prompt over SSH with "
+                  f"tmux attach, then it'll show up in the Claude app as Jarvis {pretty(name)}.")
         elif not ok:
             speak(f"Claude Code hasn't been trusted in {pretty(name)} yet. Accept the prompt in the window "
                   f"I just opened, then it'll show up in the Claude app as Jarvis {pretty(name)}.")
@@ -1069,6 +1120,9 @@ def _code(a, chain):
         stage.open_file(PREFS_FILE)
         return "Showing coding preferences"
     if cmd == "open_vscode":
+        if not config.WINDOWS:
+            speak("VS Code is on your PC, sir. Ask me there.")
+            return "Code: VS Code (needs the PC)"
         speak("Opening it in VS Code." if open_vscode() else "There's no current project.")
         return "Code: VS Code"
     if cmd == "open_terminal":

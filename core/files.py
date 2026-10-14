@@ -114,6 +114,8 @@ def find_bookmark(keyword):
 def build_app_index():
     """One PowerShell call at startup instead of one per "open X" command."""
     global APPS
+    if not config.WINDOWS:
+        return
     try:
         out = subprocess.run(
             ["powershell", "-NoProfile", "-Command",

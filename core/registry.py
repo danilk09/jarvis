@@ -11,26 +11,39 @@ lines that teach Claude how to call it, so adding a command is one function:
 
 Handlers receive the action dict from Claude and a `chain` dict shared by all
 actions in one response (e.g. a screenshot's analysis feeding generate_file).
+
+pc_only=True: the action works on the PC itself (apps, music, the screen). The headless brain
+(config.HEADLESS, the Pi) leaves it out of Claude's prompt and answers that the PC is needed.
 """
 
+from . import config
+
 ACTIONS: dict = {}     # type → handler(action, chain) -> str
-_SCHEMAS: list = []    # example action objects, in registration order
-_RULES:   list = []    # routing rules, in registration order
+PC_ONLY: set  = set()  # types that need the PC
+_SCHEMAS: list = []    # (type, example action object), in registration order
+_RULES:   list = []    # (type, routing rule), in registration order
 
 
-def action(name, schema=None, rules=()):
+def action(name, schema=None, rules=(), pc_only=False):
     def register(fn):
         ACTIONS[name] = fn
+        if pc_only:
+            PC_ONLY.add(name)
         if schema:
-            _SCHEMAS.extend([schema] if isinstance(schema, str) else schema)
-        _RULES.extend(rules)
+            _SCHEMAS.extend((name, s) for s in ([schema] if isinstance(schema, str) else schema))
+        _RULES.extend((name, r) for r in rules)
         return fn
     return register
 
 
+def available(name):
+    """False for a PC-only action on the headless brain."""
+    return not (config.HEADLESS and name in PC_ONLY)
+
+
 def schemas():
-    return list(_SCHEMAS)
+    return [s for name, s in _SCHEMAS if available(name)]
 
 
 def rules():
-    return list(_RULES)
+    return [r for name, r in _RULES if available(name)]

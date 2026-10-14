@@ -7,6 +7,9 @@ split into phrases; the first plays as soon as it's rendered (~50-150 ms) while 
 render behind it, into an output stream that stays open (opening one costs 100-300 ms).
 SAPI: one SpVoice lives on this thread for the whole session, so speech starts almost
 immediately. It is also the fallback whenever the Piper voice is missing or fails.
+
+Headless (config.HEADLESS, the Pi brain) there are no speakers: lines are logged and shown on
+the dashboard and phone page, and nothing is played.
 """
 
 import collections
@@ -18,12 +21,15 @@ import threading
 import time
 from xml.sax.saxutils import escape
 
-import comtypes
-import comtypes.client
 import numpy as np
-import sounddevice as sd
 
 from . import config
+
+if config.WINDOWS:
+    import comtypes
+    import comtypes.client
+if not config.HEADLESS:
+    import sounddevice as sd
 from .state import end_speech, push_log, push_state, speech_beat, start_speech
 
 # SpeechVoiceSpeakFlags
@@ -219,7 +225,8 @@ def _load_piper():
         if not config.PIPER_VOICE:
             return
         import sherpa_onnx
-        comtypes.CoInitialize()   # _speaker_id() asks Windows (COM) which speakers are the default
+        if config.WINDOWS:
+            comtypes.CoInitialize()   # _speaker_id() asks Windows (COM) which speakers are the default
         d = os.path.join(config.TTS_DIR, config.PIPER_VOICE)
         if not os.path.isdir(d):
             print(f"  Voice folder {d} not found — using the Windows voice")
@@ -235,7 +242,7 @@ def _load_piper():
         _player(tts.sample_rate)        # open the output stream ahead of time too
         threading.Thread(target=_watch_speakers, daemon=True, name="tts-speakers").start()
     except Exception as e:
-        print(f"  Piper voice failed to load ({e}) — using the Windows voice")
+        print(f"  Piper voice failed to load ({e})" + (" — using the Windows voice" if config.WINDOWS else ""))
     finally:
         _piper_loaded.set()
 
@@ -268,6 +275,8 @@ def _speaker_id():
     """ID of Windows' default speakers. Asks for the endpoint directly: pycaw's
     GetSpeakers() wraps it in an AudioDevice (~110 ms of CPU reading every property) that
     has no GetId()."""
+    if not config.WINDOWS:
+        return None
     try:
         from pycaw.utils import CLSID_MMDeviceEnumerator, EDataFlow, ERole, IMMDeviceEnumerator
         enum = comtypes.CoCreateInstance(CLSID_MMDeviceEnumerator, IMMDeviceEnumerator,
@@ -355,6 +364,8 @@ def release_output():
 
 def _watch_speakers():
     """Checked here every 2 s rather than per line, so a line never waits on Windows."""
+    if not config.WINDOWS:
+        return
     comtypes.CoInitialize()
     while True:
         time.sleep(2)
@@ -442,6 +453,29 @@ def _speak_piper(text, update_state):
         cancel.set()
 
 
+def _headless_worker():
+    """No speakers: each line is shown (speaking → idle) and its on_start runs, nothing plays."""
+    _ready.set()
+    while True:
+        text, update_state, on_start = _queue.get()
+        try:
+            if suppressed.is_set():
+                continue
+            _run_hooks(on_speech_start)
+            if update_state:
+                push_state("speaking")
+            if on_start:
+                try:
+                    on_start()
+                except Exception as e:
+                    print(f"  on_start callback error: {e}")
+            _run_hooks(on_speech_end)
+        finally:
+            if update_state and _queue.empty():
+                push_state("idle")
+            _queue.task_done()
+
+
 def _worker():
     comtypes.CoInitialize()   # COM objects must be created and used on this thread
     voice = _make_voice()
@@ -503,8 +537,11 @@ def _worker():
             _queue.task_done()
 
 
-threading.Thread(target=_load_piper, daemon=True, name="tts-load").start()
-threading.Thread(target=_worker, daemon=True, name="tts").start()
+if config.HEADLESS:
+    threading.Thread(target=_headless_worker, daemon=True, name="tts").start()
+else:
+    threading.Thread(target=_load_piper, daemon=True, name="tts-load").start()
+    threading.Thread(target=_worker, daemon=True, name="tts").start()
 _ready.wait(timeout=10)
 
 

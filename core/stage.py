@@ -22,6 +22,8 @@ import queue
 import threading
 import time
 
+from . import config
+
 COLS = ROWS = 12
 MAX_PANELS = 8
 _CELL_ASPECT = 1.6     # a grid cell is ~1.6x wider than tall on a 16:9 screen
@@ -435,6 +437,15 @@ def flush():
     _save_now()
 
 
+def _localize(obj):
+    """Every "path" saved on the PC, as it is on this machine (the Stage copied to the Pi)."""
+    if isinstance(obj, dict):
+        return {k: config.local_path(v) if k == "path" else _localize(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_localize(v) for v in obj]
+    return obj
+
+
 def load(path):
     """Restore the Stage saved by the last run, and keep saving to `path`. Returns the panel count."""
     global _store_path, _layout, _route, _undo, _ids
@@ -443,7 +454,7 @@ def load(path):
         return 0
     try:
         with open(path, encoding="utf-8") as f:
-            data = json.load(f)
+            data = _localize(json.load(f))
     except (OSError, ValueError) as e:
         print(f"  Could not read the saved Stage ({e}) — starting with an empty one.")
         return 0

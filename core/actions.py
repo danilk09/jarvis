@@ -14,13 +14,13 @@ from urllib.parse import quote_plus
 from . import agenda, agent, audio, brain, config, files, media, music, stage, state, tts
 from . import briefing, checkins, coding, delegate, knowledge, memory, notify, places, stage_actions  # noqa: F401  (register their actions)
 from .generate import generate_file_content, summarize_for_speech
-from .registry import ACTIONS, action
+from .registry import ACTIONS, PC_ONLY, action
 from .tts import speak
 from .web import brave_search, synthesize_search_answer
 
 
 # ── Opening things ────────────────────────────────────────────────────────────
-@action("workspace",
+@action("workspace", pc_only=True,
         schema='{"type":"workspace","target":"<n>"}',
         rules=['"open [workspace]" → type "workspace". Fuzzy match (Example: "311","three eleven","3-11" all match workspace "311")'])
 def _workspace(a, chain):
@@ -30,13 +30,13 @@ def _workspace(a, chain):
     return msg
 
 
-@action("url", schema='{"type":"url","target":"<full url>"}')
+@action("url", pc_only=True, schema='{"type":"url","target":"<full url>"}')
 def _url(a, chain):
     webbrowser.open(a.get("target", ""))
     return f"Opened {a.get('target', '')}"
 
 
-@action("app",
+@action("app", pc_only=True,
         schema='{"type":"app","target":"<app name>"}',
         rules=['"open [app]" → type "app"'])
 def _app(a, chain):
@@ -47,7 +47,7 @@ def _app(a, chain):
     return f"App not found: {target}"
 
 
-@action("search", schema='{"type":"search","engine":"google|youtube|github","query":"<q>"}')
+@action("search", pc_only=True, schema='{"type":"search","engine":"google|youtube|github","query":"<q>"}')
 def _search(a, chain):
     engine = a.get("engine", "google")
     q = quote_plus(a.get("query", ""))
@@ -60,7 +60,7 @@ def _search(a, chain):
     return f"Searched {engine} for '{a.get('query', '')}'"
 
 
-@action("vscode", schema='{"type":"vscode","target":"<path>"}')
+@action("vscode", pc_only=True, schema='{"type":"vscode","target":"<path>"}')
 def _vscode(a, chain):
     target = a.get("target", "")
     subprocess.Popen(["code", target] if target else ["code"], shell=True)
@@ -92,7 +92,7 @@ def _open_file_matches(matches, keyword):
     return f"Opened {len(opened)} file(s): {', '.join(os.path.basename(matches[n - 1]) for n in opened)}"
 
 
-@action("find_files",
+@action("find_files", pc_only=True,
         schema='{"type":"find_files","keyword":"<word>","extension":"<or empty>"}',
         rules=['"find files" or "open file" → type "find_files" with keyword'])
 def _find_files(a, chain):
@@ -109,9 +109,10 @@ def _find_files(a, chain):
 
 
 ACTIONS["file"] = _find_files   # older alias the model sometimes uses
+PC_ONLY.add("file")
 
 
-@action("bookmark",
+@action("bookmark", pc_only=True,
         schema='{"type":"bookmark","target":"<keyword>"}',
         rules=['"open [bookmark keyword]" → type "bookmark"'])
 def _bookmark(a, chain):
@@ -125,7 +126,7 @@ def _bookmark(a, chain):
 
 
 # ── Seeing and reading ────────────────────────────────────────────────────────
-@action("screenshot",
+@action("screenshot", pc_only=True,
         schema='{"type":"screenshot","prompt":"<what to analyze or do with the screenshot>"}',
         rules=['"screenshot","take a screenshot","capture screen","look at my screen","what\'s on my screen","look at this" → type "screenshot"; put intent in "prompt". Screenshots can be chained with generate_file or code to use the image as context.'])
 def _screenshot(a, chain):
@@ -206,7 +207,7 @@ def _generate_file(a, chain):
 
 
 # ── Music ─────────────────────────────────────────────────────────────────────
-@action("music",
+@action("music", pc_only=True,
         schema=['{"type":"music","query":"<song, artist, or genre>","command":"play"}',
                 '{"type":"music","command":"stop|pause|resume|skip|replay"}',
                 '{"type":"music","command":"prev","n":<1-5>}'],
@@ -283,7 +284,7 @@ def _timer(a, chain):
     return f"Timer: {seconds}s {a.get('label', '')}".strip()
 
 
-@action("agent",
+@action("agent", pc_only=True,
         schema='{"type":"agent","task":"<complete description of what to do>"}',
         rules=['Anything to DO on the computer that no other action covers — change a setting, run a command, move/rename/organise files, check system info → type "agent" with the full task in "task". (Coding projects use type "code".) Never reply that you cannot do something on the PC; use "agent" instead. Prefer a specific action when one fits, and never use "agent" for questions you can answer in chat.'])
 def _agent(a, chain):
@@ -315,6 +316,12 @@ def _pronounce(a, chain):
         schema='{"type":"shutdown","night":true}',
         rules=['"good night", "shut down", "shut yourself down", "go to sleep", "that\'s all for tonight" → type "shutdown" (Jarvis itself; night = true for good night). Shutting down or restarting the computer is "agent".'])
 def _shutdown(a, chain):
+    if config.HEADLESS:     # the brain stays on around the clock: just say good night
+        night = a.get("night") or not 5 <= time.localtime().tm_hour < 18
+        big = [checkins.spoken_name(m) for m in checkins.tomorrow()]
+        speak(("Good night, sir." if night else "I'll be here, sir.")
+              + (f" Good luck with {' and '.join(big)} tomorrow." if big else ""))
+        return "Good night (headless: staying on)"
     busy = sorted({j["project"].removeprefix("jarvis-") for j in coding.running()})
     if busy and not agent.confirm(f"Claude Code is still working on {' and '.join(busy)}, "
                                   "and shutting down will stop it"):
@@ -351,12 +358,18 @@ def handle_response(response):
         if not actions:
             speak("I'm not sure what to do with that.")
             return
-        chain = {}
+        chain, told = {}, False
         for a in actions:
             kind = a.get("type") or a.get("mode", "")
             handler = ACTIONS.get(kind)
             if handler is None:
                 print(f"  Unknown action: {kind}")
+                continue
+            if kind in PC_ONLY and config.HEADLESS:   # the router or the model asked for one anyway
+                if not told:
+                    speak("That one needs your PC, sir, and I can't reach it from here yet.")
+                    told = True
+                print(f"  Skipped (needs the PC): {kind}")
                 continue
             print(f"  Done: {handler(a, chain)}")
     elif mode == "chat":

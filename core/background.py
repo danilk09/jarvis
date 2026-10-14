@@ -60,6 +60,8 @@ def setup_logging():
 def hide_child_consoles():
     """pythonw.exe has no console, so every console program started without one gets its own
     window. Default them to CREATE_NO_WINDOW; calls that ask for a console keep theirs."""
+    if not config.WINDOWS:
+        return
     original = subprocess.Popen.__init__
 
     def init(self, *args, creationflags=0, **kwargs):

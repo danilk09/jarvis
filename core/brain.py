@@ -20,9 +20,22 @@ _ai_error_count = 0
 _AI_ERROR_RESET_THRESHOLD = 3
 
 
+_PC_LOOKUPS = """WORKSPACES (use type "workspace"): {workspaces}
+BOOKMARKS searchable by keyword (use type "bookmark").
+FILES searchable by keyword (use type "find_files")."""
+_PC_EXAMPLE = ('"open Discord and play lofi" → {"mode":"action","actions":[{"type":"app","target":"Discord"},'
+               '{"type":"music","command":"play","query":"lofi"}]}')
+# The headless brain (the Pi) can't touch the PC: say so instead of pretending
+_HEADLESS_NOTE = """WHERE YOU RUN: on the user's home server, not their PC. Messages arrive from their phone and are read there, not heard from speakers. Opening apps, workspaces, files or websites, playing music, screenshots and anything done on the PC itself → mode "chat": say briefly that it needs the PC. Everything else works as usual."""
+_HEADLESS_EXAMPLE = ('"remind me to call mom at 6 and look up the weather" → several actions in one list '
+                     '(agenda, then web_search)')
+
+
 def build_system_prompt(workspaces):
     actions = "\n".join(f'{{"mode":"action","actions":[{s}]}}' for s in registry.schemas())
     rules   = "\n".join(f"- {r}" for r in registry.rules())
+    where   = _HEADLESS_NOTE if config.HEADLESS else _PC_LOOKUPS.format(workspaces=json.dumps(list(workspaces.keys())))
+    example = _HEADLESS_EXAMPLE if config.HEADLESS else _PC_EXAMPLE
     return f"""You are JARVIS: the user's long-time AI companion, with a warm, dry British wit. Not a help desk. Return ONLY a single JSON object, no explanation.
 
 PERSONALITY (for every chat reply and anything spoken):
@@ -31,9 +44,7 @@ PERSONALITY (for every chat reply and anything spoken):
 - When the user shares something about their life (good news, a worry, being tired or sick, how something went) → react like a friend first, in one genuine line (glad, sympathetic, impressed), then help if there's something to help with. Lasting things are remembered automatically; use the memory action only when asked.
 - Don't ask personal questions out of nowhere: Jarvis checks in about important events separately (CHECK-IN below, when present). When the live block says CHECK-IN NEXT, end your reply without any question.
 
-WORKSPACES (use type "workspace"): {json.dumps(list(workspaces.keys()))}
-BOOKMARKS searchable by keyword (use type "bookmark").
-FILES searchable by keyword (use type "find_files").
+{where}
 
 ACTION TYPES (pick one; several actions may be chained in one "actions" list):
 {actions}
@@ -41,7 +52,7 @@ ACTION TYPES (pick one; several actions may be chained in one "actions" list):
 {{"mode":"none"}}
 
 RULES:
-- Multi-part requests → several actions in one list, e.g. "open Discord and play lofi" → {{"mode":"action","actions":[{{"type":"app","target":"Discord"}},{{"type":"music","command":"play","query":"lofi"}}]}}
+- Multi-part requests → several actions in one list, e.g. {example}
 {rules}
 - Words like "open","find","search","launch","show" → ALWAYS mode "action"
 - Any question or request for information that doesn't need real-time data → mode "chat" with a spoken reply

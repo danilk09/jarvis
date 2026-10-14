@@ -1,0 +1,23 @@
+# Jarvis's headless brain on the Pi. Installed by scripts/pi/install_service.sh, which fills
+# in __USER__, __HOME__ and __ROOT__ and copies it to /etc/systemd/system/jarvis.service.
+[Unit]
+Description=Jarvis (headless brain)
+Wants=network-online.target
+After=network-online.target tailscaled.service
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__ROOT__
+ExecStart=__ROOT__/.venv/bin/python jarvis.py --headless
+# claude, uvx (installed to ~/.local/bin) and the venv's tools must be found
+Environment=PATH=__HOME__/.local/bin:__ROOT__/.venv/bin:/usr/local/bin:/usr/bin:/bin
+# print() goes straight to the journal: journalctl -u jarvis -f
+Environment=PYTHONUNBUFFERED=1
+Restart=always
+RestartSec=5
+# SIGTERM → the same clean exit as Ctrl+C (saves the Stage)
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target

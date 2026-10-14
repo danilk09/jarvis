@@ -77,7 +77,10 @@ def quiet_seconds():
 
 
 def away():
-    """True when nobody has touched the PC or spoken to Jarvis for PHONE_AWAY_MIN minutes."""
+    """True when nobody has touched the PC or spoken to Jarvis for PHONE_AWAY_MIN minutes.
+    Always on the headless brain: nobody hears it there, so everything goes to the phone."""
+    if config.HEADLESS:
+        return True
     return quiet_seconds() > config.PHONE_AWAY_MIN * 60
 
 

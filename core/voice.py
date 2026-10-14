@@ -75,6 +75,8 @@ def screen(command, source):
     word), "prompted" (after "Yes sir"), "dashboard" (orb click), "answer" (answering Jarvis).
     Returns the command to run, or None.
     """
+    if config.HEADLESS:     # typed or sent from the phone: no recording here to check
+        return command
     cap = audio.last_capture
     frames = cap["frames"][cap.get("voice_from", 0):]
     if source == "prompted":
@@ -370,6 +372,9 @@ def _show_words():
                '"show the words you know", "show my voice corrections" → "show_words"'])
 def _voice(a, chain):
     cmd = (a.get("command") or "status").lower()
+    if cmd in ("enroll", "test") and config.HEADLESS:
+        speak("I need your PC's microphone for that, sir. Ask me there.")
+        return f"Voice {cmd}: needs the PC"
     if cmd == "enroll":
         return enroll()
     if cmd == "test":
