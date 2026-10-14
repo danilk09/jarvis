@@ -22,11 +22,12 @@ It answers four questions:
 ```bash
 sudo apt update && sudo apt install -y git gh
 gh auth login                      # GitHub.com -> HTTPS -> log in with a browser
-gh repo clone danilk09/jarvis ~/jarvis
+gh repo clone danilk09/jarvis ~/jarvis -- -b pi_brain
 cd ~/jarvis
+./scripts/pocket/bench selftest    # optional: offline check of the bench itself, needs no setup
 ```
 
-Already cloned? `cd ~/jarvis && git pull`.
+Already cloned? `cd ~/jarvis && git fetch && git checkout pi_brain && git pull`.
 
 ## 2. Set up (once, ~10-15 min)
 
@@ -60,14 +61,16 @@ It walks you through each step and waits for you:
 | Step | What you do | What it measures |
 |---|---|---|
 | check | nothing | Bluetooth, PipeWire, the WirePlumber config, SCO fix, groups |
-| pair | case lid open, hold the case button until white | pairing, which audio profiles appear |
+| pair | case lid open, hold the case button until white (if the AirPods show up without their name, pick them from the list) | pairing, which audio profiles appear (waits ~12 s for the headset profile) |
 | sound | listen | chime + sentence in music mode: heard or not |
-| buttons | hold / double / single / triple press, 6 s each | which events reach the Pi (HFP AT commands via `btmon`, AVRCP keys via evdev); also the HFP handshake |
+| buttons | hold / double / single / triple press, 6 s each | which events reach the Pi (HFP AT commands via `btmon`, AVRCP keys via evdev; a silent stream plays meanwhile so the AirPods send presses); also the HFP handshake |
 | mic | say the sentence after each chime, then rate the playback 1-5 | mSBC and CVSD: level, mode-switch time, Whisper transcript, word error |
 | jarvis (optional) | press your trigger, give real commands, Ctrl+C to stop | full round trip to the PC Jarvis and its latency |
 
 Steps can be run on their own: `./scripts/pocket/bench mic`, `./scripts/pocket/bench jarvis --jarvis https://your-pc.tail1234.ts.net:5151`.
 `./scripts/pocket/bench report` prints the summary again; `./scripts/pocket/bench reset` clears results (keeps the pairing).
+`./scripts/pocket/bench selftest` runs the parsers, profile picking, word error rate, WAV writing and the
+verdict on sample `pactl`/`btmon` output (`bench_selftest.py`), no Bluetooth needed.
 
 ## 5. Read the verdict
 
@@ -83,6 +86,10 @@ Results go to `scripts/pocket/results/` (git-ignored):
 | **GO (double-press trigger)** | Mic works, only double-press arrives | Use double-press; "next song" becomes a voice command. Hold may be fixable later |
 | **GO (needs another trigger)** | Mic works, no press arrives | Button on the device, a BLE remote, or a wake word on the device |
 | **NO-GO (AirPods mic)** | Music works, mic doesn't | Send the report first (silence = SCO routing, may be fixable). Else: mic on the device, AirPods for listening only |
+| **LIKELY GO** | Mic works, buttons step not run | `./scripts/pocket/bench buttons` |
+| **INCOMPLETE** | Pairing, music or the mic step not done yet | Run the missing steps |
+
+A mic run counts as working at ≤35% word error or a 3+/5 rating (rating only, if Whisper isn't installed).
 
 ## Notes
 

@@ -2,7 +2,9 @@
 # Runs the AirPods bench test with its Python environment:  ./scripts/pocket/bench all
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PY="$HERE/.venv/bin/python"
-if [ ! -x "$PY" ]; then
+if [ ! -x "$PY" ] && [ "${1:-}" = "selftest" ]; then
+    PY="$(command -v python3)"          # the self-test needs nothing from the setup
+elif [ ! -x "$PY" ]; then
     echo "Run the setup first:  bash scripts/pocket/setup_bench.sh"
     exit 1
 fi
