@@ -13,6 +13,7 @@ as Jarvis's mic, speaker and button:
     ./scripts/pocket/bench jarvis    # the real thing: press -> speak -> PC Jarvis -> reply in your ears
     ./scripts/pocket/bench all       # everything above, in order
     ./scripts/pocket/bench report    # print the summary again
+    ./scripts/pocket/bench selftest  # offline check of the parsers and verdict (no Bluetooth needed)
 
 Results go to scripts/pocket/results/ (report.md is what to paste back to Claude).
 Run as your normal user, not root. Steps that need root (btmon, the SCO fix) call sudo.
@@ -72,6 +73,12 @@ def yes(prompt, default=True):
     return default if not a else a.startswith("y")
 
 
+def ask_int(prompt, default, lo, hi):
+    """A number in lo..hi; anything else (typo, "4/5", empty) -> the first digit found, else default."""
+    m = re.search(r"\d+", ask(prompt, str(default)))
+    return max(lo, min(hi, int(m.group()))) if m else default
+
+
 def run(cmd, timeout=20, sudo=False, input_text=None):
     if sudo:
         cmd = ["sudo"] + cmd
@@ -85,7 +92,7 @@ def run(cmd, timeout=20, sudo=False, input_text=None):
 
 def load_results():
     try:
-        with open(RESULTS_FILE) as f:
+        with open(RESULTS_FILE, encoding="utf-8") as f:
             return json.load(f)
     except Exception:
         return {}
@@ -94,7 +101,7 @@ def load_results():
 def save_results(res):
     os.makedirs(RESULTS_DIR, exist_ok=True)
     res["updated"] = time.strftime("%Y-%m-%d %H:%M:%S")
-    with open(RESULTS_FILE, "w") as f:
+    with open(RESULTS_FILE, "w", encoding="utf-8") as f:
         json.dump(res, f, indent=2)
 
 
@@ -169,9 +176,11 @@ def bt_info(mac):
     return info
 
 
-def find_card(mac):
-    """Return {'name', 'profiles': [...], 'active'} for the AirPods' PipeWire card, or None."""
-    out = run(["pactl", "list", "cards"]).stdout
+def find_card(mac, out=None):
+    """Return {'name', 'profiles': [...], 'active'} for the AirPods' PipeWire card, or None.
+    out: `pactl list cards` text (read live when not given)."""
+    if out is None:
+        out = run(["pactl", "list", "cards"]).stdout
     want = f"bluez_card.{mac_us(mac)}"
     blocks = re.split(r"\n(?=Card #)", out)
     for b in blocks:
@@ -199,9 +208,10 @@ def find_card(mac):
     return None
 
 
-def node_names(kind, mac):
-    """kind: 'sinks' or 'sources'. Names of the AirPods' nodes."""
-    out = run(["pactl", "list", "short", kind]).stdout
+def node_names(kind, mac, out=None):
+    """kind: 'sinks' or 'sources'. Names of the AirPods' nodes (out: `pactl list short <kind>` text)."""
+    if out is None:
+        out = run(["pactl", "list", "short", kind]).stdout
     key = mac_us(mac)
     names = []
     for line in out.splitlines():
@@ -241,7 +251,9 @@ def pick_profile(card, kind):
 
 
 def set_profile(mac, profile, want_source=False, timeout=6.0):
-    """Switch the card's profile; return seconds until the sink (and source) exist, or None."""
+    """Switch the card's profile; return seconds until the new mode's nodes exist, or None.
+    Headset mode is ready when the mic source exists; music mode when the headset source is
+    gone again (otherwise the old headset sink, still listed for a moment, counts as ready)."""
     card = f"bluez_card.{mac_us(mac)}"
     t0 = time.time()
     r = run(["pactl", "set-card-profile", card, profile])
@@ -249,8 +261,8 @@ def set_profile(mac, profile, want_source=False, timeout=6.0):
         return None
     while time.time() - t0 < timeout:
         sinks = node_names("sinks", mac)
-        srcs = [s for s in node_names("sources", mac) if "bluez_input" in s or "input" in s]
-        if sinks and (srcs or not want_source):
+        srcs = [s for s in node_names("sources", mac) if "input" in s]
+        if sinks and (bool(srcs) == want_source) and (find_card(mac) or {}).get("active") == profile:
             return round(time.time() - t0, 2)
         time.sleep(0.05)
     return None
@@ -259,6 +271,34 @@ def set_profile(mac, profile, want_source=False, timeout=6.0):
 def play(path, sink=None, timeout=30):
     cmd = ["paplay"] + ([f"--device={sink}"] if sink else []) + [path]
     return run(cmd, timeout=timeout).returncode == 0
+
+
+def keep_playing(sink):
+    """Endless silent stream on the music sink, so the AirPods treat the Pi as 'playing' and
+    send stem presses (AVRCP). Stop it with .terminate() before switching to headset mode."""
+    if not sink:
+        return None
+    try:
+        zero = open("/dev/zero", "rb")
+    except OSError:
+        return None
+    try:
+        return subprocess.Popen(["pacat", "--playback", f"--device={sink}", "--raw", "--format=s16le",
+                                 "--rate=16000", "--channels=1"],
+                                stdin=zero, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError:
+        return None
+    finally:
+        zero.close()       # the child has its own copy
+
+
+def stop_playing(proc):
+    if proc and proc.poll() is None:
+        proc.terminate()
+        try:
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            proc.kill()
 
 
 class Recorder:
@@ -440,28 +480,35 @@ class BtmonWatcher:
 
     def _flush(self, pkt):
         data = bytes(pkt)
-        for m in re.finditer(rb"(AT\+[A-Z]+[=?]?[0-9,\"A-Za-z]*|\+BRSF:\s*\d+|\+BVRA:\s*\d)", data):
+        # AT+XXX (HFP), ATA / ATD (answer / dial: some headsets' button), +BRSF / +BVRA (the Pi's replies)
+        for m in re.finditer(rb"(AT\+[A-Z]+[=?]?[0-9,\"A-Za-z]*|ATA(?=\r)|ATD[0-9>+*#;]*|\+BRSF:\s*\d+|\+BVRA:\s*\d)",
+                             data):
             s = m.group(1).decode(errors="replace")
             self._add("at", s)
 
     def _read(self):
+        with open(self.log_path, "w", encoding="utf-8") as log:
+            self.consume(self.proc.stdout, log)
+
+    def consume(self, lines, log=None):
+        """Parse btmon output lines (live, or sample text in the self-test)."""
         pkt = bytearray()
-        with open(self.log_path, "w") as log:
-            for line in self.proc.stdout:
+        for line in lines:
+            if log:
                 log.write(line)
-                if line[:1] in "<>@=":         # new packet header
-                    self._flush(pkt)
-                    pkt = bytearray()
-                m = self.HEX_LINE.match(line)
-                if m:
-                    try:
-                        pkt += bytes.fromhex(m.group(1).replace(" ", ""))
-                    except ValueError:
-                        pass
-                op = re.search(r"Operation:\s*0x[0-9a-f]+\s*\(([^)]*?)\s+(Pressed|Released)\)", line, re.I)
-                if op:
-                    self._add("avrcp", f"{op.group(1).strip().upper()} {op.group(2).lower()}")
-            self._flush(pkt)
+            if line[:1] in ("<", ">", "@", "="):   # new packet header
+                self._flush(pkt)
+                pkt = bytearray()
+            m = self.HEX_LINE.match(line)
+            if m:
+                try:
+                    pkt += bytes.fromhex(m.group(1).replace(" ", ""))
+                except ValueError:
+                    pass
+            op = re.search(r"Operation:\s*0x[0-9a-f]+\s*\(([^)]*?)\s+(Pressed|Released)\)", line, re.I)
+            if op:
+                self._add("avrcp", f"{op.group(1).strip().upper()} {op.group(2).lower()}")
+        self._flush(pkt)
 
     def since(self, t):
         with self._lock:
@@ -474,6 +521,12 @@ class BtmonWatcher:
                 self.proc.wait(timeout=3)
             except subprocess.TimeoutExpired:
                 self.proc.kill()
+
+
+def key_name(ecodes, code):
+    """evdev key code -> 'KEY_PLAYPAUSE' (some codes have several names; take the first)."""
+    name = ecodes.KEY.get(code, str(code))
+    return name[0] if isinstance(name, (list, tuple)) else name
 
 
 class EvdevWatcher:
@@ -533,10 +586,7 @@ class EvdevWatcher:
                 try:
                     for ev in d.read():
                         if ev.type == self.evdev.ecodes.EV_KEY and ev.value == 1:
-                            name = self.evdev.ecodes.KEY.get(ev.code, str(ev.code))
-                            if isinstance(name, list):
-                                name = name[0]
-                            self.events.append((time.time(), "key", name))
+                            self.events.append((time.time(), "key", key_name(self.evdev.ecodes, ev.code)))
                 except OSError:
                     self.devices = [x for x in self.devices if x is not d]
 
@@ -549,9 +599,12 @@ class EvdevWatcher:
 
 def summarize(events):
     """Unique readable event names, ignoring the SLC chatter."""
+    # connection setup and status polling, not presses (a stray one in the hold window would
+    # otherwise be taken as the hold signal)
     noise = ("AT+CIND", "AT+CMER", "AT+CHLD", "AT+BIND", "AT+BIEV", "AT+XAPL", "AT+IPHONEACCEV",
              "AT+VGS", "AT+VGM", "AT+NREC", "AT+CLIP", "AT+CCWA", "AT+CMEE", "AT+BAC", "AT+BCS",
-             "AT+CSRSF", "AT+APLSIRI", "AT+APLEFM")
+             "AT+CSRSF", "AT+APLSIRI", "AT+APLEFM", "AT+BRSF", "AT+COPS", "AT+CNUM", "AT+CLCC",
+             "AT+BIA", "AT+BTRH", "AT+CSQ", "AT+CBC")
     out = []
     for _, kind, d in events:
         if kind == "at" and (d.startswith(noise) or d.startswith("+BRSF")):
@@ -639,11 +692,19 @@ def step_pair(res):
         ask("  Press Enter when the light is flashing white...")
         say("  Scanning for 20 seconds...")
         bt("--timeout", "20", "scan", "on", timeout=30)
-        devices = []
+        found = []
         for line in bt("devices").stdout.splitlines():
             m = re.match(r"Device ([0-9A-F:]{17}) (.+)", line.strip(), re.I)
-            if m and "airpod" in m.group(2).lower():
-                devices.append((m.group(1).upper(), m.group(2)))
+            if m:
+                found.append((m.group(1).upper(), m.group(2)))
+        devices = [d for d in found if "airpod" in d[1].lower()]
+        if not devices and found:
+            # the name isn't always resolved during a scan (shows as the MAC with dashes)
+            say("  Nothing named 'AirPods' showed up. Devices seen:")
+            for i, (m_, n_) in enumerate(found, 1):
+                say(f"    {i}. {n_} ({m_})")
+            pick = ask_int("  Number of the AirPods (0 = none of these)? [0]", 0, 0, len(found))
+            devices = [found[pick - 1]] if pick else []
         if not devices:
             say("  No AirPods found. Check the white light and try again, or pair by hand:")
             say("    bluetoothctl  ->  power on  ->  scan on  ->  pair <MAC>  ->  trust <MAC>  ->  connect <MAC>")
@@ -652,8 +713,7 @@ def step_pair(res):
         if len(devices) > 1:
             for i, (m_, n_) in enumerate(devices, 1):
                 say(f"    {i}. {n_} ({m_})")
-            pick = int(ask("  Which one? [1]", "1")) - 1
-            mac, name = devices[max(0, min(pick, len(devices) - 1))]
+            mac, name = devices[ask_int("  Which one? [1]", 1, 1, len(devices)) - 1]
         else:
             mac, name = devices[0]
         say(f"  Found {name} ({mac}). Pairing...")
@@ -675,10 +735,12 @@ def step_pair(res):
         time.sleep(2)
     connected = bt_info(mac).get("Connected") == "yes"
     conn_s = round(time.time() - t0, 1)
+    # the card appears with music mode first; the headset (HFP) profile follows once its own
+    # connection is set up, often a few seconds later
     card = None
-    for _ in range(40):
+    for _ in range(48):
         card = find_card(mac)
-        if card:
+        if card and pick_profile(card, "hfp"):
             break
         time.sleep(0.25)
 
@@ -756,6 +818,19 @@ GESTURES = [
 ]
 
 
+def pick_trigger(results):
+    """results: {gesture: [summarized events]} -> (trigger, hold_event, double_event).
+    Hold counts if it sent AT+BVRA (voice recognition) or anything single/double press didn't."""
+    hold_sig = [e for e in results.get("hold", []) if "BVRA" in e]
+    hold_unique = [e for e in results.get("hold", [])
+                   if e not in results.get("single", []) and e not in results.get("double", [])]
+    double_sig = [e for e in results.get("double", []) if re.search(r"NEXT|FORWARD", e)]
+    hold_event = (hold_sig or hold_unique or [None])[0]
+    double_event = (double_sig or [None])[0]
+    trigger = "hold" if hold_event else "double" if double_event else "none"
+    return trigger, hold_event, double_event
+
+
 def step_buttons(res):
     head("4. BUTTONS - which stem presses reach the Pi?")
     mac = need_mac(res)
@@ -781,7 +856,7 @@ def step_buttons(res):
     time.sleep(2)
     bt("connect", mac, timeout=25)
     time.sleep(4)
-    handshake = [d for _, k, d in btmon.events if k == "at"]
+    handshake = [d for _, k, d in btmon.since(0) if k == "at"]
     ag_feat = None
     for d in handshake:
         m = re.match(r"\+BRSF:\s*(\d+)", d)
@@ -791,10 +866,7 @@ def step_buttons(res):
 
     # keep music mode active with a silent stream so the AirPods treat it as "playing"
     sink, _ = to_a2dp(mac)
-    silence = os.path.join(RESULTS_DIR, "silence.wav")
-    write_wav(silence, b"\x00\x00" * RATE * 60)
-    keep = subprocess.Popen(["paplay", f"--device={sink}", silence],
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) if sink else None
+    keep = keep_playing(sink)
 
     results = {}
     try:
@@ -812,31 +884,17 @@ def step_buttons(res):
             results[key] = got
             say(f"     seen: {', '.join(got) if got else 'nothing'}")
     finally:
-        if keep:
-            keep.terminate()
+        stop_playing(keep)
         btmon.stop()
         evw.stop()
 
-    hold_sig = [e for e in results.get("hold", []) if "BVRA" in e]
-    hold_any = results.get("hold", [])
-    hold_unique = [e for e in hold_any if e not in results.get("single", []) and e not in results.get("double", [])]
-    double_sig = [e for e in results.get("double", []) if re.search(r"NEXT|FORWARD", e)]
-
-    if hold_sig:
-        trigger = "hold"
-    elif hold_unique:
-        trigger = "hold"
-    elif double_sig:
-        trigger = "double"
-    else:
-        trigger = "none"
-
+    trigger, hold_event, double_event = pick_trigger(results)
     res["buttons"] = {
         "ok": trigger != "none",
         "trigger": trigger,
         "seen": results,
-        "hold_event": (hold_sig or hold_unique or [None])[0],
-        "double_event": (double_sig or [None])[0],
+        "hold_event": hold_event,
+        "double_event": double_event,
         "btmon": have_btmon,
         "evdev_devices": [d.name for d in evw.devices],
         "evdev_error": evw.error,
@@ -897,6 +955,13 @@ def mic_once(mac, kind, seconds=6):
     return out
 
 
+def best_mic(runs):
+    """The usable recording with the lowest word error (then best rating), or None. Usable = word
+    error <= 35% or rated 3+/5; a run with no transcript (no Whisper) is judged on its rating alone."""
+    good = [o for o in runs if o.get("ok") and (o.get("wer", 1) <= 0.35 or o.get("rating", 0) >= 3)]
+    return min(good, key=lambda o: (o.get("wer", 1), -o.get("rating", 0))) if good else None
+
+
 def step_mic(res):
     head("5. MIC - headset mode (HFP): does the AirPods mic work?")
     mac = need_mac(res)
@@ -936,10 +1001,10 @@ def step_mic(res):
             say(f"  Playing back the {out['codec']} recording...")
             time.sleep(0.4)
             play(os.path.join(REPO, out["file"]), sink)
-            out["rating"] = int(ask("     How clear was your voice, 1 (unusable) to 5 (like a phone call)? [3]", "3"))
+            out["rating"] = ask_int("     How clear was your voice, 1 (unusable) to 5 (like a phone call)? [3]",
+                                    3, 1, 5)
 
-    good = [o for o in runs if o.get("ok") and (o.get("wer", 0) <= 0.35 or o.get("rating", 0) >= 3)]
-    best = min(good, key=lambda o: (o.get("wer", 1), -o.get("rating", 0))) if good else None
+    best = best_mic(runs)
     res["mic"] = {"ok": bool(best), "best": best and best["codec"], "runs": runs,
                   "back_to_music_s": back_s, "sco_fix": sco_msg[-200:]}
     say()
@@ -969,8 +1034,17 @@ def _enter_queue():
     return _enter_q
 
 
-def wait_trigger(res, btmon, evw, timeout=None):
-    """Block until the chosen trigger happens. Returns how it was triggered."""
+def wait_trigger(res, btmon, evw, sink=None, timeout=None):
+    """Block until the chosen trigger happens. Returns how it was triggered. A silent stream plays
+    on the music sink meanwhile, as in the buttons step (stem presses need 'playing')."""
+    keep = keep_playing(sink)
+    try:
+        return _wait_trigger(res, btmon, evw, timeout)
+    finally:
+        stop_playing(keep)
+
+
+def _wait_trigger(res, btmon, evw, timeout):
     b = res.get("buttons", {})
     trig = b.get("trigger", "none")
     hold_ev, dbl_ev = b.get("hold_event"), b.get("double_event")
@@ -1037,13 +1111,13 @@ def step_jarvis(res, url=None):
     evw.start()
     chime = tone_wav(os.path.join(RESULTS_DIR, "chime.wav"), [(880, 0.12), (0, 0.05), (1320, 0.18)])
     done_tone = tone_wav(os.path.join(RESULTS_DIR, "done.wav"), [(1320, 0.1), (0, 0.04), (880, 0.14)])
-    to_a2dp(mac)
+    sink, _ = to_a2dp(mac)
 
     turns = []
     say("  Try a few real commands (\"what time is it\", \"what's on my agenda today\").")
     try:
         while True:
-            how = wait_trigger(res, btmon, evw)
+            how = wait_trigger(res, btmon, evw, sink)
             if not how:
                 break
             t = {"trigger": how}
@@ -1053,7 +1127,7 @@ def step_jarvis(res, url=None):
             sinks = node_names("sinks", mac)
             if sw is None or not srcs:
                 say("  Headset mode didn't start; try again.")
-                to_a2dp(mac)
+                sink, _ = to_a2dp(mac)
                 continue
             if sinks:
                 play(chime, sinks[0])
@@ -1141,15 +1215,11 @@ def step_jarvis(res, url=None):
 
 
 def new_entries(before, log):
-    """Same logic as phone.html: entries after the last one we'd already seen."""
-    if not before:
-        return log
-    last = before[-1]
-    for i in range(len(log) - 1, -1, -1):
-        e = log[i]
-        if e.get("role") == last.get("role") and e.get("text") == last.get("text") and e.get("time") == last.get("time"):
-            return log[i + 1:]
-    return log
+    """Entries in `log` (the /status conversation log) that weren't in `before`. Compared as a set
+    rather than by the last entry: a corrected transcript changes an old entry's text, and the
+    log keeps only the last 40, either of which made 'after the last seen one' return old replies."""
+    seen = {(e.get("role"), e.get("time"), e.get("sample") or e.get("text")) for e in before}
+    return [e for e in log if (e.get("role"), e.get("time"), e.get("sample") or e.get("text")) not in seen]
 
 
 # ── report ────────────────────────────────────────────────────────────────────
@@ -1235,7 +1305,7 @@ def write_report(res):
           "A pass here is a strong sign for the Zero, not a guarantee; rerun this bench on the Zero when it arrives.",
           "", "<details><summary>Raw results</summary>", "", "```json",
           json.dumps({k: v for k, v in res.items() if k != "config"}, indent=1)[:6000], "```", "</details>"]
-    with open(REPORT_FILE, "w") as f:
+    with open(REPORT_FILE, "w", encoding="utf-8") as f:
         f.write("\n".join(L) + "\n")
     return v, why
 
@@ -1243,7 +1313,7 @@ def write_report(res):
 def step_report(res):
     v, why = write_report(res)
     head("REPORT")
-    with open(REPORT_FILE) as f:
+    with open(REPORT_FILE, encoding="utf-8") as f:
         text = f.read()
     say(text.split("<details>")[0])
     say(f"Full report: {os.path.relpath(REPORT_FILE, REPO)}  (paste it to Claude)")
@@ -1253,14 +1323,19 @@ def step_report(res):
 
 def main():
     ap = argparse.ArgumentParser(description="AirPods bench test for the Jarvis pocket device")
-    ap.add_argument("step", choices=["check", "pair", "sound", "buttons", "mic", "jarvis", "all", "report", "reset"])
+    ap.add_argument("step", choices=["check", "pair", "sound", "buttons", "mic", "jarvis", "all", "report", "reset",
+                                     "selftest"])
     ap.add_argument("--jarvis", help="PC Jarvis address, e.g. https://my-pc.tail1234.ts.net:5151")
     args = ap.parse_args()
 
+    if args.step == "selftest":            # offline, no Bluetooth, runs anywhere
+        from bench_selftest import selftest
+        sys.exit(0 if selftest() else 1)
     if os.geteuid() == 0:
         say("Run as your normal user (no sudo) - audio lives in your user session.")
         sys.exit(1)
     os.environ.setdefault("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+    os.makedirs(RESULTS_DIR, exist_ok=True)
     res = load_results()
 
     try:

@@ -50,7 +50,10 @@ def send_raw(dev):
         s.send(packet)
         deadline = time.time() + 2.0
         while time.time() < deadline:
-            data = s.recv(260)
+            try:
+                data = s.recv(260)
+            except socket.timeout:
+                break
             if len(data) < 3 or data[0] != HCI_EVENT_PKT:
                 continue
             evt = data[1]

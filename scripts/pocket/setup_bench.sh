@@ -41,7 +41,9 @@ sudo usermod -aG input,bluetooth,audio "$USER"
 sudo loginctl enable-linger "$USER"
 
 step "Configuring WirePlumber for headset mode (HFP gateway, mSBC, no seat check)"
-WP_VER="$(wireplumber --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+' | head -1 || echo 0.5)"
+WP_VER="$(dpkg-query -W -f='${Version}' wireplumber 2>/dev/null | grep -oE '^[0-9]+\.[0-9]+' || true)"
+[ -n "$WP_VER" ] || WP_VER="$(wireplumber --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+' | head -1 || true)"
+[ -n "$WP_VER" ] || WP_VER="0.5"
 if [ "$(printf '%s\n' "$WP_VER" 0.5 | sort -V | head -1)" = "0.5" ]; then
     mkdir -p "$HOME/.config/wireplumber/wireplumber.conf.d"
     cp "$HERE/config/51-jarvis-bluetooth.conf" "$HOME/.config/wireplumber/wireplumber.conf.d/"
@@ -62,7 +64,8 @@ step "Installing the SCO routing fix (headset mic over HCI) as a boot service"
 sudo tee /etc/systemd/system/jarvis-bt-sco.service >/dev/null <<EOF
 [Unit]
 Description=Jarvis: route Bluetooth SCO (headset mic) audio over HCI
-After=bluetooth.service
+# bthelper@hci0 (Raspberry Pi OS) power-cycles the adapter at boot; run after it
+After=bluetooth.service bthelper@hci0.service
 Requires=bluetooth.service
 
 [Service]
@@ -80,8 +83,10 @@ sudo systemctl restart jarvis-bt-sco.service || echo "    (will retry at boot)"
 
 step "Python environment for the bench ($VENV)"
 python3 -m venv --system-site-packages "$VENV"
-"$VENV/bin/pip" install --upgrade pip >/dev/null
-"$VENV/bin/pip" install faster-whisper sherpa-onnx
+"$VENV/bin/pip" install --upgrade pip >/dev/null || true
+# Both are optional for the bench (accuracy scoring, Piper voice), so a failed install doesn't stop setup
+"$VENV/bin/pip" install faster-whisper || echo "    faster-whisper failed to install - the mic test runs without accuracy scoring."
+"$VENV/bin/pip" install sherpa-onnx || echo "    sherpa-onnx failed to install - replies use espeak-ng instead of Piper."
 
 step "Downloading the speech-recognition model (Whisper base.en)"
 "$VENV/bin/python" -c "from faster_whisper import WhisperModel; WhisperModel('base.en', device='cpu', compute_type='int8')" \
