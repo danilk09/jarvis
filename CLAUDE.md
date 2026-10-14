@@ -244,7 +244,7 @@ Edit them at `http://localhost:5151/workspaces`. Changes save instantly and hot-
 
 ## Background mode
 
-**Installed (2026-10-11)** as the `JARVIS` login task. `python jarvis.py --background` skips opening the browser, sends all output to `logs/jarvis.log` (rotated), hides the console windows of programs it runs, and refreshes the file/bookmark/app indexes hourly. `scripts/install_startup.ps1` registers that command (via `pythonw.exe`, no console) as a login task; `scripts/uninstall_startup.ps1` removes it.
+**Installed (2026-10-11)** as the `JARVIS` login task. `python jarvis.py --background` skips opening the browser, sends all output to `logs/jarvis.log` (rotated), hides the console windows of programs it runs, raises itself to normal priority with Windows power throttling off (`background.full_speed` — Task Scheduler starts tasks "below normal", and windowless processes get EcoQoS), and refreshes the file/bookmark/app indexes hourly. `scripts/install_startup.ps1` registers that command (via `pythonw.exe`, no console) as a login task; `scripts/uninstall_startup.ps1` removes it.
 
 **Shortcut** — `scripts/install_shortcut.ps1` puts a "Jarvis" shortcut (icon `desktop/icon.ico`, drawn by `scripts/make_icon.py`) on the Desktop and in the Start menu. It runs `scripts/jarvis_launcher.pyw`: if Jarvis is running, `POST /api/window` opens/focuses its window; otherwise it starts `pythonw jarvis.py --background --window` (background mode, but with the window — `config.OPEN_WINDOW`).
 

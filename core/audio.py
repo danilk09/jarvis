@@ -498,7 +498,9 @@ def capture_followup():
     if not frames:
         return ""
     print("  Processing speech...")
+    t0 = time.monotonic()
     heard, raw = transcribe_full(frames)
+    took = time.monotonic() - t0
     voice_from = max(0, len(_wake_info["preroll"]) - _wake_info.get("lag", 0) - int(1.2 * FRAMES_PER_SEC))
     _keep(frames, heard, raw, voice_from=voice_from)
     match = _WAKE_ANYWHERE.search(heard)
@@ -511,7 +513,7 @@ def capture_followup():
         print(f'  Wake word heard as "{heard[:end].strip(" ,.")}" — accepting it')
     text = heard[end:].strip()
     if text:
-        print(f'  Heard: "{text}"')
+        print(f'  Heard: "{text}" ({took:.1f} s)')
     return text
 
 
@@ -554,6 +556,7 @@ def _listen(max_duration, silence_duration, onset_timeout):
         print("  No speech detected.")
         return ""
     print("  Processing speech...")
+    t0 = time.monotonic()
     try:
         text, raw = transcribe_full(frames)
     except Exception as e:
@@ -562,7 +565,7 @@ def _listen(max_duration, silence_duration, onset_timeout):
         return ""
     _keep(frames, text, raw)
     if text:
-        print(f'  Heard: "{text}"')
+        print(f'  Heard: "{text}" ({time.monotonic() - t0:.1f} s)')
     else:
         print("  Could not understand audio.")
     return text

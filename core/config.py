@@ -51,8 +51,8 @@ PIPER_VOICE = "vits-piper-en_GB-northern_english_male-medium"
 PIPER_SPEED = 1.0      # 0.8 (slower) to 1.3 (faster)
 # Pauses Jarvis takes (seconds) after a sentence (. ! ?) and at a dash. Commas are left to the
 # voice itself: it reads each sentence in one go, which keeps its intonation natural.
-PIPER_SENTENCE_PAUSE = 0.45
-PIPER_DASH_PAUSE     = 0.3
+PIPER_SENTENCE_PAUSE = 0.35
+PIPER_DASH_PAUSE     = 0.25
 TTS_DIR     = os.path.join(ROOT, "models", "tts")
 # Words Jarvis says wrong → SAPI American English phonemes (vowels: ax = "uh", ah = "u" in
 # "cut", iy = "ee", ih = "i" in "sit", ey = "ay", ay = "eye", ow = "oh", uw = "oo"; a 1 after
