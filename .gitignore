@@ -17,3 +17,7 @@ models/tts/
 models/whisper-*/
 jarvis_voice_data.zip
 jarvis_delegate/
+
+# pocket-device bench (scripts/pocket)
+scripts/pocket/.venv/
+scripts/pocket/results/
