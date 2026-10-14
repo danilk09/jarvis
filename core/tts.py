@@ -386,14 +386,16 @@ def _onsets(level):
     return beats
 
 
-def _speak_piper(text, update_state):
-    """Say `text` with the Piper voice. False if nothing could be rendered (SAPI takes over)."""
+def _speak_piper(text, update_state, lead=0.0):
+    """Say `text` with the Piper voice, after `lead` seconds of silence. False if nothing could
+    be rendered (SAPI takes over)."""
     tts = _piper["tts"]
     rendered, cancel = queue.Queue(), threading.Event()
 
     def render():
         try:
-            for phrase, pause in _phrases(_piper_text(text)):
+            phrases = _phrases(_piper_text(text))
+            for n, (phrase, pause) in enumerate(phrases):
                 if cancel.is_set():
                     break
                 with _piper["lock"]:
@@ -403,8 +405,13 @@ def _speak_piper(text, update_state):
                 loud = np.flatnonzero(np.abs(pcm) > 0.01)
                 if len(loud):   # Piper's own leading/trailing silence varies; replace it with `pause`
                     pcm = pcm[max(0, loud[0] - int(0.02 * sr)):loud[-1] + int(0.03 * sr)]
-                    rendered.put(np.concatenate([pcm, np.zeros(int(pause / config.PIPER_SPEED * sr),
-                                                                np.float32)]))
+                    # No pause after the last phrase: whatever comes next (listening for the
+                    # command, the next line) shouldn't wait on silence. The worker puts the
+                    # gap before a line that follows straight on instead (`lead`).
+                    after = pause / config.PIPER_SPEED if n + 1 < len(phrases) else 0
+                    before = lead if n == 0 else 0
+                    rendered.put(np.concatenate([np.zeros(int(before * sr), np.float32), pcm,
+                                                 np.zeros(int(after * sr), np.float32)]))
         except Exception as e:
             rendered.put(e)
         rendered.put(None)
@@ -481,7 +488,7 @@ def _worker():
     voice = _make_voice()
     meter = _make_voice()     # silent twin that renders to memory for the orb's envelope
     _ready.set()
-    talking = False
+    talking, ended = False, 0.0   # ended: when the last Piper line finished playing
     while True:
         try:
             # While talking, a short lull ends the speech (not every gap between sentences)
@@ -505,7 +512,11 @@ def _worker():
                 except Exception as e:
                     print(f"  on_start callback error: {e}")
             if config.PIPER_VOICE and _piper_loaded.wait(10) and _piper["tts"]:
-                if _speak_piper(text, update_state):
+                # A line right after another gets the pause between sentences
+                lead = max(0.0, config.PIPER_SENTENCE_PAUSE / config.PIPER_SPEED - (time.time() - ended))
+                spoke = _speak_piper(text, update_state, lead)
+                ended = time.time()
+                if spoke:
                     continue
                 print("  Piper voice produced nothing — using the Windows voice")
             _say(voice, text, _ASYNC | _IS_NOT_XML)

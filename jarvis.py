@@ -16,6 +16,7 @@ if config.BACKGROUND_MODE:
     from core import background
     background.setup_logging()   # before anything prints (pythonw.exe has no console)
     background.hide_child_consoles()
+    background.full_speed()      # the login task starts us at "below normal", throttled
 
 import socket
 import sys

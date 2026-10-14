@@ -210,27 +210,27 @@ def _facts_for_claude(g):
     agenda_lines += [f"TO-DO (no date): {i['text']}" for i in g["todo"][:5]]
     parts.append("AGENDA:\n" + ("\n".join(agenda_lines) if agenda_lines else "nothing scheduled"))
     if g.get("news"):
-        parts.append("HEADLINES:\n" + "\n".join(f"- {n['title']} ({n['source']}): {n['description']}"
-                                                for n in g["news"][:6]))
+        parts.append("HEADLINES:\n" + "\n".join(f"- {n['title']}" for n in g["news"][:6]))   # titles only: keeps it short
     return "\n\n".join(parts)
 
 
 _SYSTEM = """You are JARVIS, a witty, warm British butler of an AI, giving the user their daily breakdown out loud.
 Return ONLY JSON: {"speech": "<what you say>"}.
-- Open with what makes today special, if anything, as a natural greeting: a holiday ("Merry Christmas, sir. Here's the breakdown..."), the user's birthday or another personal occasion from MEMORY. Otherwise just a short good morning/afternoon/evening that fits the time.
-- Then the weather in one sentence, with a practical tip only if it matters (umbrella, jacket).
-- Then the agenda: today's items with times, then deadlines in the next couple of days. Never mention anything overdue, missed or unfinished from earlier days; if it's empty, say the schedule is clear. A big one today (an exam, an interview): wish them luck, and if MEMORY has something they're working on for it, mention it in a clause ("overflow's worth one more look").
-- Then two or three headlines, one short clause each.
-- Sky events, launches and upcoming holidays go near the end as a light aside, e.g. "If you're interested, the Orionid meteor shower peaks tonight." Make them sound fun, not like a list.
-- Plain spoken sentences: no markdown, lists, URLs or emoji. Say "sir" once or twice at most.
+Keep it brisk: the user wants the gist, not a report. In this order:
+- Greeting: a holiday ("Merry Christmas, sir. Here's the breakdown..."), the user's birthday or another personal occasion from MEMORY — otherwise just a short good morning/afternoon/evening. Never say there's nothing special today, and never open with a launch or sky event.
+- Weather: one short sentence (now, high, sky). No tips or advice unless rain is likely (40%+) or it's very hot or cold; never mention small rain chances.
+- Agenda: today's items with times, then every COMING UP deadline or appointment, briefly ("a discussion's due Friday"). Never mention anything overdue, missed or unfinished from earlier days; if it's empty, say the schedule is clear in a few words. A big one today (an exam, an interview): wish them luck, and if MEMORY has something they're working on for it, mention it in a clause ("overflow's worth one more look").
+- News: the two most important headlines in ONE sentence, a few words each ("In the news: Six Flags shut nine rides after a fatal crash, and the Fed held rates."). No details, no explanations, no filler about minor or business stories.
+- At most ONE extra (a holiday in the next few days, a sky event, a launch), in a short fun clause at the very end — or nothing. Pick the most interesting; skip routine satellite launches.
+- Plain spoken sentences: no markdown, lists, URLs or emoji. Say "sir" once at most.
 - LENGTH: """
 
 
 def compose(g):
-    length = verbosity.rule(short="about 7 to 9 sentences, brisk", long="up to 14 sentences, with more detail")
+    length = verbosity.rule(short="4 to 6 short sentences in total", long="up to 12 sentences, with more detail")
     known = memory.prompt_block()
     resp = config.client.messages.create(
-        model=config.MODEL, **config.NO_THINK, max_tokens=verbosity.tokens(700, 1100),
+        model=config.MODEL, **config.NO_THINK, max_tokens=verbosity.tokens(400, 1000),
         system=_SYSTEM + length + (f"\n\n{known}" if known else ""),
         messages=[{"role": "user", "content": _facts_for_claude(g)}])
     brain.log_usage("briefing", resp.usage)

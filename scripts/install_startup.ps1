@@ -11,7 +11,7 @@ if (-not (Test-Path $pythonw)) { throw "pythonw.exe not found next to $python" }
 
 $action   = New-ScheduledTaskAction -Execute $pythonw -Argument "`"$root\jarvis.py`" --background" -WorkingDirectory $root
 $trigger  = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
-$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -Priority 4 `
             -ExecutionTimeLimit (New-TimeSpan -Seconds 0) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
 
 Register-ScheduledTask -TaskName "JARVIS" -Action $action -Trigger $trigger -Settings $settings `

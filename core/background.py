@@ -72,6 +72,31 @@ def hide_child_consoles():
     subprocess.Popen.__init__ = init
 
 
+def full_speed():
+    """Task Scheduler starts tasks at "below normal" priority, and Windows 11 throttles windowless
+    background processes (EcoQoS: slow cores, low clocks — most of all on battery). Jarvis is
+    latency-sensitive (Whisper, the voice), so run at normal priority, unthrottled. Programs it
+    starts (mpv, Claude Code) inherit this."""
+    if os.name != "nt":
+        return
+    import ctypes
+    from ctypes import wintypes
+
+    class _Throttling(ctypes.Structure):   # PROCESS_POWER_THROTTLING_STATE
+        _fields_ = [("Version", wintypes.ULONG), ("ControlMask", wintypes.ULONG), ("StateMask", wintypes.ULONG)]
+
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.GetCurrentProcess.restype = wintypes.HANDLE   # else the 64-bit pseudo-handle is truncated
+    k32.SetPriorityClass.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    k32.SetProcessInformation.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+    me = k32.GetCurrentProcess()
+    k32.SetPriorityClass(me, 0x20)   # NORMAL_PRIORITY_CLASS
+    # ControlMask EXECUTION_SPEED with StateMask 0 = never throttle (ProcessPowerThrottling = 4)
+    state = _Throttling(1, 1, 0)
+    if not k32.SetProcessInformation(me, 4, ctypes.byref(state), ctypes.sizeof(state)):
+        print(f"  Could not turn off power throttling (error {ctypes.get_last_error()})")
+
+
 def start_index_refresh():
     from . import files
 
