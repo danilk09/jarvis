@@ -68,6 +68,7 @@
     #reply:empty { display: none; }
     #reply p + p { margin-top: 8px; }
     #reply-hint { margin-top: 6px; font-size: 0.7rem; color: #444; text-align: center; display: none; }
+    #power { display: none; margin-top: 28px; font-size: 0.75rem; letter-spacing: 0.15em; color: #555; text-decoration: none; }
     .error   { color: #e74c3c !important; }
     .success { color: #2ecc71 !important; }
   </style>
@@ -98,7 +99,20 @@
   <div id="command"></div>
   <div id="reply"></div>
   <div id="reply-hint">Tap the reply to hear it</div>
+  <!-- Pi only: the power switch (scripts/pi/control.py, port 5152) has the Start/Stop buttons;
+       it stays up while Jarvis is off, which this page can't -->
+  <a id="power" href="#">⏻ POWER</a>
 
+  <script>
+    (function () {
+      const url = location.protocol + '//' + location.hostname + ':5152/';
+      fetch(url, { mode: 'no-cors', cache: 'no-store' }).then(() => {
+        const a = document.getElementById('power');
+        a.href = url;
+        a.style.display = 'inline-block';
+      }).catch(() => {});        // no switch here (the PC): no link
+    })();
+  </script>
   <script>
     const btn = document.getElementById('btn');
     const statusEl = document.getElementById('status');

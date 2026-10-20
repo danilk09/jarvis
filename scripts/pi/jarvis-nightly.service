@@ -1,0 +1,10 @@
+# Stops Jarvis for the night (run by jarvis-nightly.timer). Installed by install_service.sh.
+[Unit]
+Description=Stop Jarvis for the night
+
+[Service]
+Type=oneshot
+User=__USER__
+WorkingDirectory=__ROOT__
+ExecStart=/usr/bin/python3 __ROOT__/scripts/pi/control.py nightly
+Environment=PATH=/usr/local/bin:/usr/bin:/bin

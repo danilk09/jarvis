@@ -4,7 +4,7 @@
 #
 #     cd ~/jarvis && bash scripts/pi/setup_pi.sh
 #
-# Then copy your data from the PC (runbook step 9) and install the service:
+# Then copy your data from the PC (scripts/pi/push_to_pi.ps1, run on the PC) and install the service:
 #     bash scripts/pi/install_service.sh
 
 set -e
@@ -13,9 +13,11 @@ ROOT="$(pwd)"
 
 echo "== System packages"
 # ffmpeg: phone recordings → WAV for Whisper. nodejs/npm: yt-dlp's YouTube challenges and the
-# npx-based MCP servers. tmux: "continue this on my phone" (Claude Code Remote Control).
+# npx-based MCP servers. tmux: "continue this on my phone" (Claude Code Remote Control) and long
+# diagnostics runs. stress-ng / fio / espeak-ng: scripts/pi/diag (heat, SD card, load tests).
 sudo apt-get update
-sudo apt-get install -y git python3-venv python3-dev build-essential ffmpeg nodejs npm tmux curl
+sudo apt-get install -y git python3-venv python3-dev build-essential ffmpeg nodejs npm tmux curl \
+    stress-ng fio espeak-ng
 
 echo "== uv (runs the Python MCP servers with uvx)"
 if ! command -v uvx >/dev/null 2>&1 && [ ! -x "$HOME/.local/bin/uvx" ]; then
@@ -25,9 +27,11 @@ fi
 echo "== Python environment (.venv)"
 [ -d .venv ] || python3 -m venv .venv
 .venv/bin/pip install --upgrade pip
-# No sounddevice/vosk (no mic on the Pi), no pycaw/comtypes (Windows only)
+# No sounddevice/vosk (no mic on the Pi), no pycaw/comtypes (Windows only).
+# webrtcvad-wheels: same `webrtcvad` module with prebuilt wheels; the original imports
+# pkg_resources, which new setuptools removed (it would silently fall back to a cruder VAD).
 .venv/bin/pip install anthropic python-dotenv Pillow numpy faster-whisper requests \
-    flask flask-cors webrtcvad "yt-dlp[default]" pypdf trafilatura sherpa-onnx
+    flask flask-cors webrtcvad-wheels "yt-dlp[default]" pypdf trafilatura sherpa-onnx
 
 echo "== Whisper model (downloaded once, ~150 MB)"
 .venv/bin/python - <<'EOF'
@@ -63,6 +67,7 @@ else
 fi
 
 echo
-[ -f .env ] || echo "No .env yet: copy it from the PC (runbook step 9)."
+[ -f .env ] || echo "No .env yet: on the PC, run  powershell -File scripts\\pi\\push_to_pi.ps1 <user>@<pi>"
 echo "Done. Try it in the foreground first:   .venv/bin/python jarvis.py"
 echo "Then run it as a service:               bash scripts/pi/install_service.sh"
+echo "Health checks:                          ./scripts/pi/diag check"

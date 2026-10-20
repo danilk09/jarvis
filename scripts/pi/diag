@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Pi 5 health checks for Jarvis:  ./scripts/pi/diag check|sd|stress|load|soak|report|selftest
+# Standard-library Python only, so it runs before (or without) Jarvis's setup.
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec python3 "$HERE/diagnose.py" "$@"

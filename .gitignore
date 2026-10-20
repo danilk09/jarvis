@@ -18,6 +18,9 @@ models/whisper-*/
 jarvis_voice_data.zip
 jarvis_delegate/
 
+# Pi health checks (scripts/pi/diag)
+scripts/pi/results/
+
 # pocket-device bench (scripts/pocket)
 scripts/pocket/.venv/
 scripts/pocket/results/

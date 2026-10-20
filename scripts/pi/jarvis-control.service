@@ -1,0 +1,20 @@
+# Jarvis's power switch (scripts/pi/control.py): the Start/Stop page on port 5152, the heat
+# guard, and restoring Jarvis's on/off state after a reboot. Installed by install_service.sh,
+# which fills in __USER__ and __ROOT__.
+[Unit]
+Description=Jarvis power switch (port 5152)
+Wants=network-online.target
+After=network-online.target tailscaled.service
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__ROOT__
+ExecStart=/usr/bin/python3 __ROOT__/scripts/pi/control.py serve
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+Environment=PYTHONUNBUFFERED=1
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

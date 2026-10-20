@@ -1,0 +1,12 @@
+# Every night at 11 PM (the Pi's own time zone - check it with: timedatectl), in case Jarvis
+# was left on. Persistent=false: if the Pi was off at 11 PM, nothing happens at the next boot.
+# Change the time here, then rerun install_service.sh (and NIGHTLY in control.py for the page).
+[Unit]
+Description=Stop Jarvis every night at 11 PM
+
+[Timer]
+OnCalendar=*-*-* 23:00:00
+Persistent=false
+
+[Install]
+WantedBy=timers.target
