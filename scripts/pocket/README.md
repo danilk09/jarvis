@@ -7,7 +7,8 @@ Zero 2 W later, with the same commands.
 It answers four questions:
 
 1. Does music mode (A2DP) play from the Pi to the AirPods?
-2. Which stem presses reach Linux? Press-and-hold (preferred trigger), double-press (fallback)?
+2. Which stem presses reach Linux, and can the left and right earbuds be told apart (left = Jarvis,
+   right = music)? Press-and-hold too?
 3. Does the AirPods mic work in headset mode (HFP), and how clear is it (mSBC 16 kHz vs CVSD 8 kHz)?
 4. End to end: press, speak, PC Jarvis answers, reply plays in your ears. How fast?
 
@@ -41,13 +42,10 @@ Pi, installs the **SCO routing fix** (the Pi's Bluetooth chip sends headset-mic 
 unused pins by default, so the mic would record silence), and downloads Whisper and
 Jarvis's Piper voice.
 
-## 3. Set the AirPods button (on the iPhone)
+## 3. Before the test
 
-Settings -> your AirPods Pro -> Press and Hold: set **one earbud to Siri** (that one becomes
-the Jarvis button). Note the model shown there (1st or 2nd generation).
-
-During the test keep the iPhone's Bluetooth **off** (or the phone far away), or it will grab
-the AirPods back.
+Keep the iPhone's Bluetooth **off** (or the phone far away) during the test, or it will grab the
+AirPods back. No iPhone button settings are needed: the bench takes the presses over itself.
 
 ## 4. Run the test (~15 min)
 
@@ -61,11 +59,11 @@ It walks you through each step and waits for you:
 | Step | What you do | What it measures |
 |---|---|---|
 | check | nothing | Bluetooth, PipeWire, the WirePlumber config, SCO fix, groups |
-| pair | case lid open, hold the case button until white (if the AirPods show up without their name, pick them from the list) | pairing, which audio profiles appear (waits ~12 s for the headset profile) |
-| sound | listen | chime + sentence in music mode: heard or not |
-| buttons | hold / double / single / triple press, 6 s each | which events reach the Pi (HFP AT commands via `btmon`, AVRCP keys via evdev; a silent stream plays meanwhile so the AirPods send presses); also the HFP handshake |
+| pair | case lid open, hold the case button until white, press Enter (if the AirPods show up without their name, pick them from the list) | pairing in an interactive `bluetoothctl` session (pairs as soon as they appear in the scan), which audio profiles appear (waits ~12 s for the headset profile) |
+| sound | listen | chime + sentence in music mode, after 1 s of silence to wake the link: heard or not |
+| buttons | 7 gestures, 6 s each: left single / double / triple / hold, right single / double / hold | which events reach the Pi: stem presses with left/right over Apple's protocol (AAP), HFP AT commands via `btmon`, AVRCP keys via evdev (a silent stream plays meanwhile so the AirPods send presses); also the HFP handshake |
 | mic | say the sentence after each chime, then rate the playback 1-5 | mSBC and CVSD: level, mode-switch time, Whisper transcript, word error |
-| jarvis (optional) | press your trigger, give real commands, Ctrl+C to stop | full round trip to the PC Jarvis and its latency |
+| jarvis (optional) | press your trigger (or Enter), give real commands, Ctrl+C to stop; right-earbud presses are shown as the music control they'd become | full round trip to the PC Jarvis and its latency |
 
 Steps can be run on their own: `./scripts/pocket/bench mic`, `./scripts/pocket/bench jarvis --jarvis https://your-pc.tail1234.ts.net:5151`.
 `./scripts/pocket/bench report` prints the summary again; `./scripts/pocket/bench reset` clears results (keeps the pairing).
@@ -82,8 +80,10 @@ Results go to `scripts/pocket/results/` (git-ignored):
 
 | Verdict | Meaning | Next |
 |---|---|---|
-| **GO** | Mic works, press-and-hold arrives | Plan stands. Buy the Zero 2 W when it's back, rerun this bench on it |
-| **GO (double-press trigger)** | Mic works, only double-press arrives | Use double-press; "next song" becomes a voice command. Hold may be fixable later |
+| **GO (left earbud = Jarvis)** | Mic works; presses arrive with left/right over Apple's protocol | Any left press = Jarvis, right = music. Buy the Zero 2 W when it's back, rerun this bench on it |
+| **GO** | Mic works, press-and-hold arrives over HFP | Plan stands |
+| **GO (double-press trigger)** | Mic works, only double-press is distinct | Use double-press; "next song" becomes a voice command |
+| **GO (any-press trigger)** | Mic works, every press looks the same (e.g. all PLAY) | Any press = Jarvis; music controls by voice |
 | **GO (needs another trigger)** | Mic works, no press arrives | Button on the device, a BLE remote, or a wake word on the device |
 | **NO-GO (AirPods mic)** | Music works, mic doesn't | Send the report first (silence = SCO routing, may be fixable). Else: mic on the device, AirPods for listening only |
 | **LIKELY GO** | Mic works, buttons step not run | `./scripts/pocket/bench buttons` |
@@ -98,6 +98,14 @@ A mic run counts as working at ≤35% word error or a 3+/5 rating (rating only, 
 - Step 6 sends the recording to the PC's existing `/phone-command` endpoint and reads the reply
   from `/status`, like the phone page does, then speaks it on the Pi with Piper. The PC may
   speak the reply too.
+- **Left/right presses** come from Apple's accessory protocol (AAP, L2CAP PSM 0x1001), as
+  reverse-engineered by [LibrePods](https://github.com/librepods-org/librepods) (documented on AirPods
+  Pro 2). The bench sends AAP's "stem config" so single/double/triple/long presses come to the Pi
+  (`04 00 04 00 19 00 [type] [bud]`) instead of the AirPods acting on them; it hands them back when
+  it stops, and the setting never outlives the connection. If AAP doesn't connect, the bench falls
+  back to standard presses (AVRCP), where every press is PLAY on the Pi 5.
+- Press-and-hold over standard Bluetooth (HFP `AT+BVRA`) can't work with PipeWire: it never
+  offers voice recognition in the handshake (`+BRSF` bit 2) and has no `AT+BVRA` handling.
 - AirPods connect to one non-Apple device at a time. When you're done:
   `bluetoothctl disconnect <MAC>` and turn the iPhone's Bluetooth back on.
 - Nothing here touches the main Jarvis install; Phase 2 (moving the brain) is separate.
@@ -106,6 +114,8 @@ A mic run counts as working at ≤35% word error or a 3+/5 rating (rating only, 
 
 | Problem | Try |
 |---|---|
+| Pairing fails or times out | `bluetoothctl`, then `agent on`, `default-agent`, `scan on`, case button until white, `pair <MAC>`, `trust <MAC>`, `quit`; then `./scripts/pocket/bench pair` |
+| Buttons step says "AAP connection failed" | Reconnect (`bluetoothctl disconnect <MAC>`, then `connect <MAC>`) and rerun `./scripts/pocket/bench buttons`; send the report if it persists |
 | `check` shows WirePlumber/PipeWire not running | `systemctl --user restart pipewire pipewire-pulse wireplumber` |
 | No `headset-head-unit` profile after pairing | Reboot, then `bluetoothctl disconnect <MAC>` and `./scripts/pocket/bench pair` |
 | Mic recording is silent | `sudo systemctl restart jarvis-bt-sco` then `./scripts/pocket/bench mic`; send the report |

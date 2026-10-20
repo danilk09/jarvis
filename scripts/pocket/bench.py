@@ -8,7 +8,7 @@ as Jarvis's mic, speaker and button:
     ./scripts/pocket/bench check     # Bluetooth, PipeWire and the SCO fix are in place
     ./scripts/pocket/bench pair      # pair + connect the AirPods, list their audio profiles
     ./scripts/pocket/bench sound     # music mode (A2DP): can you hear the Pi?
-    ./scripts/pocket/bench buttons   # which stem presses reach Linux (hold / double / single / triple)
+    ./scripts/pocket/bench buttons   # which stem presses reach Linux, left vs right (single/double/triple/hold)
     ./scripts/pocket/bench mic       # headset mode (HFP): record, measure, transcribe, play back
     ./scripts/pocket/bench jarvis    # the real thing: press -> speak -> PC Jarvis -> reply in your ears
     ./scripts/pocket/bench all       # everything above, in order
@@ -28,6 +28,7 @@ import queue
 import re
 import shutil
 import signal
+import socket
 import struct
 import subprocess
 import sys
@@ -299,6 +300,23 @@ def stop_playing(proc):
             proc.wait(timeout=2)
         except subprocess.TimeoutExpired:
             proc.kill()
+
+
+WARMUP_S = 1.0     # music mode drops the first ~0.5-1 s after its stream starts (heard as bits and pieces)
+
+
+def play_warm(paths, sink, already_warm=False):
+    """Play files on the music sink with a silent stream running underneath, started WARMUP_S
+    before the first file, so nothing is clipped while the AirPods' music link wakes up."""
+    keep = None if already_warm else keep_playing(sink)
+    try:
+        if keep:
+            time.sleep(WARMUP_S)
+        for p in paths:
+            play(p, sink)
+        time.sleep(0.3)        # let the tail drain before the stream stops
+    finally:
+        stop_playing(keep)
 
 
 class Recorder:
@@ -597,6 +615,119 @@ class EvdevWatcher:
         self._stop.set()
 
 
+class AapWatcher:
+    """Stem presses over Apple's own accessory protocol (AAP), which says WHICH earbud was pressed.
+
+    Packet layout from LibrePods' reverse engineering (docs/AAP Definitions.md and
+    android/.../bluetooth/AACPManager.kt in github.com/librepods-org/librepods; documented on
+    AirPods Pro 2): L2CAP PSM 0x1001; a fixed handshake; then 'stem config' (control command
+    0x39) with a bit per press type (1 single, 2 double, 4 triple, 8 long) tells the AirPods to
+    hand those presses to us instead of acting on them (play/pause, next, noise control). Each
+    press then arrives as  04 00 04 00 19 00 [type] [bud],  type 05-08, bud 01 left / 02 right.
+    The setting only lasts for this connection; stop() puts the AirPods' own actions back."""
+
+    PSM = 0x1001
+    HEADER = bytes.fromhex("04000400")
+    HANDSHAKE = bytes.fromhex("00000400010002000000000000000000")
+    FEATURES = HEADER + bytes.fromhex("4d00d700000000000000")          # as LibrePods sends it
+    NOTIFY = HEADER + bytes.fromhex("0f00ffffffff")
+    PRESS = {0x05: "single", 0x06: "double", 0x07: "triple", 0x08: "long"}
+    BUD = {0x01: "left", 0x02: "right"}
+
+    def __init__(self, mac):
+        self.mac = mac
+        self.events = []
+        self.info = {}
+        self.error = None
+        self.sock = None
+        self._stop = threading.Event()
+        self._lock = threading.Lock()
+
+    @classmethod
+    def stem_config(cls, mask):
+        """Control command 0x39: which press types come to us (0x0F = all, 0x00 = AirPods decide)."""
+        return cls.HEADER + bytes([0x09, 0x00, 0x39, mask, 0x00, 0x00, 0x00])
+
+    @classmethod
+    def parse(cls, pkt):
+        """One AAP packet -> ('press', 'left single') / ('info', {...}) / None."""
+        if len(pkt) < 6 or pkt[:4] != cls.HEADER:
+            return None
+        op = pkt[4]
+        if op == 0x19 and len(pkt) >= 8:
+            return "press", f"{cls.BUD.get(pkt[7], f'bud{pkt[7]:02x}')} {cls.PRESS.get(pkt[6], f'type{pkt[6]:02x}')}"
+        if op == 0x1D:      # metadata: null-terminated strings (name, model, maker, serial, firmware...)
+            strings = []
+            for part in pkt[6:].split(b"\x00"):
+                try:
+                    s = part.decode("utf-8")
+                except UnicodeDecodeError:
+                    continue
+                if len(s) >= 2 and s.isprintable():
+                    strings.append(s)
+            info = {}
+            if len(strings) >= 2:
+                info["model"] = strings[1]
+            if len(strings) >= 5:
+                info["firmware"] = strings[4]
+            return "info", info
+        return None
+
+    def start(self):
+        try:
+            self.sock = socket.socket(socket.AF_BLUETOOTH, socket.SOCK_SEQPACKET, socket.BTPROTO_L2CAP)
+            self.sock.settimeout(8)
+            self.sock.connect((self.mac, self.PSM))
+            for pkt in (self.HANDSHAKE, self.FEATURES, self.NOTIFY, self.stem_config(0x0F)):
+                self.sock.send(pkt)
+                time.sleep(0.15)
+        except (OSError, AttributeError) as e:
+            self.error = f"AAP connection failed: {e}"
+            if self.sock:
+                self.sock.close()
+            self.sock = None
+            return False
+        self.sock.settimeout(0.5)
+        threading.Thread(target=self._read, daemon=True).start()
+        return True
+
+    def _read(self):
+        while not self._stop.is_set():
+            try:
+                pkt = self.sock.recv(1024)
+            except socket.timeout:
+                continue
+            except OSError as e:
+                if not self._stop.is_set():
+                    self.error = f"AAP connection lost: {e}"
+                return
+            if not pkt:
+                return
+            got = self.parse(pkt)
+            if not got:
+                continue
+            kind, detail = got
+            if kind == "press":
+                with self._lock:
+                    self.events.append((time.time(), "aap", detail))
+            else:
+                self.info.update(detail)
+
+    def since(self, t):
+        with self._lock:
+            return [e for e in self.events if e[0] >= t]
+
+    def stop(self):
+        self._stop.set()
+        if self.sock:
+            try:
+                self.sock.send(self.stem_config(0x00))     # give the presses back to the AirPods
+                time.sleep(0.2)
+            except OSError:
+                pass
+            self.sock.close()
+
+
 def summarize(events):
     """Unique readable event names, ignoring the SLC chatter."""
     # connection setup and status polling, not presses (a stray one in the hold window would
@@ -678,6 +809,133 @@ def step_check(res):
     return good
 
 
+ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|[\x01\x02]")
+PROMPT = re.compile(r"^(?:\[[^\]]*\][#>]\s*)+")
+
+
+def bt_line(raw):
+    """One line of interactive bluetoothctl output: colours and the '[bluetooth]# ' prompt removed."""
+    return PROMPT.sub("", ANSI.sub("", raw)).strip()
+
+
+def bt_device(line):
+    """'[NEW] Device MAC Name' or 'Device MAC Name' -> (MAC, name); a name change
+    '[CHG] Device MAC Name: X' -> (MAC, X); anything else -> None."""
+    m = re.match(r"^\[CHG\] Device ([0-9A-F:]{17}) (?:Name|Alias): (.+)$", line, re.I)
+    if m:
+        return m.group(1).upper(), m.group(2).strip()
+    m = re.match(r"^(?:\[NEW\] )?Device ([0-9A-F:]{17}) (.+)$", line, re.I)
+    if m and not re.match(r"^[\w ]+: ", m.group(2)):        # not a property line ("RSSI: -60")
+        return m.group(1).upper(), m.group(2).strip()
+    return None
+
+
+class BtShell:
+    """bluetoothctl in a pseudo-terminal, driven like a person would: its pairing agent stays
+    registered for the whole session (one-off 'bluetoothctl pair' timed out on the Pi 5)."""
+
+    def __init__(self):
+        import pty
+        self.fd, slave = pty.openpty()
+        self.proc = subprocess.Popen(["bluetoothctl"], stdin=slave, stdout=slave, stderr=slave, close_fds=True)
+        os.close(slave)
+        self.lines = queue.Queue()
+        self.log = []
+        threading.Thread(target=self._read, daemon=True).start()
+
+    def _read(self):
+        buf = ""
+        while True:
+            try:
+                chunk = os.read(self.fd, 4096)
+            except OSError:
+                return
+            if not chunk:
+                return
+            buf += chunk.decode(errors="replace")
+            *done, buf = re.split(r"\r?\n|\r", buf)
+            for raw in done:
+                line = bt_line(raw)
+                if line:
+                    self.log.append(line)
+                    self.lines.put(line)
+
+    def send(self, cmd):
+        os.write(self.fd, (cmd + "\n").encode())
+
+    def wait(self, pattern, timeout):
+        """First new line matching pattern (regex), or None after timeout."""
+        end = time.time() + timeout
+        while time.time() < end:
+            try:
+                line = self.lines.get(timeout=max(0.05, end - time.time()))
+            except queue.Empty:
+                break
+            m = re.search(pattern, line)
+            if m:
+                return m
+        return None
+
+    def close(self):
+        try:
+            self.send("quit")
+            self.proc.wait(timeout=3)
+        except Exception:
+            self.proc.kill()
+        try:
+            os.close(self.fd)
+        except OSError:
+            pass
+
+
+def pair_interactive(scan_s=30):
+    """Scan, pair the AirPods as soon as they show up, trust them. -> {ok, mac, name} or {ok: False, why}."""
+    sh = BtShell()
+    try:
+        for cmd in ("agent on", "default-agent", "power on"):
+            sh.send(cmd)
+            time.sleep(0.3)
+        say("  1. Put both AirPods in the case, lid OPEN.")
+        say("  2. Hold the button on the back of the case until the light flashes WHITE.")
+        say("     (If they're connected to your iPhone, that's fine - pairing mode overrides it.)")
+        ask("  Press Enter when the light is flashing white...")
+        say(f"  Scanning (up to {scan_s} s)...")
+        sh.send("scan on")
+        seen, end = {}, time.time() + scan_s
+        while time.time() < end:
+            m = sh.wait(r".", max(0.1, end - time.time()))
+            dev = bt_device(m.string) if m else None
+            if dev:
+                seen[dev[0]] = dev[1]
+                if "airpod" in dev[1].lower():
+                    break
+        sh.send("scan off")
+        devices = [(m_, n_) for m_, n_ in seen.items() if "airpod" in n_.lower()]
+        if not devices and seen:
+            # the name isn't always resolved during a scan (shows as the MAC with dashes)
+            say("  Nothing named 'AirPods' showed up. Devices seen:")
+            found = list(seen.items())
+            for i, (m_, n_) in enumerate(found, 1):
+                say(f"    {i}. {n_} ({m_})")
+            pick = ask_int("  Number of the AirPods (0 = none of these)? [0]", 0, 0, len(found))
+            devices = [found[pick - 1]] if pick else []
+        if not devices:
+            return {"ok": False, "why": "AirPods not found in the scan (was the light flashing white?)"}
+        mac, name = devices[0]
+        say(f"  Found {name} ({mac}). Pairing...")
+        sh.send(f"pair {mac}")
+        m = sh.wait(r"Pairing successful|Failed to pair: ?(\S*)|AlreadyExists", 40)
+        if not m:
+            return {"ok": False, "why": "no answer to 'pair' within 40 s", "output": "\n".join(sh.log[-15:])}
+        if m.group(0).startswith("Failed") and "AlreadyExists" not in m.group(0):
+            return {"ok": False, "why": m.group(0), "output": "\n".join(sh.log[-15:])}
+        sh.send(f"trust {mac}")
+        sh.wait(r"trust succeeded", 5)
+        return {"ok": True, "mac": mac, "name": name}
+    finally:
+        sh.close()
+
+
 def step_pair(res):
     head("2. PAIR - connect the AirPods to the Pi")
     cfg = res.setdefault("config", {})
@@ -686,44 +944,16 @@ def step_pair(res):
     if mac and bt_info(mac).get("Paired") == "yes":
         say(f"  Already paired: {cfg.get('name')} ({mac})")
     else:
-        say("  1. Put both AirPods in the case, lid OPEN.")
-        say("  2. Hold the button on the back of the case until the light flashes WHITE.")
-        say("     (If they're connected to your iPhone, that's fine - pairing mode overrides it.)")
-        ask("  Press Enter when the light is flashing white...")
-        say("  Scanning for 20 seconds...")
-        bt("--timeout", "20", "scan", "on", timeout=30)
-        found = []
-        for line in bt("devices").stdout.splitlines():
-            m = re.match(r"Device ([0-9A-F:]{17}) (.+)", line.strip(), re.I)
-            if m:
-                found.append((m.group(1).upper(), m.group(2)))
-        devices = [d for d in found if "airpod" in d[1].lower()]
-        if not devices and found:
-            # the name isn't always resolved during a scan (shows as the MAC with dashes)
-            say("  Nothing named 'AirPods' showed up. Devices seen:")
-            for i, (m_, n_) in enumerate(found, 1):
-                say(f"    {i}. {n_} ({m_})")
-            pick = ask_int("  Number of the AirPods (0 = none of these)? [0]", 0, 0, len(found))
-            devices = [found[pick - 1]] if pick else []
-        if not devices:
-            say("  No AirPods found. Check the white light and try again, or pair by hand:")
-            say("    bluetoothctl  ->  power on  ->  scan on  ->  pair <MAC>  ->  trust <MAC>  ->  connect <MAC>")
-            res["pair"] = {"ok": False, "why": "not found in scan"}
+        found = pair_interactive()
+        if not found.get("ok"):
+            say(f"  Pairing failed: {found.get('why')}")
+            if found.get("output"):
+                say("    " + found["output"].replace("\n", "\n    "))
+            say("  Pair by hand, then run this step again:")
+            say("    bluetoothctl -> agent on -> default-agent -> scan on -> (white light) -> pair <MAC> -> trust <MAC>")
+            res["pair"] = {"ok": False, "why": found.get("why"), "output": found.get("output", "")}
             return False
-        if len(devices) > 1:
-            for i, (m_, n_) in enumerate(devices, 1):
-                say(f"    {i}. {n_} ({m_})")
-            mac, name = devices[ask_int("  Which one? [1]", 1, 1, len(devices)) - 1]
-        else:
-            mac, name = devices[0]
-        say(f"  Found {name} ({mac}). Pairing...")
-        r = bt("pair", mac, timeout=40)
-        if "successful" not in (r.stdout + r.stderr).lower() and bt_info(mac).get("Paired") != "yes":
-            say("  Pairing didn't confirm. Output:")
-            say("    " + (r.stdout + r.stderr).strip().replace("\n", "\n    ")[-600:])
-            res["pair"] = {"ok": False, "why": "pair failed", "output": (r.stdout + r.stderr)[-600:]}
-            return False
-        bt("trust", mac)
+        mac, name = found["mac"], found["name"]
         cfg.update(mac=mac, name=name)
 
     say("  Put the AirPods in your ears. Connecting...")
@@ -803,32 +1033,59 @@ def step_sound(res):
     voice = os.path.join(RESULTS_DIR, "hello.wav")
     engine = synth("Hello sir. If you can hear me, the Pi is talking to your AirPods.", voice)
     say(f"  Playing a chime, then a sentence ({engine}) on {sink} ...")
-    play(chime, sink)
-    play(voice, sink)
+    play_warm([chime, voice], sink)
     heard = yes("  Did you hear both clearly in the AirPods?")
     res["sound"] = {"ok": heard, "sink": sink, "switch_s": secs, "tts_engine": engine}
     return heard
 
 
 GESTURES = [
-    ("hold", "PRESS AND HOLD the stem of the earbud you set to Siri (about 2 seconds), then let go"),
-    ("double", "DOUBLE-PRESS the stem (either earbud)"),
-    ("single", "SINGLE-PRESS the stem once"),
-    ("triple", "TRIPLE-PRESS the stem"),
+    ("left_single", "LEFT earbud: SINGLE-PRESS the stem"),
+    ("left_double", "LEFT earbud: DOUBLE-PRESS the stem"),
+    ("left_triple", "LEFT earbud: TRIPLE-PRESS the stem"),
+    ("left_hold", "LEFT earbud: PRESS AND HOLD the stem (about 2 seconds), then let go"),
+    ("right_single", "RIGHT earbud: SINGLE-PRESS the stem"),
+    ("right_double", "RIGHT earbud: DOUBLE-PRESS the stem"),
+    ("right_hold", "RIGHT earbud: PRESS AND HOLD the stem (about 2 seconds), then let go"),
 ]
+
+# what the right earbud would do in the pocket client, once the left one is Jarvis's
+RIGHT_MUSIC = {"single": "play/pause", "double": "next track", "triple": "previous track", "long": "noise control"}
 
 
 def pick_trigger(results):
-    """results: {gesture: [summarized events]} -> (trigger, hold_event, double_event).
-    Hold counts if it sent AT+BVRA (voice recognition) or anything single/double press didn't."""
-    hold_sig = [e for e in results.get("hold", []) if "BVRA" in e]
-    hold_unique = [e for e in results.get("hold", [])
-                   if e not in results.get("single", []) and e not in results.get("double", [])]
-    double_sig = [e for e in results.get("double", []) if re.search(r"NEXT|FORWARD", e)]
-    hold_event = (hold_sig or hold_unique or [None])[0]
-    double_event = (double_sig or [None])[0]
-    trigger = "hold" if hold_event else "double" if double_event else "none"
-    return trigger, hold_event, double_event
+    """results: {gesture: [summarized events]} -> {trigger, match, ...}, best first:
+    'left'   - AAP says which earbud: any press on the left = Jarvis, right stays for music
+    'hold'   - press-and-hold sent AT+BVRA (HFP voice recognition)
+    'double' - double-press sent next-track (AVRCP) while single didn't
+    'press'  - every press looks the same (e.g. all PLAY): any press = Jarvis
+    'none'   - nothing arrived."""
+    left = [e for k, v in results.items() if k.startswith("left") for e in v if e.startswith("aap:left ")]
+    right = [e for k, v in results.items() if k.startswith("right") for e in v if e.startswith("aap:right ")]
+    hold = [e for k, v in results.items() if k.endswith("hold") for e in v]
+    if left and right:
+        return {"trigger": "left", "match": ["aap:left "],
+                "left_long": any(e.endswith(" long") for e in left),
+                "right_presses": sorted({e.split()[-1] for e in right})}
+    bvra = [e for e in hold if "BVRA" in e]
+    if bvra:
+        return {"trigger": "hold", "match": bvra[:1]}
+    single = results.get("left_single", []) + results.get("right_single", [])
+    double = results.get("left_double", []) + results.get("right_double", [])
+    nxt = [e for e in double if re.search(r"NEXT|FORWARD", e) and e not in single]
+    if nxt:
+        return {"trigger": "double", "match": nxt[:1]}
+    every = sorted({e for v in results.values() for e in v})
+    if every:
+        # an AAP press without a usable left/right split still works as 'any press'
+        return {"trigger": "press", "match": sorted({e if not e.startswith("aap:") else "aap:" for e in every})}
+    return {"trigger": "none", "match": []}
+
+
+def trigger_hit(match, events):
+    """Did any event (summarized labels) match the trigger? Entries ending in ' ' or ':' are prefixes."""
+    return next((e for e in events for m in match if (e.startswith(m) if m.endswith((" ", ":")) else e == m)),
+                None)
 
 
 def step_buttons(res):
@@ -838,9 +1095,8 @@ def step_buttons(res):
         res["buttons"] = {"ok": False, "why": "not connected"}
         return False
     name = res.get("config", {}).get("name", "AirPods")
-    say("  Before this step, on your iPhone: Settings -> your AirPods -> Press and Hold ->")
-    say("  set ONE earbud to 'Siri'. Keep the AirPods away from the iPhone (or turn its")
-    say("  Bluetooth off) so the iPhone doesn't grab them.")
+    say("  Keep the AirPods away from the iPhone (or turn its Bluetooth off) so it doesn't")
+    say("  grab them. Each gesture is done on the earbud named, LEFT or RIGHT.")
     ask("  Press Enter when ready (sudo may ask for your password)...")
     run(["sudo", "-v"], timeout=60)
 
@@ -864,6 +1120,13 @@ def step_buttons(res):
             ag_feat = int(m.group(1))
     voice_rec_offered = None if ag_feat is None else bool(ag_feat & 0x4)
 
+    # Apple's protocol, for left/right and press-and-hold (connect after the reconnect above)
+    aap = AapWatcher(mac)
+    if aap.start():
+        say("  Connected over Apple's accessory protocol (AAP): presses should say which earbud.")
+    else:
+        say(f"  ({aap.error} - falling back to standard Bluetooth presses only)")
+
     # keep music mode active with a silent stream so the AirPods treat it as "playing"
     sink, _ = to_a2dp(mac)
     keep = keep_playing(sink)
@@ -880,21 +1143,24 @@ def step_buttons(res):
                 sys.stdout.flush()
                 time.sleep(1)
             sys.stdout.write("\r" + " " * 30 + "\r")
-            got = summarize(btmon.since(t0) + evw.since(t0))
+            got = summarize(btmon.since(t0) + evw.since(t0) + aap.since(t0))
             results[key] = got
             say(f"     seen: {', '.join(got) if got else 'nothing'}")
     finally:
         stop_playing(keep)
+        aap.stop()
         btmon.stop()
         evw.stop()
 
-    trigger, hold_event, double_event = pick_trigger(results)
+    pick = pick_trigger(results)
+    trigger = pick["trigger"]
     res["buttons"] = {
         "ok": trigger != "none",
-        "trigger": trigger,
+        **pick,
         "seen": results,
-        "hold_event": hold_event,
-        "double_event": double_event,
+        "aap": aap.error is None,
+        "aap_error": aap.error,
+        "aap_info": aap.info,
         "btmon": have_btmon,
         "evdev_devices": [d.name for d in evw.devices],
         "evdev_error": evw.error,
@@ -903,15 +1169,19 @@ def step_buttons(res):
         "handshake_at": handshake[:40],
     }
     say()
-    if trigger == "hold":
-        say(f"  Press-and-hold reaches the Pi ({res['buttons']['hold_event']}). Preferred trigger works.")
+    if trigger == "left":
+        say("  Left and right are told apart: any LEFT press can be Jarvis, the RIGHT stays for music"
+            f" ({', '.join(pick['right_presses'])} arrived from the right).")
+        say("  Press-and-hold on the left arrives too." if pick["left_long"] else
+            "  (Press-and-hold on the left didn't arrive; other left presses do.)")
+    elif trigger == "hold":
+        say(f"  Press-and-hold reaches the Pi ({pick['match'][0]}).")
     elif trigger == "double":
-        say(f"  Hold didn't arrive, but double-press does ({res['buttons']['double_event']}). Fallback trigger works.")
+        say(f"  Double-press is distinct ({pick['match'][0]}): usable as the trigger.")
+    elif trigger == "press":
+        say(f"  Presses arrive but all look alike ({', '.join(pick['match'])}): any press = Jarvis.")
     else:
         say("  No usable button event arrived.")
-    if voice_rec_offered is False:
-        say("  Note: the Pi's handshake didn't offer 'voice recognition' (+BRSF bit 2), which is")
-        say("  why AirPods wouldn't send press-and-hold. That's fixable in software later.")
     return trigger != "none"
 
 
@@ -1000,7 +1270,7 @@ def step_mic(res):
             say()
             say(f"  Playing back the {out['codec']} recording...")
             time.sleep(0.4)
-            play(os.path.join(REPO, out["file"]), sink)
+            play_warm([os.path.join(REPO, out["file"])], sink)
             out["rating"] = ask_int("     How clear was your voice, 1 (unusable) to 5 (like a phone call)? [3]",
                                     3, 1, 5)
 
@@ -1034,34 +1304,42 @@ def _enter_queue():
     return _enter_q
 
 
-def wait_trigger(res, btmon, evw, sink=None, timeout=None):
-    """Block until the chosen trigger happens. Returns how it was triggered. A silent stream plays
-    on the music sink meanwhile, as in the buttons step (stem presses need 'playing')."""
+TRIGGER_NAMES = {"left": "any press on the LEFT earbud", "hold": "press-and-hold", "double": "double-press",
+                 "press": "any stem press", "none": "the Enter key"}
+
+
+def wait_trigger(res, watchers, sink=None, timeout=None):
+    """Block until the chosen trigger happens. Returns how it was triggered ('enter' or the event).
+    A silent stream plays on the music sink meanwhile, as in the buttons step (stem presses need
+    'playing'). Right-earbud presses are shown as the music control they'd become."""
     keep = keep_playing(sink)
     try:
-        return _wait_trigger(res, btmon, evw, timeout)
+        return _wait_trigger(res, watchers, timeout)
     finally:
         stop_playing(keep)
 
 
-def _wait_trigger(res, btmon, evw, timeout):
+def _wait_trigger(res, watchers, timeout):
     b = res.get("buttons", {})
     trig = b.get("trigger", "none")
-    hold_ev, dbl_ev = b.get("hold_event"), b.get("double_event")
-    say(f"  Waiting for your trigger ({'press-and-hold' if trig == 'hold' else 'double-press' if trig == 'double' else 'Enter key'}"
-        f"{', or press Enter' if trig != 'none' else ''}; Ctrl+C to finish)...")
+    match = b.get("match", [])
+    say(f"  Waiting for {TRIGGER_NAMES.get(trig, trig)}{', or press Enter' if trig != 'none' else ''}"
+        f" (Ctrl+C to finish)...")
     enter = _enter_queue()
     while not enter.empty():          # ignore Enter presses from before
         enter.get_nowait()
-    t0 = time.time()
+    t0, shown = time.time(), 0
     while timeout is None or time.time() - t0 < timeout:
         if not enter.empty():
             return "enter"
-        evs = summarize(btmon.since(t0) + evw.since(t0))
-        if trig == "hold" and hold_ev and hold_ev in evs:
-            return "hold"
-        if dbl_ev and dbl_ev in evs:
-            return "double"
+        raw = [e for w in watchers for e in w.since(t0)]
+        hit = trigger_hit(match, summarize(raw)) if match else None
+        if hit:
+            return hit
+        right = [d for _, k, d in sorted(raw) if k == "aap" and d.startswith("right ")]
+        for d in right[shown:]:
+            say(f"  (right {d.split()[-1]} press -> music: {RIGHT_MUSIC.get(d.split()[-1], '?')})")
+        shown = len(right)
         time.sleep(0.05)
     return None
 
@@ -1109,15 +1387,21 @@ def step_jarvis(res, url=None):
     evw = EvdevWatcher(cfg.get("name", "AirPods"))
     btmon.start()
     evw.start()
+    aap = AapWatcher(mac)
+    if res.get("buttons", {}).get("trigger") in ("left", "press") and not aap.start():
+        say(f"  ({aap.error}; Enter still works)")
     chime = tone_wav(os.path.join(RESULTS_DIR, "chime.wav"), [(880, 0.12), (0, 0.05), (1320, 0.18)])
     done_tone = tone_wav(os.path.join(RESULTS_DIR, "done.wav"), [(1320, 0.1), (0, 0.04), (880, 0.14)])
     sink, _ = to_a2dp(mac)
 
     turns = []
+    warm = None
     say("  Try a few real commands (\"what time is it\", \"what's on my agenda today\").")
     try:
         while True:
-            how = wait_trigger(res, btmon, evw, sink)
+            stop_playing(warm)
+            warm = None
+            how = wait_trigger(res, [btmon, evw, aap], sink)
             if not how:
                 break
             t = {"trigger": how}
@@ -1137,6 +1421,7 @@ def step_jarvis(res, url=None):
             t_end = time.time()
             sink, back = to_a2dp(mac)
             t["back_to_music_s"] = back
+            warm = keep_playing(sink)      # music link warmed up while Jarvis thinks: no clipped reply
             if not spoke:
                 say("  Didn't hear anything.")
                 turns.append({**t, "ok": False, "why": "no speech"})
@@ -1194,14 +1479,15 @@ def step_jarvis(res, url=None):
             t["tts_s"] = round(time.time() - t0, 2)
             t["speech_end_to_voice_s"] = round(time.time() - t_end, 2)
             say(f"  Jarvis: {text}")
-            play(out, sink)
-            play(done_tone, sink)
+            play_warm([out, done_tone], sink, already_warm=warm is not None)
             t["ok"] = True
             turns.append(t)
             say(f"  (end of speech -> reply in your ears: {t['speech_end_to_voice_s']}s)")
     except KeyboardInterrupt:
         say()
     finally:
+        stop_playing(warm)
+        aap.stop()
         btmon.stop()
         evw.stop()
 
@@ -1238,12 +1524,21 @@ def verdict(res):
                 "Claude - silent recordings usually mean SCO routing, which may be fixable. If it can't be fixed, "
                 "the fallback is a small mic on the device (or a BLE remote + phone mic), keeping AirPods for listening.")
     trig = btn.get("trigger")
+    if trig == "left":
+        return ("GO (left earbud = Jarvis)",
+                "AirPods mic works, and Apple's accessory protocol tells the earbuds apart: any press on the left "
+                "starts Jarvis, the right stays free for music controls"
+                + (", press-and-hold included." if btn.get("left_long") else " (press-and-hold on the left didn't arrive)."))
     if trig == "hold":
         return "GO", "AirPods mic works and press-and-hold reaches the Pi. The plan stands as written."
     if trig == "double":
         return ("GO (double-press trigger)",
                 "AirPods mic works; press-and-hold didn't arrive but double-press does. Use double-press "
-                "(\"next song\" then becomes a voice command), or try enabling voice recognition in the HFP handshake later.")
+                "(\"next song\" then becomes a voice command).")
+    if trig == "press":
+        return ("GO (any-press trigger)",
+                "AirPods mic works; stem presses arrive but all look the same, so any press starts Jarvis "
+                "and music controls go through voice.")
     if not btn:
         return "LIKELY GO", "Mic works; run the buttons step to choose the trigger."
     return ("GO (needs another trigger)",
@@ -1269,11 +1564,14 @@ def write_report(res):
     L.append(f"| Music mode (A2DP) | {'heard' if s.get('ok') else 'FAILED' if s else 'not run'} |")
     if btn:
         seen = btn.get("seen", {})
-        L.append(f"| Press-and-hold | {', '.join(seen.get('hold', [])) or 'nothing'} |")
-        L.append(f"| Double press | {', '.join(seen.get('double', [])) or 'nothing'} |")
-        L.append(f"| Single press | {', '.join(seen.get('single', [])) or 'nothing'} |")
-        L.append(f"| Triple press | {', '.join(seen.get('triple', [])) or 'nothing'} |")
-        L.append(f"| Trigger to use | **{btn.get('trigger')}** |")
+        for key, got in seen.items():
+            L.append(f"| Press: {key.replace('_', ' ')} | {', '.join(got) or 'nothing'} |")
+        L.append(f"| Trigger to use | **{btn.get('trigger')}** ({TRIGGER_NAMES.get(btn.get('trigger'), '?')}) |")
+        aap_txt = ("connected" if btn.get("aap") else f"not available ({btn.get('aap_error')})")
+        info = btn.get("aap_info") or {}
+        if info:
+            aap_txt += " · " + ", ".join(f"{k} {v}" for k, v in info.items())
+        L.append(f"| Apple protocol (AAP) | {aap_txt} |")
         if btn.get("ag_features") is not None:
             L.append(f"| Pi HFP features (+BRSF) | {btn['ag_features']} (voice recognition offered: "
                      f"{btn.get('ag_offers_voice_recognition')}) |")

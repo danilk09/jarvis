@@ -286,20 +286,79 @@ def test_evdev():
     check("evdev keys summarized once", bench.summarize(w.since(0)) == ["key:KEY_NEXTSONG"])
 
 
+PLAY = ["avrcp:PLAY pressed", "key:KEY_PLAYCD"]
+
+
 def test_trigger():
     section("trigger choice")
-    cases = [
-        ("hold sends BVRA", {"hold": ["at:AT+BVRA=1"], "double": ["avrcp:FORWARD pressed"], "single": []},
-         ("hold", "at:AT+BVRA=1", "avrcp:FORWARD pressed")),
-        ("hold sends something unique", {"hold": ["key:KEY_VOICECOMMAND"], "single": ["avrcp:PLAY pressed"],
-                                         "double": []}, ("hold", "key:KEY_VOICECOMMAND", None)),
-        ("hold same as single -> double", {"hold": ["avrcp:PLAY pressed"], "single": ["avrcp:PLAY pressed"],
-                                           "double": ["key:KEY_NEXTSONG"]}, ("double", None, "key:KEY_NEXTSONG")),
-        ("nothing", {"hold": [], "single": [], "double": [], "triple": []}, ("none", None, None)),
-    ]
-    for label, results, want in cases:
-        got = bench.pick_trigger(results)
-        check(label, got == want, got)
+    aap = {"left_single": ["aap:left single"], "left_double": ["aap:left double"], "left_triple": ["aap:left triple"],
+           "left_hold": ["aap:left long"], "right_single": ["aap:right single"], "right_double": ["aap:right double"],
+           "right_hold": ["aap:right long"]}
+    got = bench.pick_trigger(aap)
+    check("AAP left/right -> left earbud trigger with hold", got["trigger"] == "left" and got["left_long"]
+          and got["right_presses"] == ["double", "long", "single"], got)
+    no_hold = dict(aap, left_hold=[])
+    got = bench.pick_trigger(no_hold)
+    check("left trigger without press-and-hold", got["trigger"] == "left" and not got["left_long"], got)
+    # what the Pi 5 run on 2026-10-19 actually saw: every press = PLAY, hold nothing
+    pi5 = {"left_single": PLAY, "left_double": PLAY, "left_triple": PLAY, "left_hold": [],
+           "right_single": PLAY, "right_double": PLAY, "right_hold": []}
+    got = bench.pick_trigger(pi5)
+    check("all presses PLAY (the Pi 5 run) -> any press", got["trigger"] == "press" and got["match"] == sorted(PLAY), got)
+    got = bench.pick_trigger({"left_hold": ["at:AT+BVRA=1"], "left_double": ["avrcp:FORWARD pressed"]})
+    check("hold sends BVRA -> hold", got == {"trigger": "hold", "match": ["at:AT+BVRA=1"]}, got)
+    got = bench.pick_trigger({"left_single": PLAY, "left_double": ["key:KEY_NEXTSONG"]})
+    check("double sends next track -> double", got == {"trigger": "double", "match": ["key:KEY_NEXTSONG"]}, got)
+    got = bench.pick_trigger({"left_single": ["aap:left single"], "right_single": []})
+    check("AAP presses but no right ones -> any press (aap prefix)", got == {"trigger": "press", "match": ["aap:"]}, got)
+    check("nothing -> none", bench.pick_trigger({k: [] for k, _ in bench.GESTURES})["trigger"] == "none")
+
+    check("hit: left prefix matches a left press", bench.trigger_hit(["aap:left "], ["aap:left double"]) == "aap:left double")
+    check("hit: right press doesn't start Jarvis", bench.trigger_hit(["aap:left "], ["aap:right single"]) is None)
+    check("hit: exact label", bench.trigger_hit(sorted(PLAY), ["key:KEY_PLAYCD"]) == "key:KEY_PLAYCD")
+    check("hit: exact label doesn't prefix-match", bench.trigger_hit(["key:KEY_PLAY"], ["key:KEY_PLAYCD"]) is None)
+
+
+def test_aap():
+    section("Apple accessory protocol (AAP) packets")
+    A = bench.AapWatcher
+    check("handshake bytes", A.HANDSHAKE.hex(" ") == "00 00 04 00 01 00 02 00 00 00 00 00 00 00 00 00")
+    check("notification request", A.NOTIFY.hex(" ") == "04 00 04 00 0f 00 ff ff ff ff")
+    check("stem config: all presses to us", A.stem_config(0x0F).hex(" ") == "04 00 04 00 09 00 39 0f 00 00 00")
+    check("stem config: give them back", A.stem_config(0x00).hex(" ") == "04 00 04 00 09 00 39 00 00 00 00")
+    cases = [("04 00 04 00 19 00 05 01", "left single"), ("04 00 04 00 19 00 06 02", "right double"),
+             ("04 00 04 00 19 00 07 01", "left triple"), ("04 00 04 00 19 00 08 02", "right long")]
+    for hx, want in cases:
+        got = A.parse(bytes.fromhex(hx))
+        check(f"stem press {hx[-5:]} -> {want}", got == ("press", want), got)
+    check("unknown press values still reported", A.parse(bytes.fromhex("04000400190009 03".replace(" ", "")))
+          == ("press", "bud03 type09"))
+    check("battery packet ignored", A.parse(bytes.fromhex("040004000400030201640201040163010108011102 01".replace(" ", ""))) is None)
+    check("not AAP -> None", A.parse(b"\x00\x01") is None and A.parse(bytes.fromhex("0500040019000501")) is None)
+    # metadata example from LibrePods' docs (AirPods Pro, model A3048), trimmed after the firmware
+    meta = bytes.fromhex("040004001d0002d5000400416972506f64732050726f004133303438004170706c6520496e632e00"
+                         "51584e524848595850360036312e313836383034303030323030303030302e3237313300")
+    kind, info = A.parse(meta)
+    check("metadata -> model and firmware", kind == "info" and info.get("model") == "A3048"
+          and info.get("firmware", "").startswith("61.1868"), info)
+    check("metadata keeps the serial number out", "QXNRHHYXP6" not in str(info))
+
+
+def test_bluetoothctl():
+    section("interactive bluetoothctl output")
+    raw = "\x1b[0;94m[bluetooth]\x1b[0m# \x1b[0;92m[NEW]\x1b[0m Device F0:04:E1:C7:A7:2F DanilのAirPods Pro"
+    line = bench.bt_line(raw)
+    check("colours and prompt stripped", line == "[NEW] Device F0:04:E1:C7:A7:2F DanilのAirPods Pro", repr(line))
+    check("new device parsed (non-ASCII name)", bench.bt_device(line) == ("F0:04:E1:C7:A7:2F", "DanilのAirPods Pro"))
+    check("unresolved name kept", bench.bt_device("[NEW] Device 11:22:33:44:55:66 11-22-33-44-55-66")
+          == ("11:22:33:44:55:66", "11-22-33-44-55-66"))
+    check("name change parsed", bench.bt_device("[CHG] Device 11:22:33:44:55:66 Name: AirPods Pro")
+          == ("11:22:33:44:55:66", "AirPods Pro"))
+    check("RSSI change ignored", bench.bt_device("[CHG] Device 11:22:33:44:55:66 RSSI: -61") is None)
+    check("property line ignored", bench.bt_device("Device 11:22:33:44:55:66 RSSI: -61") is None)
+    check("other lines ignored", bench.bt_device("Pairing successful") is None)
+    check("prompt with device name stripped", bench.bt_line("[DanilのAirPods Pro]# Pairing successful")
+          == "Pairing successful")
 
 
 def test_wer():
@@ -402,6 +461,10 @@ def test_report(tmp):
              "GO"),
             ("double only", dict(base, mic=mic_ok, buttons={"trigger": "double", "seen": {}}),
              "GO (double-press trigger)"),
+            ("left/right via AAP", dict(base, mic=mic_ok, buttons={"trigger": "left", "left_long": True, "seen": {}}),
+             "GO (left earbud = Jarvis)"),
+            ("all presses alike", dict(base, mic=mic_ok, buttons={"trigger": "press", "seen": {}}),
+             "GO (any-press trigger)"),
             ("no press", dict(base, mic=mic_ok, buttons={"trigger": "none", "seen": {}}),
              "GO (needs another trigger)"),
         ]
@@ -410,16 +473,22 @@ def test_report(tmp):
             check(f"verdict: {label} -> {want}", v == want and why, v)
 
         res = dict(base, mic=mic_ok, updated="2026-10-14 10:00:00",
-                   buttons={"trigger": "hold", "seen": {"hold": ["at:AT+BVRA=1"], "double": ["avrcp:FORWARD pressed"]},
-                            "ag_features": 1636, "ag_offers_voice_recognition": True},
+                   buttons={"trigger": "left", "match": ["aap:left "], "left_long": True,
+                            "seen": {"left_single": ["aap:left single"], "left_hold": ["aap:left long"],
+                                     "right_double": ["aap:right double"]},
+                            "aap": True, "aap_info": {"model": "A3048", "firmware": "7A305"},
+                            "ag_features": 1632, "ag_offers_voice_recognition": False},
                    jarvis={"successful": 2, "turns": [{}, {}, {}], "avg_press_to_listening_s": 1.4,
                            "avg_speech_end_to_voice_s": 3.2})
         v, _ = bench.write_report(res)
         with open(bench.REPORT_FILE, encoding="utf-8") as f:
             text = f.read()
-        check("report written with the verdict", v == "GO" and "**Verdict: GO**" in text)
-        for frag in ("| Press-and-hold | at:AT+BVRA=1 |", "| Mic MSBC | OK", "word error 8%", "| Mic CVSD | not offered |",
-                     "2 of 3", "1636 (voice recognition offered: True)", "Raspberry Pi 5", "<details>"):
+        check("report written with the verdict", v == "GO (left earbud = Jarvis)"
+              and "**Verdict: GO (left earbud = Jarvis)**" in text)
+        for frag in ("| Press: left hold | aap:left long |", "| Press: right double | aap:right double |",
+                     "**left** (any press on the LEFT earbud)", "| Apple protocol (AAP) | connected · model A3048",
+                     "| Mic MSBC | OK", "word error 8%", "| Mic CVSD | not offered |",
+                     "2 of 3", "1632 (voice recognition offered: False)", "Raspberry Pi 5", "<details>"):
             check(f"report contains {frag!r}", frag in text)
         check("MAC address kept out of the raw results", MAC not in text)
     finally:
@@ -429,7 +498,8 @@ def test_report(tmp):
 def selftest():
     print("AirPods bench self-test (offline)")
     with tempfile.TemporaryDirectory() as tmp:
-        for t in (test_pactl, test_set_profile, test_btmon, test_evdev, test_trigger, test_wer,
+        for t in (test_pactl, test_set_profile, test_btmon, test_evdev, test_trigger, test_aap, test_bluetoothctl,
+                  test_wer,
                   lambda: test_wav(tmp), test_mic_verdict, test_ask_int, test_status_log, lambda: test_report(tmp)):
             try:
                 t()
