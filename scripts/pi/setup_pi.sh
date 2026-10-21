@@ -15,9 +15,13 @@ echo "== System packages"
 # ffmpeg: phone recordings → WAV for Whisper. nodejs/npm: yt-dlp's YouTube challenges and the
 # npx-based MCP servers. tmux: "continue this on my phone" (Claude Code Remote Control) and long
 # diagnostics runs. stress-ng / fio / espeak-ng: scripts/pi/diag (heat, SD card, load tests).
+PKGS="git python3-venv python3-dev build-essential ffmpeg tmux curl stress-ng fio espeak-ng"
+# Node only if it's missing: NodeSource's nodejs (often already installed) ships its own npm and
+# conflicts with Debian's npm package, which makes apt refuse the whole install
+command -v node >/dev/null 2>&1 || PKGS="$PKGS nodejs"
+command -v npm >/dev/null 2>&1 || PKGS="$PKGS npm"
 sudo apt-get update
-sudo apt-get install -y git python3-venv python3-dev build-essential ffmpeg nodejs npm tmux curl \
-    stress-ng fio espeak-ng
+sudo apt-get install -y $PKGS
 
 echo "== uv (runs the Python MCP servers with uvx)"
 if ! command -v uvx >/dev/null 2>&1 && [ ! -x "$HOME/.local/bin/uvx" ]; then
