@@ -159,7 +159,8 @@ def check():
         item(out, "File system errors", "ok" if errs == 0 else "bad", str(errs))
     svc = pihealth.service("jarvis.service") or {}
     ctl = pihealth.service("jarvis-control.service") or {}
-    item(out, "Jarvis", "info", f"{svc.get('state', '?')}"
+    state = svc.get("state", "?")
+    item(out, "Jarvis", "ok" if state == "active" else "bad" if state == "failed" else "info", f"{state}"
          + (f", using {svc['mem_mb']} MB" if svc.get("mem_mb") else "")
          + (f", restarted {svc['restarts']}x" if svc.get("restarts") else ""))
     item(out, "Power switch (port 5152)", "ok" if ctl.get("state") == "active" else "info", ctl.get("state", "?"))
