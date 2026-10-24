@@ -22,6 +22,19 @@ HOME    = os.path.expanduser("~")
 # (apps, workspaces, music, screenshots, the "agent") answer that the PC is needed. On by
 # default on Linux; `python jarvis.py --headless` forces it on Windows too (for testing).
 HEADLESS = "--headless" in sys.argv or OS == "Linux"
+
+# ── PC as a client of the Pi brain (Phase 3) ──────────────────────────────────
+# Set this to the Pi's address and the PC keeps only what needs it — wake word, mic, voice ID,
+# Jarvis's voice on these speakers — while every command goes to the brain on the Pi (one
+# memory, agenda and history). Empty = this PC is the brain. `--client <url>` sets it for one
+# run (python jarvis.py --client https://jarvis-pi.tail1234.ts.net:5151); JARVIS_BRAIN in .env too.
+CLIENT_OF = os.environ.get("JARVIS_BRAIN", "")
+if "--client" in sys.argv:
+    _i = sys.argv.index("--client")
+    if _i + 1 < len(sys.argv) and sys.argv[_i + 1].startswith("http"):
+        CLIENT_OF = sys.argv[_i + 1]
+CLIENT_OF = CLIENT_OF.rstrip("/")
+CLIENT = bool(CLIENT_OF) and not HEADLESS
 # Headless, Jarvis's questions ("Should I go ahead?") are answered from the phone, which takes
 # longer than saying it: seconds to wait for that answer.
 HEADLESS_ANSWER_WAIT = 90
@@ -282,7 +295,7 @@ MPV_EXE    = r"C:\Users\paten\OneDrive\Desktop\Tools\mpv\mpv.exe" if WINDOWS els
 ESRGAN_EXE = r"C:\Users\paten\OneDrive\Desktop\Tools\ESRGAN\realesrgan-ncnn-vulkan.exe" if WINDOWS else ""
 
 # ── Server / desktop app ──────────────────────────────────────────────────────
-PORT = 5151
+PORT = int(os.environ.get("JARVIS_PORT", 5151))   # JARVIS_PORT: a second copy on one PC (testing)
 # Open the dashboard in the Electron desktop app (desktop/) instead of a browser tab.
 # The desktop app is what lets the Stage show live web pages. Falls back to the
 # browser when the app isn't installed (cd desktop && npm install).

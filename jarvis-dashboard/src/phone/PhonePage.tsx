@@ -1,15 +1,7 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useJarvis } from '../JarvisStatus';
-import { useStage, stageApi, Highlight, Panel } from '../stage/StageContext';
-import WebPanel from '../stage/panels/WebPanel';
-import SummaryPanel from '../stage/panels/SummaryPanel';
-import NotePanel from '../stage/panels/NotePanel';
-import ImagePanel from '../stage/panels/ImagePanel';
-import FileEditorPanel from '../stage/panels/FileEditorPanel';
-import MapPanel from '../stage/panels/MapPanel';
-import PlacesPanel from '../stage/panels/PlacesPanel';
-import CodePanel from '../stage/panels/CodePanel';
-import type { PanelProps } from '../stage/panels/types';
+import { useStage, Panel } from '../stage/StageContext';
+import PhoneStage from './PhoneStage';
 import * as voice from './phoneAudio';
 import { useRecorder, listMics, chooseMic, Mic } from './useRecorder';
 import '../stage/Stage.css';
@@ -24,11 +16,6 @@ const MAX_SIDE = 1568;     // Jarvis shrinks photos to this anyway: smaller uplo
 
 const STATE_LABEL: Record<string, string> = {
   idle: 'STANDBY', activated: 'WAITING', thinking: 'THINKING', speaking: 'SPEAKING', error: 'ERROR',
-};
-
-const KIND_NAME: Record<string, string> = {
-  page: 'PAGE', summary: 'KEY POINTS', file: 'FILE', image: 'IMAGE', note: 'NOTE', map: 'GLOBE',
-  places: 'PLACES', code: 'CLAUDE CODE',
 };
 
 interface Listen { question: string; until: number; source: string | null }
@@ -66,62 +53,6 @@ function useClientEvents(speakLine: (id: number, text: string, mine: boolean) =>
   }, []);
 
   return { listen, connected };
-}
-
-// ── Stage panels, stacked ────────────────────────────────────────────────────
-function PanelContent(props: PanelProps) {
-  switch (props.panel.kind) {
-    case 'page':    return <WebPanel {...props} />;
-    case 'summary': return <SummaryPanel {...props} />;
-    case 'note':    return <NotePanel {...props} />;
-    case 'image':   return <ImagePanel {...props} />;
-    case 'file':    return <FileEditorPanel {...props} />;
-    case 'map':     return <MapPanel {...props} />;
-    case 'places':  return <PlacesPanel {...props} />;
-    case 'code':    return <CodePanel {...props} />;
-    default:        return <div className="panelEmpty">Unknown panel</div>;
-  }
-}
-
-function StageList({ hidden, focus }: { hidden: boolean; focus: string | null }) {
-  const { stage } = useStage();
-  const refs = useRef(new Map<string, HTMLDivElement>());
-  const latest = useMemo(() => {
-    const byPanel = new Map<string, Highlight>();
-    for (const h of stage.highlights) byPanel.set(h.panel, h);
-    return byPanel;
-  }, [stage.highlights]);
-  // numbered like the PC's Stage ("close panel 2"); newest at the top
-  const numbered = stage.panels.map((p, n) => ({ p, n: n + 1 }));
-  const shown = [...numbered].sort((a, b) => b.p.created - a.p.created);
-
-  useEffect(() => {
-    if (focus && !hidden) refs.current.get(focus)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  }, [focus, hidden]);
-
-  if (!stage.panels.length) {
-    return <div className="phEmpty">Nothing on the Stage. Ask Jarvis to show you something: a map, a page, your agenda…</div>;
-  }
-  return (
-    <div className="phStage">
-      {shown.map(({ p, n }) => (
-        <div key={p.id} ref={el => { if (el) refs.current.set(p.id, el); else refs.current.delete(p.id); }}
-             className={`phCard phCard-${p.kind} panel panel-${p.kind} ${latest.has(p.id) ? 'panelMarked' : ''}`}>
-          <div className="phCardHead">
-            <span className="panelNum">{n}</span>
-            <span className="panelKind">{KIND_NAME[p.kind]}</span>
-            <span className="phCardTitle">{p.title}</span>
-            <button className="phIconBtn" aria-label="Close" onClick={() => stageApi.post(`panel/${p.id}/close`)}>✕</button>
-          </div>
-          <div className="panelBody phCardBody">
-            <PanelContent panel={p} highlight={latest.get(p.id) || null} hidden={hidden}
-                          all={stage.panels as Panel[]} highlights={stage.highlights} />
-          </div>
-        </div>
-      ))}
-      {stage.undo && <button className="phPill phUndo" onClick={() => stageApi.post('restore')}>Undo: {stage.undo}</button>}
-    </div>
-  );
 }
 
 // ── Settings sheet: voice on/off, which mic ──────────────────────────────────
@@ -187,6 +118,7 @@ export default function PhonePage() {
   const speakOnRef = useRef(speakOn);
   speakOnRef.current = speakOn;
 
+  const clearFocus = useCallback(() => setFocus(null), []);
   const setSpeakOn = (v: boolean) => { setSpeakOnState(v); saveSetting('jarvis.speak', v); if (!v) voice.hush(); };
 
   useEffect(() => voice.onSpeaking(setSpeaking), []);
@@ -360,9 +292,8 @@ export default function PhonePage() {
           ))}
           {orbState === 'thinking' && !listen && <div className="phMsg phMsg-jarvis phTyping"><span /><span /><span /></div>}
         </div>
-        {/* always mounted: the globe and the editor keep their state on the chat tab */}
-        <div className="phStageWrap" style={{ display: tab === 'stage' ? undefined : 'none' }}>
-          <StageList hidden={tab !== 'stage'} focus={focus} />
+                <div className="phStageWrap" style={{ display: tab === 'stage' ? undefined : 'none' }}>
+          <PhoneStage hidden={tab !== 'stage'} focus={focus} onFocused={clearFocus} />
         </div>
       </main>
 

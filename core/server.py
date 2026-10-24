@@ -455,7 +455,22 @@ def _turn():
     text = (b.get("text") or "").strip()
     if not text:
         return jsonify({"error": "text required"}), 400
-    turns.put(text, b.get("source") or "phone")
+    turns.put(text, b.get("source") or "phone", fresh=bool(b.get("fresh")))
+    return jsonify({"ok": True})
+
+
+@app.route("/api/client/answer", methods=["POST"])
+def _client_answer():
+    """The PC client listened for the answer to a question and heard nothing: end the wait."""
+    turns.put("", _body().get("source") or "pc")
+    return jsonify({"ok": True})
+
+
+@app.route("/api/client/presence", methods=["POST"])
+def _client_presence():
+    """The PC client's heartbeat (every 15 s): {"idle": seconds since keyboard/mouse input}."""
+    idle = _body().get("idle")
+    turns.presence(idle if isinstance(idle, (int, float)) else None)
     return jsonify({"ok": True})
 
 

@@ -39,7 +39,13 @@ say, anywhere, goes to the Pi. One memory, agenda and history, so there is nothi
   own mic by default, since AirPods transcribed much worse.
 - **Claude Code** runs with full permissions (except pushing to main and deleting repos) and
   pushes its `jarvis/` branches itself, which covers most of M6's auto-push.
-- **Next:** M5 (history survives a Pi restart, which the phone feed needs too), then M2-M4 for the PC.
+- **M2 is built** (`core/client.py`, `python jarvis.py --client <pi url>`): wake word, Whisper, voice
+  ID and Piper stay on the PC; turns go to the Pi as `source: "pc"`, its lines and questions come
+  back and are spoken/answered at the PC; a new wake-word command while the Pi waits for an answer
+  is sent as `fresh` and ends that wait. The presence heartbeat is in too (`notify.away()` on the
+  Pi). Still no client key (Tailscale is the boundary, as for `/phone`). The PC window still shows
+  the PC's own dashboard (orb), not the Pi's: that's M7.
+- **Next:** M3 (PC actions + offline queue), M5 (history), M4.
 
 ## How it fits together
 
@@ -122,7 +128,7 @@ Each is testable before the next starts.
 | # | What | Done when |
 |---|---|---|
 | M1 ✓ | Pi: turn queue with sources, client endpoints, SSE events (key and presence move to M2) | `scripts/pi/fake_client.py` (text in, events printed) holds a conversation with the Pi, including a `listen` |
-| M2 | PC client voice loop | "Jarvis, what time is it?" at the PC is answered by the Pi and spoken on the PC; the orb moves; answers to questions and interrupting work |
+| M2 ✓ | PC client voice loop (+ presence heartbeat) | "Jarvis, what time is it?" at the PC is answered by the Pi and spoken on the PC; the orb moves; answers to questions and interrupting work |
 | M3 | PC actions + offline queue | "Open Discord" from the PC and from the phone (PC on) opens it; with the PC off it offers, queues, and runs it on reconnect; screenshot lands on the Stage |
 | M4 | Reply routing + proactive messages | phone command spoken at the PC when you're active; reminders/check-ins at the PC or the phone depending on presence |
 | M5 | History | restart the Pi, yesterday's conversation is still on the dashboard; a day picker |

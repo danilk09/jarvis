@@ -36,11 +36,14 @@ _LINES_MAX = 60
 _listen = {"open": None}              # the open listen event, sent to clients that connect mid-wait
 
 
-def put(text, source="phone", image=None):
-    """Queue a command from a client."""
+def put(text, source="phone", image=None, fresh=False):
+    """Queue a command from a client. fresh: a new command (the PC heard the wake word), never
+    the answer to a question Jarvis is waiting on — that wait ends and this runs as its own turn."""
     turn = {"text": text, "source": source}
     if image:
         turn["image"] = image
+    if fresh:
+        turn["fresh"] = True
     queue.put(turn)
 
 
@@ -100,6 +103,18 @@ def _on_log(role, text):
 
 def _on_state(new_state):
     publish({"type": "state", "state": new_state})
+
+
+# ── The PC client's heartbeat ─────────────────────────────────────────────────
+pc = {"seen": 0.0, "idle": None}     # last heartbeat, and seconds since your last keyboard/mouse input
+
+
+def presence(idle):
+    pc.update(seen=time.time(), idle=idle)
+
+
+def pc_online():
+    return time.time() - pc["seen"] < 45
 
 
 def listening(question, seconds):

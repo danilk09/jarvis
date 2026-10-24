@@ -78,9 +78,11 @@ def quiet_seconds():
 
 def away():
     """True when nobody has touched the PC or spoken to Jarvis for PHONE_AWAY_MIN minutes.
-    Always on the headless brain: nobody hears it there, so everything goes to the phone."""
+    On the headless brain that's the PC client's heartbeat: away when the PC is off or idle."""
     if config.HEADLESS:
-        return True
+        from . import turns
+        idle = turns.pc["idle"]
+        return not turns.pc_online() or idle is None or idle > config.PHONE_AWAY_MIN * 60
     return quiet_seconds() > config.PHONE_AWAY_MIN * 60
 
 

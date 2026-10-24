@@ -6,6 +6,7 @@ Say "Jarvis" -> speak your command -> Claude figures out what to do.
     python jarvis.py                # normal (development) mode
     python jarvis.py --background   # 24/7 mode: no browser, logs to logs/jarvis.log
     python jarvis.py --headless     # the brain without mic/speakers/window (default on Linux: the Pi)
+    python jarvis.py --client URL   # this PC as ears and voice of the brain at URL (the Pi)
 
 The modules live in core/ — see CLAUDE.md for the layout.
 """
@@ -208,6 +209,8 @@ def _next_command():
         except queue.Empty:
             pass
         else:
+            if not turn["text"] and not turn.get("image"):
+                continue         # "heard nothing" for a question that's no longer waiting
             turns.begin(turn["source"])
             return ({"text": turn["text"], "image": turn["image"]} if turn.get("image") else turn["text"]), True
         # Something running in the background (Claude Code, a reminder) asked a question
@@ -282,9 +285,37 @@ def _stop_signal(signum, frame):
     raise KeyboardInterrupt   # systemctl stop / restart: the same clean exit as Ctrl+C
 
 
+def _client_startup():
+    """--client: only the PC's part — mic, wake word, voice ID, speakers, the local dashboard
+    for the orb. The brain (router, Claude, memory, agenda, Claude Code) is on the Pi."""
+    dash_url = f"http://localhost:{config.PORT}"
+    state.dash_url = dash_url
+    server.start()
+    desktop.on_closed.append(_window_closed)
+    if config.OPEN_WINDOW:
+        time.sleep(0.6)
+        desktop.open_dashboard(dash_url)
+    voice.start()
+    audio.on_wake.extend([stop_tts, music.duck])
+    tts.on_speech_start.append(lambda: music.duck("speech"))
+    tts.on_speech_end.append(lambda: music.unduck("speech"))
+    audio.start()
+    power.start()
+    print(f"\n{'='*50}\n  JARVIS (client of {config.CLIENT_OF})\n  Dashboard:  {dash_url}\n{'='*50}")
+
+
 def main():
     if not config.WINDOWS:
         signal.signal(signal.SIGTERM, _stop_signal)
+    if config.CLIENT:
+        from core import client
+        _client_startup()
+        try:
+            client.run(_greeting)
+        except KeyboardInterrupt:
+            speak("Shutting down. Goodbye.")
+        _shutdown()
+        return
     _startup()
     followup, followups = None, 0
     while True:
@@ -312,7 +343,7 @@ def main():
                 state.push_state("idle")
                 continue
             if from_phone:
-                print(f'\n  Phone command: "{command}"')
+                print(f'\n  {(turns.current["source"] or "phone").upper()} command: "{command}"')
                 voice_id.current.clear()
                 voice_id.current.update(verdict="none", score=None, sample="", guest=False)
             elif not command:
@@ -343,7 +374,8 @@ def main():
                 _finish()
                 continue
 
-            checkins.before_turn(command, from_phone, followups)   # back after a break / small talk?
+            # back after a break / small talk? (a check-in is spoken, so not for the phone)
+            checkins.before_turn(command, from_phone and turns.current["source"] != "pc", followups)
             response = None if image else router.route(command)
             if response:
                 print("  Handled locally (no AI call).")

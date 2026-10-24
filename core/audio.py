@@ -557,7 +557,7 @@ def _next_message():
     from . import tts, turns
     last_listen[0] = time.time()
     _keep([], "", "")
-    print("  Waiting for an answer from the phone...")
+    print(f"  Waiting for an answer from the {turns.current['source'] or 'phone'}...")
     q = tts.last_question
     turns.listening(q["text"] if time.time() - q["time"] < 120 else "", config.HEADLESS_ANSWER_WAIT)
     try:
@@ -567,7 +567,7 @@ def _next_message():
         return ""
     finally:
         turns.listen_done()
-    if message.get("image"):
+    if message.get("image") or message.get("fresh"):   # a photo, or a new command: not an answer
         turns.queue.put(message)
         return ""
     message = message["text"]
