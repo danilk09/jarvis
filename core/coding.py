@@ -9,10 +9,11 @@ Claude Code runs headless in the background (claude -p --output-format stream-js
 Its progress streams onto a "code" panel on the Stage, and Jarvis speaks Claude
 Code's own summary when it finishes.
 
-Permissions (config.CODE_PERMISSION_MODE, default acceptEdits): file edits — and
-file operations inside the project — happen automatically; shell commands must
-match config.CODE_ALLOWED_TOOLS. Anything else is refused and reported, and you can
-approve it by voice ("allow it"), which resumes the session with that command allowed.
+Permissions: coding runs use config.CODE_PERMISSION_MODE (bypassPermissions: anything goes)
+minus config.CODE_DENIED_TOOLS (pushing to main, deleting a GitHub repo). Delegated tasks use
+DELEGATE_PERMISSION_MODE (acceptEdits): their commands must match CODE_ALLOWED_TOOLS plus the
+service's own list. Anything refused is reported, and you can approve it by voice
+("allow it"), which resumes the session with that command allowed.
 
 Preferences live in jarvis_coding/CLAUDE.md. Claude Code reads CLAUDE.md from the
 project folder and every folder above it, so they apply to every project automatically.
@@ -303,6 +304,37 @@ def mcp_flags(entry):
 
 
 # ── Git: a branch per task ────────────────────────────────────────────────────
+def _first_push(path):
+    """True if nothing of this repo is on GitHub yet (no git, no origin, or origin has no
+    branches), so its first push may create main. Unreachable → False, the safe answer."""
+    if not _is_git(path):
+        return True
+    if _git(path, "remote", "get-url", "origin")[0] != 0:
+        return True
+    code, heads = _git(path, "ls-remote", "--heads", "origin", timeout=20)
+    return code == 0 and not heads
+
+
+def _denied(path, new, approved=()):
+    """--disallowedTools for a coding run: config.CODE_DENIED_TOOLS, minus pushes to main
+    for a repo's very first push, minus anything you just approved by voice (a deny rule
+    beats every allow rule, so it has to go). Pushing to main is never approved."""
+    rules = list(config.CODE_DENIED_TOOLS)
+    if new or _first_push(path):
+        rules = [r for r in rules if r not in config.CODE_MAIN_PUSH_RULES]
+
+    def inner(rule):
+        m = re.match(r"(\w+)\((.*?)(?::\*)?\)$", rule)     # PowerShell and Bash count as one shell
+        return ("shell" if m.group(1) in ("PowerShell", "Bash") else m.group(1), m.group(2).rstrip(" *")) \
+            if m else (rule, "")
+
+    for ok in approved:
+        tool, prefix = inner(ok)
+        rules = [r for r in rules if r in config.CODE_MAIN_PUSH_RULES
+                 or not (inner(r)[0] == tool and inner(r)[1].startswith(prefix))]
+    return rules
+
+
 def _git(path, *args, timeout=30):
     """Run git in `path`. Returns (exit code, output)."""
     try:
@@ -332,8 +364,9 @@ def _prepare_branch(name, path, request, fresh=False):
     code, branch = _git(path, "rev-parse", "--abbrev-ref", "HEAD")
     if code != 0:              # no commits yet: nothing to branch from
         return True, ""
-    keep = ("Commit your work there with clear messages (git add and git commit are allowed). Don't push, "
-            "merge or switch branches unless the user asks — pushing needs their spoken OK.")
+    keep = ("Commit your work there with clear messages, and when you're done push this branch "
+            "(git push -u origin <branch>) if the repo has a GitHub remote. Never push to main or master, "
+            "merge, or switch branches unless the user asks.")
     if branch.startswith("jarvis/") and not fresh:
         return True, f"You're on the branch {branch}, made for earlier Jarvis work in this repo. {keep}"
     _, dirty = _git(path, "status", "--porcelain")
@@ -412,10 +445,11 @@ def start(request, project=None, new=False, effort="", model="", plan=False, ext
     effort = effort if effort in _EFFORTS else config.CODE_EFFORT
     model = model if (model in _MODELS or model.startswith("claude-")) else config.CODE_MODEL
     # a question about the code or its GitHub issues/PRs runs read-only (plan mode), quick by default
-    mode = "plan" if plan or question else config.CODE_PERMISSION_MODE
+    mode = "plan" if plan or question else config.DELEGATE_PERMISSION_MODE if service else config.CODE_PERMISSION_MODE
     if question and not effort:
         effort = "low"
     allowed = list(config.CODE_ALLOWED_TOOLS) + list(extra_allowed) + list((service or {}).get("allowed", []))
+    denied = [] if service else _denied(proj["path"], new, extra_allowed)
 
     argv = [exe, "-p", "--output-format", "stream-json", "--verbose",
             "--permission-mode", mode, "--append-system-prompt",
@@ -430,6 +464,8 @@ def start(request, project=None, new=False, effort="", model="", plan=False, ext
     if effort:
         argv += ["--effort", effort]
     argv += ["--allowedTools", *allowed]
+    if denied:
+        argv += ["--disallowedTools", *denied]
     prompt = request
     if new:
         prompt = (f"{request}\n\nThis is a new, empty project folder: build it from scratch here. "
@@ -575,6 +611,37 @@ def _tool_event(job, name, inp, root):
         _add_event(job, "tool", name)
 
 
+def _ago(t):
+    m = int((time.time() - t) / 60)
+    return "just now" if m < 2 else f"{m} minutes ago" if m < 90 else f"{round(m / 60)} hours ago" \
+        if m < 36 * 60 else f"{round(m / 1440)} days ago"
+
+
+def _idle_status(name, proj):
+    """Nothing running: what is waiting for you (refused commands, a plan to approve), else
+    how the last run ended, so "idle" never hides that Claude Code needs something."""
+    if not name:
+        return "There's no coding project yet."
+    with _lock:
+        waiting = {n: p for n, p in _state["projects"].items() if p.get("pending")}
+    parts = []
+    for n, p in sorted(waiting.items(), key=lambda kv: kv[0] != name):
+        more = len(p["pending"]) - 1
+        parts.append(f"{pretty(n)} is waiting for your OK to {_speakable_denial(p['pending'][0])}"
+                     + (f" and {more} other thing{'s' if more > 1 else ''}" if more > 0 else "")
+                     + ". Say allow it to let it.")
+    last = (proj or {}).get("last_run")
+    if last and name not in waiting:
+        if last["status"] == "planned":
+            parts.append(f"The plan for {pretty(name)} from {_ago(last['time'])} is waiting for your go-ahead.")
+        elif last["status"] == "error":
+            parts.append(f"The last run in {pretty(name)}, {_ago(last['time'])}, ran into a problem: {last['summary']}")
+        elif last["status"] != "stopped":
+            parts.append(f"Nothing's running. {pretty(name)[:1].upper() + pretty(name)[1:]} finished "
+                         f"{_ago(last['time'])}: {last['summary']}")
+    return " ".join(parts) or f"Nothing's running. The current project is {pretty(name)}."
+
+
 def _speakable(text, limit=450):
     """Claude Code's closing summary, trimmed to something comfortable to hear."""
     text = re.sub(r"[`*_#>]", "", text or "").strip()
@@ -609,6 +676,9 @@ def _finish(job, result):
         if entry:
             entry["pending"] = denials
             entry["last"] = time.time()
+            # for "what's the status of Claude Code": how the last run ended, in its own words
+            entry["last_run"] = {"status": status, "request": job["request"][:300],
+                                 "summary": _speakable(summary), "time": time.time()}
             if result and result.get("session_id"):
                 entry["session"] = result["session_id"]
             _save()
@@ -1073,8 +1143,7 @@ def _code(a, chain):
             last = next((e["text"] for e in reversed(job["events"]) if e["kind"] in ("edit", "command", "text")), "")
             speak(f"{pretty(job['project'])}: still working. Latest: {last[:140]}")
         if not active:
-            speak(f"Claude Code is idle. The current project is {pretty(name)}." if name
-                  else "There's no coding project yet.")
+            speak(_idle_status(name, proj))
         return "Code: status"
     if cmd == "stop":
         stopped = stop(a.get("project") or None)

@@ -189,7 +189,9 @@ BRIEFING_NEWS = ["top news today"]   # news searches for the headlines; add topi
 # ── Claude Code (coding projects, see core/coding.py) ─────────────────────────
 # Your coding preferences live in CODING_DIR/CLAUDE.md — say "remember I prefer ..." to add one.
 CLAUDE_EXE           = ""              # path to claude.exe; empty = find it on PATH
-CODE_PERMISSION_MODE = "acceptEdits"   # file edits run automatically; commands must be allowed below
+# Coding runs may do anything (no "allow that command" round trips), except what
+# CODE_DENIED_TOOLS blocks. Delegated tasks (email, calendar, Drive) keep asking: DELEGATE_PERMISSION_MODE.
+CODE_PERMISSION_MODE = "bypassPermissions"
 CODE_MODEL           = ""              # "" = Claude Code's default; or "opus", "sonnet", "fable", "haiku"
 CODE_EFFORT          = ""              # "" = default; or "low", "medium", "high", "xhigh", "max"
 # False: Claude Code uses your own Claude login/subscription (`claude` → /login). True: it bills
@@ -204,13 +206,13 @@ GITHUB_USER          = "danilk09"
 GITHUB_TOKEN         = os.environ.get("GITHUB_TOKEN", "")
 CODE_MAX_PARALLEL    = 3       # Claude Code runs at once (one per project)
 # Each task in a git repo gets its own branch (jarvis/<task>); Claude Code commits there and
-# never touches main. Pushing and opening PRs always need your spoken OK.
+# pushes that branch, never main (CODE_DENIED_TOOLS).
 CODE_BRANCH_PER_TASK = True
 # Phone notification when a run finishes (with Continue on phone / Allow buttons):
 # "away" = only when you're away from the PC, "always", or "never"
 CODE_NOTIFY          = "away"
-# Commands Claude Code may run without asking (it runs in the background, so nobody can click
-# "approve"). Anything else is refused and Jarvis asks you — say "allow it" to run it.
+# Commands delegated tasks (and coding runs, if CODE_PERMISSION_MODE is ever "acceptEdits"
+# again) may run without asking. Anything else is refused and Jarvis asks — "allow it" runs it.
 _ALLOWED_COMMANDS = [
     "npm install", "npm ci", "npm run", "npm test", "npm init", "npm create", "npm ls",
     "pnpm install", "pnpm add", "pnpm run", "pnpm test", "pnpm create",
@@ -236,6 +238,16 @@ CODE_ALLOWED_TOOLS += [f"mcp__github__{t}" for t in _GITHUB_READ_TOOLS]
 # the read-only Postgres connection run freely; Docker, Firebase and Postman changes are
 # refused and Jarvis asks you, like a push.
 CODE_ALLOWED_TOOLS += ["mcp__context7", "mcp__playwright", "mcp__postgres"]
+# Blocked even with full permissions (deny rules beat every mode). Pushing to main/master
+# is never allowed, except the first push of a repo that has nothing on GitHub yet; work
+# goes to a jarvis/<task> branch instead. Deleting a GitHub repo comes back as a denial, and
+# Jarvis asks you ("allow it"). Rules match the command as Claude Code writes it, so they
+# stop the usual forms; GitHub branch protection on main is the hard guarantee.
+_MAIN_PUSHES = [f"git push {p}" for b in ("main", "master")
+                for p in (f"* {b}", f"* {b} *", f"*:{b}", f"*:{b} *", f"*/{b}", f"*/{b} *")]
+CODE_MAIN_PUSH_RULES = [f"{shell}({cmd})" for cmd in _MAIN_PUSHES for shell in ("PowerShell", "Bash")]
+CODE_DENIED_TOOLS = CODE_MAIN_PUSH_RULES + [f"{shell}(gh repo delete *)" for shell in ("PowerShell", "Bash")] \
+                    + ["mcp__github__delete_repository"]
 
 # ── Delegated tasks (core/delegate.py) ────────────────────────────────────────
 # Gmail, Drive, job searches, Miro... go to Claude Code (your subscription) with only the
@@ -243,6 +255,8 @@ CODE_ALLOWED_TOOLS += ["mcp__context7", "mcp__playwright", "mcp__postgres"]
 DELEGATE_DIR      = os.path.join(ROOT, "jarvis_delegate")  # where they run; files they make land here
 DELEGATE_MODEL    = "sonnet"   # Claude Code model for delegated tasks ("" = Claude Code's default)
 DELEGATE_EFFORT   = "low"      # quick by default; "think hard" in the request raises it
+# Sending email, changing your calendar, sharing files... is refused and Jarvis asks you first
+DELEGATE_PERMISSION_MODE = "acceptEdits"
 # A service's conversation is continued ("reply to the second one") until it's been idle this
 # long; then it starts fresh so old context doesn't make every later task slower and bigger.
 DELEGATE_SESSION_HOURS = 3
