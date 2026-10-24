@@ -57,7 +57,15 @@ It prints your **power page link** (with its key). Open it once on your phone, t
 
 ```bash
 ./scripts/pi/diag load                                   # 10 spoken commands: speed, CPU, heat, memory
-tmux new -s soak './scripts/pi/diag soak --hours 24'      # Ctrl+B then D to leave it running
+cd ~/jarvis && tmux new -s soak './scripts/pi/diag soak --hours 24; read -p "Soak ended - Enter closes this"'
+```
+
+You should see a line ticking every minute (time, °C, CPU, Jarvis). Then press Ctrl+B, then D, to
+leave it running. Check that it's really going: `tmux ls` lists `soak`, and
+`ls -l scripts/pi/results/soak-*.csv` grows every minute. The window stays open when the soak
+ends (or fails), so you can read why. A day later:
+
+```bash
 ./scripts/pi/diag report && cat scripts/pi/results/report.md   # paste this to Claude
 ```
 
