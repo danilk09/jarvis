@@ -18,7 +18,14 @@ const STATE_LABEL: Record<string, string> = {
   idle: 'STANDBY', activated: 'WAITING', thinking: 'THINKING', speaking: 'SPEAKING', error: 'ERROR',
 };
 
-interface Listen { question: string; until: number; source: string | null }
+interface Listen { question: string; until: number; source: string | null; to?: string[] }
+
+/** Meant for the phone: the brain's "to" (M4: at the PC when you're there, else here);
+ *  older brains: the phone's own turns and Jarvis's own lines. */
+function forPhone(ev: { source?: string | null; to?: string[] } | null) {
+  if (!ev) return false;
+  return ev.to ? ev.to.includes('phone') : ev.source === 'phone' || !ev.source;
+}
 
 function setting(key: string, fallback: boolean) {
   try { const v = localStorage.getItem(key); return v === null ? fallback : v === '1'; } catch { return fallback; }
@@ -42,12 +49,11 @@ function useClientEvents(speakLine: (id: number, text: string, mine: boolean) =>
       let msg: any;
       try { msg = JSON.parse(ev.data); } catch { return; }
       if (msg.type === 'line' || msg.type === 'user' || msg.type === 'state') window.dispatchEvent(new Event('jarvis:poke'));
-      const forMe = (l: Listen | null) => (l && (l.source === 'phone' || !l.source) ? l : null);
+      const forMe = (l: Listen | null) => (forPhone(l) ? l : null);
       if (msg.type === 'hello') setListen(forMe(msg.listen));
       else if (msg.type === 'listen') setListen(forMe(msg));
       else if (msg.type === 'listen_end') setListen(null);
-      // The phone's own turns, and whatever Jarvis says between turns; not replies at the PC
-      else if (msg.type === 'line') speak.current(msg.id, msg.text, msg.source === 'phone' || !msg.source);
+      else if (msg.type === 'line') speak.current(msg.id, msg.text, forPhone(msg) && !msg.spoken);
     };
     return () => es.close();
   }, []);
@@ -56,7 +62,10 @@ function useClientEvents(speakLine: (id: number, text: string, mine: boolean) =>
 }
 
 // ── Settings sheet: voice on/off, which mic ──────────────────────────────────
-function Settings({ onClose, speakOn, setSpeakOn }: { onClose: () => void; speakOn: boolean; setSpeakOn: (v: boolean) => void }) {
+function Settings({ onClose, speakOn, setSpeakOn, autoListen, setAutoListen }: {
+  onClose: () => void; speakOn: boolean; setSpeakOn: (v: boolean) => void;
+  autoListen: boolean; setAutoListen: (v: boolean) => void;
+}) {
   const [mics, setMics] = useState<Mic[]>([]);
   const [choice, setChoice] = useState(() => { try { return localStorage.getItem('jarvis.mic') || 'auto'; } catch { return 'auto'; } });
   useEffect(() => { listMics().then(setMics); }, []);
@@ -69,6 +78,10 @@ function Settings({ onClose, speakOn, setSpeakOn }: { onClose: () => void; speak
         <label className="phRow">
           <span>Speak replies out loud</span>
           <input type="checkbox" checked={speakOn} onChange={e => setSpeakOn(e.target.checked)} />
+        </label>
+        <label className="phRow">
+          <span>When Jarvis asks something, listen for my answer</span>
+          <input type="checkbox" checked={autoListen} onChange={e => setAutoListen(e.target.checked)} />
         </label>
         <div className="phSheetLabel">MICROPHONE</div>
         <label className="phRow">
@@ -105,6 +118,8 @@ export default function PhonePage() {
   const [sending, setSending] = useState(false);
   const [photo, setPhoto] = useState<{ blob: Blob; url: string } | null>(null);
   const [speakOn, setSpeakOnState] = useState(() => setting('jarvis.speak', true));
+  const [autoListen, setAutoListen] = useState(() => setting('jarvis.autolisten', true));
+  const [typing, setTyping] = useState(false);
   const [voiceReady, setVoiceReady] = useState(voice.ready());
   const [speaking, setSpeaking] = useState(false);
   const [settings, setSettings] = useState(false);
@@ -113,12 +128,12 @@ export default function PhonePage() {
   const [power, setPower] = useState('');
   const lineIds = useRef(new Map<string, number>());     // text → line id, to replay a reply
   const feedRef = useRef<HTMLDivElement>(null);
-  const cameraRef = useRef<HTMLInputElement>(null);
-  const libraryRef = useRef<HTMLInputElement>(null);
+  const photoRef = useRef<HTMLInputElement>(null);
   const speakOnRef = useRef(speakOn);
   speakOnRef.current = speakOn;
 
   const clearFocus = useCallback(() => setFocus(null), []);
+  const setAutoListenOn = (v: boolean) => { setAutoListen(v); saveSetting('jarvis.autolisten', v); };
   const setSpeakOn = (v: boolean) => { setSpeakOnState(v); saveSetting('jarvis.speak', v); if (!v) voice.hush(); };
 
   useEffect(() => voice.onSpeaking(setSpeaking), []);
@@ -205,6 +220,19 @@ export default function PhonePage() {
   }, [photo, post]);
 
   const rec = useRecorder((audio, mic) => send({ audio, mic, text: photo ? text : '' }));
+
+  // Jarvis asked something here: once he's finished saying it, open the mic for the answer
+  // (gives up after a few quiet seconds; the answer bar stays for tapping or typing)
+  const askedAt = useRef(0);
+  const { recording, start: startRec } = rec;
+  useEffect(() => {
+    if (!listen || !autoListen || document.hidden || typing || recording || sending) return;
+    if (askedAt.current === listen.until) return;
+    if (speaking) return;                                   // wait for the question to finish
+    const t = setTimeout(() => { askedAt.current = listen.until; startRec({ onset: 6 }); },
+                         speakOn && voiceReady ? 250 : 900);
+    return () => clearTimeout(t);
+  }, [listen, autoListen, speaking, typing, sending, speakOn, voiceReady, recording, startRec]);
 
   const onMic = () => {
     if (rec.recording) { rec.stop(); return; }
@@ -314,35 +342,56 @@ export default function PhonePage() {
         </div>
       )}
 
-      {photo && (
-        <div className="phPhoto">
-          <img src={photo.url} alt="To send" />
-          <span>Ask about it, or just send it</span>
-          <button className="phIconBtn" aria-label="Remove photo" onClick={() => { URL.revokeObjectURL(photo.url); setPhoto(null); }}>✕</button>
-        </div>
-      )}
-
-      {(status || rec.error) && <div className="phStatus">{rec.error || status}</div>}
-
-      <footer className="phComposer">
-        <button className="phIconBtn" aria-label="Camera" onClick={() => cameraRef.current?.click()}>📷</button>
-        <button className="phIconBtn" aria-label="Photos" onClick={() => libraryRef.current?.click()}>🖼</button>
-        <input ref={cameraRef} type="file" accept="image/*" capture="environment" hidden onChange={onPick} />
-        <input ref={libraryRef} type="file" accept="image/*" hidden onChange={onPick} />
-        <textarea className="phInput" rows={1} value={text} placeholder={listen ? 'Type your answer…' : photo ? 'Ask about the photo…' : 'Message Jarvis…'}
-                  enterKeyHint="send" onChange={e => setText(e.target.value)}
-                  onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); if (!busy) send({ text }); } }} />
-        {text.trim() || (photo && !rec.recording)
-          ? <button className="phSend" disabled={busy} onClick={() => send({ text })} aria-label="Send">➤</button>
-          : <button className={`phMic ${rec.recording ? 'phMicOn' : ''}`} disabled={sending} onClick={onMic}
-                    aria-label={rec.recording ? 'Stop recording' : 'Speak'}
+      <footer className={`phDock ${rec.recording ? 'phDockRec' : ''}`}>
+        {photo && (
+          <div className="phPhoto">
+            <img src={photo.url} alt="To send" />
+            <span>Tap the mic to ask about it, or just send it</span>
+            {!rec.recording && <button className="phPill phPillGo" disabled={busy} onClick={() => send({ text })}>Send</button>}
+            <button className="phIconBtn" aria-label="Remove photo" onClick={() => { URL.revokeObjectURL(photo.url); setPhoto(null); }}>✕</button>
+          </div>
+        )}
+        {(status || rec.error) && <div className="phStatus">{rec.error || status}</div>}
+        {typing && (
+          <div className="phTypeRow">
+            <textarea className="phInput" rows={1} value={text} autoFocus
+                      placeholder={listen ? 'Type your answer…' : photo ? 'Ask about the photo…' : 'Message Jarvis…'}
+                      enterKeyHint="send" onChange={e => setText(e.target.value)}
+                      onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); if (!busy) send({ text }); } }} />
+            <button className="phSend" disabled={busy || !text.trim()} onClick={() => send({ text })} aria-label="Send">➤</button>
+          </div>
+        )}
+        <div className="phDockRow">
+          <button className="phSideBtn" aria-label="Photo" onClick={() => photoRef.current?.click()}>📷</button>
+          <input ref={photoRef} type="file" accept="image/*" hidden onChange={onPick} />
+          <div className="phMicWrap">
+            <button className={`phBigMic ${rec.recording ? 'phBigMicOn' : ''} ${listen && !rec.recording ? 'phBigMicAsk' : ''}`}
+                    disabled={sending} onClick={onMic} aria-label={rec.recording ? 'Stop' : 'Talk to Jarvis'}
                     style={{ ['--lvl' as string]: rec.level.toFixed(2) }}>
-              {rec.recording ? '■' : '🎙'}
-            </button>}
+              {rec.recording ? <span className="phStopSq" /> : <MicIcon />}
+            </button>
+            <div className="phMicLabel">
+              {rec.recording ? 'Listening… tap when done' : sending ? 'Sending…' : listen ? 'Tap to answer'
+                : photo ? 'Tap to ask about the photo' : 'Tap to talk'}
+            </div>
+          </div>
+          <button className={`phSideBtn ${typing ? 'phSideOn' : ''}`} aria-label="Type instead" onClick={() => setTyping(!typing)}>⌨</button>
+        </div>
       </footer>
 
-      {settings && <Settings onClose={() => setSettings(false)} speakOn={speakOn} setSpeakOn={setSpeakOn} />}
+      {settings && <Settings onClose={() => setSettings(false)} speakOn={speakOn} setSpeakOn={setSpeakOn}
+                             autoListen={autoListen} setAutoListen={setAutoListenOn} />}
     </div>
+  );
+}
+
+function MicIcon() {
+  return (
+    <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"
+         strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <rect x="9" y="3" width="6" height="11" rx="3" />
+      <path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21M8.5 21h7" />
+    </svg>
   );
 }
 

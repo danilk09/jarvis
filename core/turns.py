@@ -8,10 +8,11 @@ so whatever Jarvis says is tagged with it: the phone speaks its own replies and 
 Jarvis says on his own between turns (Claude Code finished, a reminder), not the PC's.
 
 Clients follow along on GET /api/client/events (SSE), one event per change:
-  {"type": "line", "id", "text", "source", "time"}   Jarvis said something; audio at /api/say/<id>
+  {"type": "line", "id", "text", "source", "to", "time"}   Jarvis said something, for the clients
+                                                     in "to" (targets()); audio at /api/say/<id>
   {"type": "user", "text", "source", "time"}          a command (or answer) was heard
   {"type": "state", "state"}                          idle | activated | thinking | speaking
-  {"type": "listen", "question", "until", "source"}   Jarvis waits for an answer from `source`
+  {"type": "listen", "question", "until", "source", "to"}   Jarvis waits for an answer from "to"
   {"type": "listen_end"}
 A client that (re)connects gets a "hello" with the current state and any open listen, and
 reads earlier lines from /status's log.
@@ -24,7 +25,7 @@ import queue as _queue
 import threading
 import time
 
-from . import state
+from . import config, state
 
 queue = _queue.Queue()     # turns for the main loop: {"text", "source", "image"?}
 
@@ -114,7 +115,7 @@ def _on_log(role, text):
     source = getattr(_local, "source", None) or current["source"]
     if role == "jarvis":
         lid = next(_ids)
-        entry = {"text": text, "source": source, "time": now}
+        entry = {"text": text, "source": source, "time": now, "to": targets(source)}
         if getattr(_local, "echo", False):
             entry["spoken"] = True
         with _lock:
@@ -149,10 +150,28 @@ def pc_online():
     return time.time() - pc["seen"] < 45
 
 
+def at_pc():
+    """You're at the PC: its client is connected, it isn't locked, and you've used it (or talked
+    to Jarvis there) in the last PHONE_AWAY_MIN minutes."""
+    return pc_online() and pc["idle"] is not None and pc["idle"] < config.PHONE_AWAY_MIN * 60
+
+
+def targets(source, question=False):
+    """Who hears a line (M4): a PC command's replies at the PC; a phone command's on the phone,
+    and at the PC too when you're there (a question only where it was asked); Jarvis's own
+    lines (reminders, Claude Code finished, check-ins) at the PC if you're there, else the phone."""
+    if source == "phone":
+        return ["phone"] if question or not at_pc() else ["phone", "pc"]
+    if source is None:
+        return ["pc"] if at_pc() else ["phone"]
+    return [source]
+
+
 def listening(question, seconds):
     """Jarvis waits (up to `seconds`) for the current turn's source to answer `question`."""
+    source = getattr(_local, "source", None) or current["source"]
     _listen["open"] = {"type": "listen", "question": question, "until": time.time() + seconds,
-                       "source": current["source"]}
+                       "source": source, "to": targets(source, question=True)}
     publish(_listen["open"])
 
 

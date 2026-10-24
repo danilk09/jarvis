@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import { createPortal } from 'react-dom';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useStage, stageApi, Highlight, Panel } from '../stage/StageContext';
@@ -15,8 +16,8 @@ import type { PanelProps } from '../stage/panels/types';
 // The Stage on the phone. A list of short preview cards that never scroll on their own (so
 // a swipe always scrolls the list), each showing the gist: a note's start, Claude Code's
 // status and summary with its Allow/Stop buttons, the places, a thumbnail. Tapping a card
-// opens the real panel full screen, where it can scroll, zoom and pan; ‹ › step through
-// the panels, ✕ or the phone's back gesture closes it.
+// opens the real panel full screen, where it can scroll, zoom and pan; ✕ (top) or the
+// phone's back gesture closes it, ‹ Newer / Older › (bottom) step through the panels.
 
 const KIND_NAME: Record<string, string> = {
   page: 'PAGE', summary: 'KEY POINTS', file: 'FILE', image: 'IMAGE', note: 'NOTE', map: 'GLOBE',
@@ -145,6 +146,11 @@ export default function PhoneStage({ hidden, focus, onFocused }: { hidden: boole
   }, [open !== null]);   // eslint-disable-line react-hooks/exhaustive-deps
   const close = () => { if (window.history.state?.viewer) window.history.back(); else setOpen(null); };
 
+  // The list behind stays still while a panel is open (iOS passes swipes through otherwise)
+  useEffect(() => {
+    document.querySelector('.phStageWrap')?.classList.toggle('phLocked', open !== null);
+  }, [open]);
+
   // Closed on the PC (or by voice) while open here
   useEffect(() => { if (open && index < 0) setOpen(null); }, [open, index]);
 
@@ -171,26 +177,30 @@ export default function PhoneStage({ hidden, focus, onFocused }: { hidden: boole
         {stage.undo && <button className="phPill phUndo" onClick={() => stageApi.post('restore')}>Undo: {stage.undo}</button>}
       </div>
 
-      {current && (
-        <div className="phViewer">
+      {/* rendered at the page's root, outside the scrolling list: iOS mis-places fixed
+          elements inside scroll areas (and .phone carries the theme's colors) */}
+      {current && createPortal(
+        <div className="phViewer" role="dialog" aria-label={current.p.title}>
           <div className="phViewerHead">
-            <button className="phIconBtn" aria-label="Back" onClick={close}>✕</button>
             <div className="phViewerTitle">
               <span className="panelKind">{current.n} · {KIND_NAME[current.p.kind]}</span>
               <span className="phCardTitle">{current.p.title}</span>
             </div>
-            <button className="phIconBtn" aria-label="Newer" disabled={index <= 0}
-                    onClick={() => setOpen(shown[index - 1].p.id)}>‹</button>
-            <button className="phIconBtn" aria-label="Older" disabled={index >= shown.length - 1}
-                    onClick={() => setOpen(shown[index + 1].p.id)}>›</button>
+            <button className="phViewerClose" aria-label="Close" onClick={close}>✕</button>
           </div>
-          <div className={`phViewerBody panel panel-${current.p.kind}`}>
+          <div key={current.p.id} className={`phViewerBody phViewerBody-${current.p.kind}`}>
             <div className="panelBody">
               <PanelContent key={current.p.id} panel={current.p} highlight={latest.get(current.p.id) || null}
                             hidden={hidden} all={stage.panels as Panel[]} highlights={stage.highlights} />
             </div>
           </div>
-        </div>
+          <div className="phViewerNav">
+            <button className="phNavBtn" disabled={index <= 0} onClick={() => setOpen(shown[index - 1].p.id)}>‹ Newer</button>
+            <span className="phNavCount">{index + 1} of {shown.length}</span>
+            <button className="phNavBtn" disabled={index >= shown.length - 1} onClick={() => setOpen(shown[index + 1].p.id)}>Older ›</button>
+          </div>
+        </div>,
+        document.querySelector('.phone') ?? document.body,
       )}
     </>
   );

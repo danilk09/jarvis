@@ -8,7 +8,9 @@ import { context } from './phoneAudio';
 // through them also drops your music to call quality. So the phone's built-in mic is the
 // default; the ⚙ sheet lets you pick another, remembered in localStorage.
 //
-// It stops by itself after a pause once you've spoken (or tap to stop), up to MAX_S.
+// It stops by itself after a pause once you've spoken (or tap to stop), up to MAX_S. Started
+// with { onset } (Jarvis asked you something), it gives up quietly if you don't start talking
+// within that many seconds.
 
 const KEY = 'jarvis.mic';
 const MAX_S = 20;
@@ -54,14 +56,16 @@ export function useRecorder(onDone: (audio: Blob, mic: string) => void) {
   const stopTimer = useRef<() => void>(() => {});
   const done = useRef(onDone);
   done.current = onDone;
+  const discard = useRef(false);
 
   const stop = useCallback(() => {
     if (rec.current && rec.current.state !== 'inactive') rec.current.stop();
   }, []);
 
-  const start = useCallback(async () => {
+  const start = useCallback(async (opts: { onset?: number } = {}) => {
     if (rec.current && rec.current.state !== 'inactive') return;
     setError('');
+    discard.current = false;
     let stream: MediaStream;
     try {
       const id = await pick();
@@ -82,7 +86,7 @@ export function useRecorder(onDone: (audio: Blob, mic: string) => void) {
         }
       }
     } catch {
-      setError('Microphone access denied');
+      if (!opts.onset) setError('Microphone access denied');   // (an automatic start may just not be allowed)
       return;
     }
     const track = stream.getAudioTracks()[0];
@@ -98,7 +102,7 @@ export function useRecorder(onDone: (audio: Blob, mic: string) => void) {
       setLevel(0);
       rec.current = null;
       const blob = new Blob(chunks, { type: r.mimeType || 'audio/mp4' });
-      if (blob.size > 0) done.current(blob, micLabel);
+      if (blob.size > 0 && !discard.current) done.current(blob, micLabel);
     };
     r.start();
     setRecording(true);
@@ -125,6 +129,7 @@ export function useRecorder(onDone: (audio: Blob, mic: string) => void) {
         setLevel(Math.min(1, rms * 8));
         if (loud) { spoke = true; quietSince = 0; }
         else if (spoke && !quietSince) quietSince = t;
+        if (!spoke && opts.onset && t > opts.onset) { discard.current = true; stop(); return; }
         if ((spoke && quietSince && t - quietSince > SILENCE_S) || t > MAX_S) { stop(); return; }
         raf = requestAnimationFrame(tick);
       };
@@ -137,7 +142,10 @@ export function useRecorder(onDone: (audio: Blob, mic: string) => void) {
     if (raf !== -1) stopTimer.current = () => { cancelAnimationFrame(raf); src?.disconnect(); };
   }, [stop]);
 
+  /** Stop without sending. */
+  const cancel = useCallback(() => { discard.current = true; stop(); }, [stop]);
+
   useEffect(() => () => stop(), [stop]);
 
-  return { recording, level, error, start, stop };
+  return { recording, level, error, start, stop, cancel };
 }

@@ -62,13 +62,18 @@ def _post(path, body, timeout=10):
 
 
 # ── Events from the brain ─────────────────────────────────────────────────────
+def _for_pc(ev):
+    """A line or question meant for this PC (the brain's "to"; older brains: our own turns)."""
+    return "pc" in ev["to"] if "to" in ev else ev.get("source") == "pc"
+
+
 def _handle(ev):
     t = ev.get("type")
-    if t == "line" and ev.get("source") == "pc" and not ev.get("spoken"):
-        speak(ev["text"])
+    if t == "line" and _for_pc(ev) and not ev.get("spoken"):
+        speak(ev["text"])        # our own replies, a phone command's while you're here, reminders...
     elif t == "do":
         threading.Thread(target=_do, args=(ev,), daemon=True, name="client-do").start()
-    elif t in ("listen", "hello") and (ev if t == "listen" else ev.get("listen") or {}).get("source") == "pc":
+    elif t in ("listen", "hello") and _for_pc(ev if t == "listen" else ev.get("listen") or {}):
         q = ev if t == "listen" else ev["listen"]
         _listen.update(question=q.get("question") or "", since=time.time())
         _wake_listen.set()
@@ -110,7 +115,7 @@ def _events():
 def _connected():
     """Tell the brain about this PC: its workspaces now, and that it's here (presence)."""
     _post("/api/client/index", {"workspaces": files.load_workspaces()})
-    _post("/api/client/presence", {"idle": round(notify.quiet_seconds())}, timeout=5)
+    _post("/api/client/presence", {"idle": _idle()}, timeout=5)
 
 
 # ── PC actions for the brain ──────────────────────────────────────────────────
@@ -164,8 +169,14 @@ def _do(ev):
 def _presence():
     while True:
         if _online.is_set():
-            _post("/api/client/presence", {"idle": round(notify.quiet_seconds())}, timeout=5)
+            _post("/api/client/presence", {"idle": _idle()}, timeout=5)
         time.sleep(15)
+
+
+def _idle():
+    """Seconds since you last used this PC or talked to Jarvis here; locked counts as away."""
+    from . import power
+    return 10 ** 6 if power.locked() else round(notify.quiet_seconds())
 
 
 # ── Turns ─────────────────────────────────────────────────────────────────────

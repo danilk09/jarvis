@@ -123,22 +123,39 @@
 .phPillGo { background: var(--green); color: var(--bg); border-color: var(--green); }
 .phUndo { align-self: center; }
 
-/* One panel full screen: it scrolls, zooms and pans inside; the list behind stays put */
+/* One panel full screen. Sized to the visible area (100dvh), not the layout viewport, so
+   nothing sits behind Safari's toolbars; its own scroll area; the list behind is locked. */
+.phLocked { overflow: hidden !important; }
 .phViewer {
-  position: fixed; inset: 0; z-index: 15; display: flex; flex-direction: column;
-  background: var(--bg); padding-top: env(safe-area-inset-top);
+  position: fixed; top: 0; left: 0; right: 0; height: 100dvh; z-index: 30;
+  display: flex; flex-direction: column; background: var(--bg);
+  padding-top: env(safe-area-inset-top);
 }
-.phViewerHead { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+.phViewerHead { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
 .phViewerTitle { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-.phViewerHead .phIconBtn:disabled { opacity: 0.3; }
-.phViewerBody {
-  flex: 1; min-height: 0; display: flex; flex-direction: column; border: none; border-radius: 0;
-  padding-bottom: env(safe-area-inset-bottom); overscroll-behavior: contain;
+.phViewerClose {
+  width: 44px; height: 44px; border-radius: 50%; flex-shrink: 0; font-size: 18px; cursor: pointer;
+  border: 1px solid var(--border-bright); background: var(--surface-2); color: var(--text-bright);
 }
-.phViewerBody .panelBody { flex: 1; min-height: 0; }
+.phViewerBody { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; background: var(--panel); }
+.phViewerBody > .panelBody { flex: 1; min-height: 0; }
+/* text panels: the body itself scrolls */
+.phViewerBody-note > .panelBody, .phViewerBody-summary > .panelBody {
+  display: block; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch;
+}
+.phViewerNav {
+  flex-shrink: 0; display: flex; align-items: center; gap: 10px;
+  padding: 10px 12px calc(18px + env(safe-area-inset-bottom)); border-top: 1px solid var(--border); background: var(--surface);
+}
+.phNavBtn {
+  flex: 1; height: 46px; border-radius: 12px; font-size: 15px; cursor: pointer;
+  border: 1px solid var(--border-bright); background: var(--surface-2); color: var(--text-bright);
+}
+.phNavBtn:disabled { opacity: 0.3; }
+.phNavCount { font-family: var(--mono); font-size: 12px; color: var(--text-dim); min-width: 52px; text-align: center; }
 
 .phToast {
-  position: absolute; left: 12px; right: 12px; bottom: calc(76px + env(safe-area-inset-bottom));
+  position: absolute; left: 12px; right: 12px; top: calc(env(safe-area-inset-top) + 104px);
   padding: 10px 12px; border-radius: var(--radius); border: 1px solid var(--border-bright);
   background: var(--surface-2); color: var(--text-bright); font-size: 14px; text-align: left; z-index: 5;
 }
@@ -154,34 +171,56 @@
 .phPill:disabled { opacity: 0.5; }
 .phPillPrimary { background: var(--green); color: var(--bg); border-color: var(--green); width: 100%; margin-top: 14px; }
 
-.phPhoto { display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-top: 1px solid var(--border); font-size: 13px; color: var(--text-dim); }
-.phPhoto img { width: 48px; height: 48px; object-fit: cover; border-radius: 8px; border: 1px solid var(--border); }
-.phPhoto span { flex: 1; }
+.phStatus { padding: 0 4px 6px; font-size: 13px; color: var(--danger); text-align: center; }
 
-.phStatus { padding: 4px 12px; font-size: 13px; color: var(--danger); text-align: center; }
-
-.phComposer {
-  display: flex; align-items: flex-end; gap: 8px;
-  padding: 8px 10px calc(8px + env(safe-area-inset-bottom));
-  border-top: 1px solid var(--border); background: var(--surface);
+/* The voice dock: talking first. The mic sits well above the bottom edge, where taps would
+   bring up Safari's toolbar instead; photo and typing are the small buttons beside it. */
+.phDock {
+  flex-shrink: 0; border-top: 1px solid var(--border); background: var(--surface);
+  padding: 8px 12px calc(30px + env(safe-area-inset-bottom));
 }
+.phPhoto { display: flex; align-items: center; gap: 10px; padding: 2px 0 8px; font-size: 13px; color: var(--text-dim); }
+.phPhoto img { width: 44px; height: 44px; object-fit: cover; border-radius: 8px; border: 1px solid var(--border); }
+.phPhoto span { flex: 1; }
+.phTypeRow { display: flex; align-items: flex-end; gap: 8px; margin-bottom: 8px; }
 .phInput {
   flex: 1; min-width: 0; resize: none; max-height: 120px;
-  padding: 9px 12px; border-radius: 18px; border: 1px solid var(--border);
+  padding: 10px 14px; border-radius: 20px; border: 1px solid var(--border-bright);
   background: var(--bg); color: var(--text-bright); font: inherit; font-size: 16px; line-height: 1.3;
 }
 .phInput::placeholder { color: var(--text-dim); }
-.phSend, .phMic {
-  width: 44px; height: 44px; border-radius: 50%; flex-shrink: 0; cursor: pointer;
-  border: 1px solid var(--green); background: var(--green); color: var(--bg); font-size: 18px;
+.phSend {
+  width: 44px; height: 44px; border-radius: 50%; flex-shrink: 0; cursor: pointer; font-size: 18px;
+  border: 1px solid var(--green); background: var(--green); color: var(--bg);
 }
-.phMic { background: var(--surface-3); color: var(--text-bright); border-color: var(--border-bright); }
-.phMicOn {
-  background: #2a0d12; border-color: var(--danger); color: var(--danger);
-  box-shadow: 0 0 0 calc(var(--lvl, 0) * 14px) rgba(255, 95, 95, 0.25);
+.phSend:disabled { opacity: 0.4; }
+.phDockRow { display: flex; align-items: center; justify-content: center; gap: 34px; padding-top: 4px; }
+.phSideBtn {
+  width: 50px; height: 50px; border-radius: 50%; flex-shrink: 0; cursor: pointer; font-size: 19px;
+  border: 1px solid var(--border-bright); background: var(--surface-2); color: var(--text-bright);
+}
+.phSideOn { background: var(--surface-3); border-color: var(--green); }
+.phMicWrap { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+.phBigMic {
+  width: 88px; height: 88px; border-radius: 50%; cursor: pointer; border: none;
+  display: flex; align-items: center; justify-content: center;
+  background: radial-gradient(circle at 35% 30%, var(--green-bright), var(--green) 55%, var(--green-dim));
+  color: var(--bg);
+  box-shadow: 0 0 0 1px rgba(var(--accent-rgb),0.5), 0 0 30px rgba(var(--accent-rgb),0.35);
+  -webkit-user-select: none; user-select: none;
+}
+.phBigMic:active { transform: scale(0.95); }
+.phBigMic:disabled { opacity: 0.5; }
+.phBigMicAsk { animation: phAsk 1.6s ease-in-out infinite; }
+@keyframes phAsk { 50% { box-shadow: 0 0 0 10px rgba(var(--accent-rgb),0.12), 0 0 40px rgba(var(--accent-rgb),0.5); } }
+.phBigMicOn {
+  background: #2a0d12; color: var(--danger);
+  box-shadow: 0 0 0 1px var(--danger), 0 0 0 calc(4px + var(--lvl, 0) * 22px) rgba(255, 95, 95, 0.22);
   transition: box-shadow 80ms linear;
 }
-.phSend:disabled, .phMic:disabled { opacity: 0.5; }
+.phStopSq { width: 26px; height: 26px; border-radius: 6px; background: currentColor; }
+.phMicLabel { font-family: var(--mono); font-size: 11px; letter-spacing: 0.12em; color: var(--text-dim); text-transform: uppercase; }
+.phDockRec .phMicLabel { color: var(--danger); }
 
 /* Settings sheet */
 .phSheetBack { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.6); z-index: 20; display: flex; align-items: flex-end; }
