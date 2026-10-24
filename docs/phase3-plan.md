@@ -50,7 +50,9 @@ say, anywhere, goes to the Pi. One memory, agenda and history, so there is nothi
 - **M4 is built** (`turns.targets`): lines and questions carry `to`; phone replies are also
   spoken at the PC while you're there; Jarvis's own lines go to the PC if you're there, else the
   phone. Locked PC = away.
-- **Next:** M5 (history), then M6, M7.
+- **M5 is built**: the feed survives a restart (last 40 lines), and a day picker on the dashboard
+  (Activity tab) and the phone (🕘) opens any earlier day. Lines now record phone/PC.
+- **Next:** M6 (coding catch-up), M7 (launcher + Electron → Pi).
 
 ## How it fits together
 
@@ -136,7 +138,7 @@ Each is testable before the next starts.
 | M2 ✓ | PC client voice loop (+ presence heartbeat) | "Jarvis, what time is it?" at the PC is answered by the Pi and spoken on the PC; the orb moves; answers to questions and interrupting work |
 | M3 ✓ | PC actions + offline queue | "Open Discord" from the PC and from the phone (PC on) opens it; with the PC off it offers, queues, and runs it on reconnect; screenshot lands on the Stage |
 | M4 ✓ | Reply routing + proactive messages | phone command spoken at the PC when you're active; reminders/check-ins at the PC or the phone depending on presence |
-| M5 | History | restart the Pi, yesterday's conversation is still on the dashboard; a day picker |
+| M5 ✓ | History | restart the Pi, yesterday's conversation is still on the dashboard; a day picker |
 | M6 | Coding on the Pi | task branch auto-pushed; new project → private repo after OK; "update my coding sessions" clones/pulls on the PC |
 | M7 | Launcher + Electron → Pi, power start, docs | the Desktop shortcut gives the full experience; `push_to_pi.ps1`/`pull_from_pi.ps1` kept only as backups |
 

@@ -420,6 +420,19 @@ def _input_restore():
     return jsonify({"ok": True})
 
 
+# ── Conversation history (the day picker) ────────────────────────────────────
+@app.route("/api/history")
+def _history_days():
+    from . import memory
+    return jsonify({"days": memory.days()})
+
+
+@app.route("/api/history/<day>")
+def _history_day(day):
+    from . import memory
+    return jsonify({"day": day, "entries": memory.history(day)})
+
+
 # ── Phone mic ─────────────────────────────────────────────────────────────────
 @app.route("/phone")
 def _phone():

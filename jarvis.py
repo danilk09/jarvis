@@ -117,6 +117,7 @@ def _startup():
     if brain.restore_history():
         print("  Picked up the conversation from the last run")
     memory.start()     # conversation log + background review of what's worth remembering
+    state.restore_log(memory.recent(40))   # the feed picks up where the last run left off
     phone_topic = notify.start()   # ntfy topic for reminders on the phone
     agenda.start()     # reminders and timers
     checkins.start()   # "How did the quiz go?" — asking how important things went

@@ -110,9 +110,14 @@ def echo(text):
         _local.echo = False
 
 
+def line_source():
+    """Where the line being logged now belongs: speaking_as() on this thread, else the turn's."""
+    return getattr(_local, "source", None) or current["source"]
+
+
 def _on_log(role, text):
     now = time.time()
-    source = getattr(_local, "source", None) or current["source"]
+    source = line_source()
     if role == "jarvis":
         lid = next(_ids)
         entry = {"text": text, "source": source, "time": now, "to": targets(source)}

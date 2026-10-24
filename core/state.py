@@ -13,7 +13,7 @@ dash_state: dict = {
     "files":       [],
     "speech_beat": 0,        # increments once per spoken word
     "speech":      None,     # {"id", "start", "end", "frame_ms", "frames"} of the current utterance
-    "log":         [],       # recent conversation: {"role": "user"|"jarvis", "text", "time", "sample"?}
+    "log":         [],       # recent conversation: {"role": "user"|"jarvis", "text", "time", "day", "sample"?}
     "log_rev":     0,        # bumped when an earlier entry changes (a corrected transcript)
 }
 _LOG_MAX = 40
@@ -65,7 +65,7 @@ on_state: list = []
 
 
 def push_log(role, text, sample=""):
-    entry = {"role": role, "text": text, "time": time.strftime("%H:%M:%S")}
+    entry = {"role": role, "text": text, "time": time.strftime("%H:%M:%S"), "day": time.strftime("%Y-%m-%d")}
     if sample:
         entry["sample"] = sample
     with dash_lock:
@@ -75,6 +75,12 @@ def push_log(role, text, sample=""):
             fn(role, text)
         except Exception as e:
             print(f"  Log hook error: {e}")
+
+
+def restore_log(entries):
+    """At startup: the feed picks up where the last run's conversation left off (memory.recent)."""
+    with dash_lock:
+        dash_state["log"] = (list(entries) + dash_state["log"])[-_LOG_MAX:]
 
 
 def mark_log(sample, **fields):

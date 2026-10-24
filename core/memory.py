@@ -226,10 +226,14 @@ def log(role, text):
         return
     now = time.time()
     path = os.path.join(_LOG_DIR, time.strftime("%Y-%m-%d") + ".jsonl")
+    entry = {"ts": now, "time": time.strftime("%H:%M:%S"), "role": role, "text": text}
+    from . import turns
+    if turns.line_source():
+        entry["source"] = turns.line_source()     # phone / pc, for the history view
     with _lock:
         os.makedirs(_LOG_DIR, exist_ok=True)
         with open(path, "a", encoding="utf-8") as f:
-            f.write(json.dumps({"ts": now, "time": time.strftime("%H:%M:%S"), "role": role, "text": text}) + "\n")
+            f.write(json.dumps(entry) + "\n")
 
 
 def _read_log(day):
@@ -250,6 +254,43 @@ def _log_days():
     if not os.path.isdir(_LOG_DIR):
         return []
     return sorted(n[:-6] for n in os.listdir(_LOG_DIR) if n.endswith(".jsonl"))
+
+
+# ── History (the dashboard's and phone's day picker) ──────────────────────────
+def _shown(e, day):
+    out = {"role": e.get("role", "user"), "text": e.get("text", ""), "time": e.get("time", ""), "day": day}
+    if e.get("source"):
+        out["source"] = e["source"]
+    return out
+
+
+def days():
+    """[{"day": "2026-10-23", "count": n}], newest first: the days there's a conversation for."""
+    out = []
+    for day in reversed(_log_days()):
+        try:
+            with open(os.path.join(_LOG_DIR, f"{day}.jsonl"), encoding="utf-8") as f:
+                out.append({"day": day, "count": sum(1 for line in f if line.strip())})
+        except OSError:
+            pass
+    return out
+
+
+def history(day):
+    """One day's conversation, oldest first."""
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day or ""):
+        return []
+    return [_shown(e, day) for e in _read_log(day) if e.get("text")]
+
+
+def recent(n):
+    """The last n lines, across days (the live feed after a restart)."""
+    out = []
+    for day in reversed(_log_days()):
+        out = history(day) + out
+        if len(out) >= n:
+            break
+    return out[-n:]
 
 
 def last_user_time():

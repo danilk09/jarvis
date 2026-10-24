@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useJarvis } from '../JarvisStatus';
 import { useStage, Panel } from '../stage/StageContext';
 import PhoneStage from './PhoneStage';
+import { dayLabel, useHistory, Day } from '../history';
 import * as voice from './phoneAudio';
 import { useRecorder, listMics, chooseMic, Mic } from './useRecorder';
 import '../stage/Stage.css';
@@ -108,6 +109,25 @@ function Settings({ onClose, speakOn, setSpeakOn, autoListen, setAutoListen }: {
   );
 }
 
+// ── History: pick a day ──────────────────────────────────────────────────────
+function DaySheet({ days, onPick, onClose }: { days: Day[]; onPick: (day: string) => void; onClose: () => void }) {
+  return (
+    <div className="phSheetBack" onClick={onClose}>
+      <div className="phSheet" onClick={e => e.stopPropagation()}>
+        <div className="phSheetTitle">EARLIER CONVERSATIONS</div>
+        {days.length === 0 && <div className="phHint">Nothing saved yet.</div>}
+        {days.map(d => (
+          <button key={d.day} className="phDayRow" onClick={() => onPick(d.day)}>
+            <span>{dayLabel(d.day)}</span>
+            <span className="phDayCount">{d.count} lines</span>
+          </button>
+        ))}
+        <button className="phPill phPillPrimary" onClick={onClose}>Close</button>
+      </div>
+    </div>
+  );
+}
+
 // ── The page ──────────────────────────────────────────────────────────────────
 export default function PhonePage() {
   const { orbState, log, serverOk } = useJarvis();
@@ -126,6 +146,8 @@ export default function PhonePage() {
   const [toast, setToast] = useState<Panel | null>(null);
   const [focus, setFocus] = useState<string | null>(null);
   const [power, setPower] = useState('');
+  const history = useHistory();
+  const [daysOpen, setDaysOpen] = useState(false);
   const lineIds = useRef(new Map<string, number>());     // text → line id, to replay a reply
   const feedRef = useRef<HTMLDivElement>(null);
   const photoRef = useRef<HTMLInputElement>(null);
@@ -184,8 +206,8 @@ export default function PhonePage() {
   // Keep the newest message in view
   useEffect(() => {
     const el = feedRef.current;
-    if (el && tab === 'chat') el.scrollTop = el.scrollHeight;
-  }, [log.length, tab, listen, orbState]);
+    if (el && tab === 'chat') el.scrollTop = history.day ? 0 : el.scrollHeight;
+  }, [log.length, tab, listen, orbState, history.day, history.entries]);
 
   const post = useCallback(async (url: string, form: FormData) => {
     setSending(true);
@@ -205,6 +227,7 @@ export default function PhonePage() {
 
   const send = useCallback(async (opts: { text?: string; audio?: Blob; mic?: string }) => {
     voice.hush();
+    history.open(null);                                     // back to now
     const form = new FormData();
     const typed = (opts.text || '').trim();
     if (typed) form.append('text', typed);
@@ -217,7 +240,7 @@ export default function PhonePage() {
     }
     if (!typed && !opts.audio) return;
     if (await post('/phone-command', form)) setText('');
-  }, [photo, post]);
+  }, [photo, post, history.open]);   // eslint-disable-line react-hooks/exhaustive-deps
 
   const rec = useRecorder((audio, mic) => send({ audio, mic, text: photo ? text : '' }));
 
@@ -278,6 +301,7 @@ export default function PhonePage() {
   };
 
   const quick = listen ? quickReplies(listen.question) : [];
+  const shownLog = history.day ? history.entries : log;
   const busy = sending || rec.recording;
   const shownState = speaking ? 'speaking' : listen ? 'activated' : orbState;
 
@@ -291,6 +315,8 @@ export default function PhonePage() {
         <button className={`phIconBtn ${speakOn ? 'phOn' : ''}`} aria-label="Speak replies" onClick={() => setSpeakOn(!speakOn)}>
           {speakOn ? '🔊' : '🔇'}
         </button>
+        <button className="phIconBtn" aria-label="Earlier conversations"
+                onClick={() => { history.loadDays(); setDaysOpen(true); }}>🕘</button>
         <button className="phIconBtn" aria-label="Settings" onClick={() => setSettings(true)}>⚙</button>
         {power && <a className="phIconBtn" href={power} aria-label="Power">⏻</a>}
       </header>
@@ -310,15 +336,26 @@ export default function PhonePage() {
 
       <main className="phMain">
         <div ref={feedRef} className="phFeed" style={{ display: tab === 'chat' ? undefined : 'none' }}>
-          {log.length === 0 && <div className="phEmpty">Say or type something to Jarvis.</div>}
-          {log.map((m, i) => (
-            <div key={`${m.time}-${i}`} className={`phMsg phMsg-${m.role}`}
-                 onClick={m.role === 'jarvis' ? () => replay(m.text) : undefined}>
-              <div className="phMsgText">{m.text}</div>
-              <div className="phMsgTime">{m.time.slice(0, 5)}</div>
+          {history.day && (
+            <div className="phPast">
+              <span>{dayLabel(history.day)}</span>
+              <button className="phPill" onClick={() => history.open(null)}>Back to now</button>
+            </div>
+          )}
+          {shownLog.length === 0 && <div className="phEmpty">
+            {history.day ? (history.loading ? 'Loading…' : 'Nothing that day.') : 'Tap the mic and talk to Jarvis.'}
+          </div>}
+          {shownLog.map((m, i) => (
+            <div key={`${m.day}-${m.time}-${i}`} className="phMsgGroup">
+              {m.day && m.day !== shownLog[i - 1]?.day && (i > 0 || shownLog.some(x => x.day !== m.day)) &&
+                <div className="phDayDivider">{dayLabel(m.day)}</div>}
+              <div className={`phMsg phMsg-${m.role}`} onClick={m.role === 'jarvis' ? () => replay(m.text) : undefined}>
+                <div className="phMsgText">{m.text}</div>
+                <div className="phMsgTime">{m.time.slice(0, 5)}{m.role === 'user' && m.source === 'pc' ? ' · PC' : ''}</div>
+              </div>
             </div>
           ))}
-          {orbState === 'thinking' && !listen && <div className="phMsg phMsg-jarvis phTyping"><span /><span /><span /></div>}
+          {!history.day && orbState === 'thinking' && !listen && <div className="phMsg phMsg-jarvis phTyping"><span /><span /><span /></div>}
         </div>
                 <div className="phStageWrap" style={{ display: tab === 'stage' ? undefined : 'none' }}>
           <PhoneStage hidden={tab !== 'stage'} focus={focus} onFocused={clearFocus} />
@@ -379,6 +416,8 @@ export default function PhonePage() {
         </div>
       </footer>
 
+      {daysOpen && <DaySheet days={history.days} onClose={() => setDaysOpen(false)}
+                             onPick={d => { setDaysOpen(false); setTab('chat'); history.open(d); }} />}
       {settings && <Settings onClose={() => setSettings(false)} speakOn={speakOn} setSpeakOn={setSpeakOn}
                              autoListen={autoListen} setAutoListen={setAutoListenOn} />}
     </div>
