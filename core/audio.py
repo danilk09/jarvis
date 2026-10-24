@@ -554,18 +554,23 @@ def listen_for_command(max_duration=8, silence_duration=0.8, onset_timeout=None)
 def _next_message():
     """Headless: the next text sent from the phone, or "" after HEADLESS_ANSWER_WAIT. A photo
     isn't an answer: it goes back in the queue for the main loop."""
-    from . import server
+    from . import tts, turns
     last_listen[0] = time.time()
     _keep([], "", "")
     print("  Waiting for an answer from the phone...")
+    q = tts.last_question
+    turns.listening(q["text"] if time.time() - q["time"] < 120 else "", config.HEADLESS_ANSWER_WAIT)
     try:
-        message = server.phone_commands.get(timeout=config.HEADLESS_ANSWER_WAIT)
+        message = turns.queue.get(timeout=config.HEADLESS_ANSWER_WAIT)
     except queue.Empty:
         print("  No answer.")
         return ""
-    if isinstance(message, dict):
-        server.phone_commands.put(message)
+    finally:
+        turns.listen_done()
+    if message.get("image"):
+        turns.queue.put(message)
         return ""
+    message = message["text"]
     _keep([], message, message)
     print(f'  Answer: "{message}"')
     return message

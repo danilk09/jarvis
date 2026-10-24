@@ -104,6 +104,9 @@ def send(title, message, tags=(), priority=3, actions=(), click=""):
             "priority": priority}
     if actions:
         body["actions"] = list(actions)[:3]
+    # Tapping the notification opens the phone page, where the whole conversation (and any
+    # question Jarvis is waiting on) is, unless the notification links somewhere itself
+    click = click or (f"{_callback_url()}/phone" if _callback_url() else "")
     if click:
         body["click"] = click
 

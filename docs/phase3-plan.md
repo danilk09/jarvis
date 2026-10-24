@@ -24,6 +24,23 @@ say, anywhere, goes to the Pi. One memory, agenda and history, so there is nothi
 6. **Where replies go:** to where the command came from. A phone command is **also spoken at the PC**
    when the PC reports you're active there. Everything shows on the dashboard either way.
 
+## Update 2026-10-23: the phone page first
+
+- **No pocket device.** The `/phone` page is how you talk to Jarvis away from the PC, so Phase 4's
+  second Pi is dropped and the protocol below serves the phone first (`source: "phone"`).
+- **M1 is built** (`core/turns.py`), phone-first: turns carry a source; `GET /api/client/events`
+  streams `line` / `user` / `state` / `listen` events; `GET /api/say/<id>` is a line as Piper
+  speech; `POST /api/turn` takes typed commands; `scripts/pi/fake_client.py` is the test client.
+  No client key yet: like `/phone` and the dashboard, these are only reachable over Tailscale.
+  The key comes with the PC client (M2), which still needs `say`/`do` routing.
+- **The phone page** was rebuilt in the React app (`jarvis-dashboard/src/phone/`): replies spoken
+  (its own turns and anything Jarvis says between turns), an answer bar when he asks something,
+  typed commands, the whole Stage, notifications that open the page. It records with the phone's
+  own mic by default, since AirPods transcribed much worse.
+- **Claude Code** runs with full permissions (except pushing to main and deleting repos) and
+  pushes its `jarvis/` branches itself, which covers most of M6's auto-push.
+- **Next:** M5 (history survives a Pi restart, which the phone feed needs too), then M2-M4 for the PC.
+
 ## How it fits together
 
 ```
@@ -104,7 +121,7 @@ Each is testable before the next starts.
 
 | # | What | Done when |
 |---|---|---|
-| M1 | Pi: turn queue with sources, client endpoints, key, presence, SSE events | `scripts/pi/fake_client.py` (text in, events printed) holds a conversation with the Pi, including a `listen` |
+| M1 ✓ | Pi: turn queue with sources, client endpoints, SSE events (key and presence move to M2) | `scripts/pi/fake_client.py` (text in, events printed) holds a conversation with the Pi, including a `listen` |
 | M2 | PC client voice loop | "Jarvis, what time is it?" at the PC is answered by the Pi and spoken on the PC; the orb moves; answers to questions and interrupting work |
 | M3 | PC actions + offline queue | "Open Discord" from the PC and from the phone (PC on) opens it; with the PC off it offers, queues, and runs it on reconnect; screenshot lands on the Stage |
 | M4 | Reply routing + proactive messages | phone command spoken at the PC when you're active; reminders/check-ins at the PC or the phone depending on presence |

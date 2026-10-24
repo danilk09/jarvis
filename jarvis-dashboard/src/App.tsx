@@ -9,6 +9,7 @@ import WorkspaceManager from './WorkspaceManager';
 import { JarvisStatusProvider, useJarvis } from './JarvisStatus';
 import { StageProvider, useStage } from './stage/StageContext';
 import StagePage from './stage/StagePage';
+import PhonePage from './phone/PhonePage';
 import './App.css';
 
 const PHRASES: Record<OrbState, string> = {
@@ -160,6 +161,7 @@ function Dashboard() {
 
 function Shell() {
   const { pathname } = useLocation();
+  if (pathname.startsWith('/phone')) return <PhonePage />;
   return (
     <>
       <div className="shell">

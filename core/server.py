@@ -18,15 +18,13 @@ import time
 from flask import Flask, Response, jsonify, request, send_file, send_from_directory
 from flask_cors import CORS
 
-from . import audio, brain, config, music, stage, state
+from . import audio, brain, config, music, stage, state, turns
 from .media import guess_file_type
 
 # No built-in static route: it would claim every path and 404 client-side routes such as
 # /stage on reload. _dashboard() below serves build files and falls back to index.html.
 app = Flask(__name__, static_folder=None)
 CORS(app)
-
-phone_commands = queue.Queue()   # phone commands for the main loop: text, or {"text", "image"}
 
 tls = {"cert": "", "key": ""}
 
@@ -130,7 +128,8 @@ def _speech(speech_id):
 @app.route("/api/stage/events")
 def _stage_events():
     """Server-Sent Events: the full Stage state on every change, plus navigate/extract requests."""
-    q = stage.subscribe(desktop=request.args.get("client") == "desktop")
+    client = request.args.get("client")
+    q = stage.subscribe(desktop=client == "desktop", phone=client == "phone")
 
     def stream():
         try:
@@ -424,7 +423,53 @@ def _input_restore():
 # ── Phone mic ─────────────────────────────────────────────────────────────────
 @app.route("/phone")
 def _phone():
-    return send_from_directory(config.STATIC_DIR, "phone.html")
+    """The phone page is part of the dashboard build (src/phone/), so it can show the Stage."""
+    return send_from_directory(config.DASH_BUILD, "index.html")
+
+
+# ── Clients: turns in, events out (core/turns.py) ─────────────────────────────
+@app.route("/api/client/events")
+def _client_events():
+    q = turns.subscribe()
+
+    def stream():
+        try:
+            while True:
+                try:
+                    event = q.get(timeout=15)
+                except queue.Empty:
+                    yield ": keep-alive\n\n"
+                    continue
+                yield f"data: {json.dumps(event)}\n\n"
+        finally:
+            turns.unsubscribe(q)
+
+    return Response(stream(), mimetype="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@app.route("/api/turn", methods=["POST"])
+def _turn():
+    """A typed command from any client: {"text", "source"}."""
+    b = _body()
+    text = (b.get("text") or "").strip()
+    if not text:
+        return jsonify({"error": "text required"}), 400
+    turns.put(text, b.get("source") or "phone")
+    return jsonify({"ok": True})
+
+
+@app.route("/api/say/<int:line_id>")
+def _say(line_id):
+    """One of Jarvis's lines as speech (Piper WAV), for the phone page to play."""
+    from . import tts
+    entry = turns.line(line_id)
+    if not entry:
+        return jsonify({"error": "unknown line"}), 404
+    wav = tts.render_wav(entry["text"])
+    if not wav:
+        return jsonify({"error": "no voice"}), 503
+    return Response(wav, mimetype="audio/wav", headers={"Cache-Control": "private, max-age=3600"})
 
 
 def _transcribe_upload(audio_file):
@@ -452,15 +497,19 @@ def _transcribe_upload(audio_file):
 
 @app.route("/phone-command", methods=["POST"])
 def _phone_command():
+    """A spoken (audio) or typed (text) command from the phone page."""
     audio_file = request.files.get("audio")
-    if not audio_file:
-        return jsonify({"error": "no audio"}), 400
+    command = (request.form.get("text") or "").strip()
+    if not audio_file and not command:
+        return jsonify({"error": "no audio or text"}), 400
     try:
-        command = _transcribe_upload(audio_file)
+        if not command:
+            command = _transcribe_upload(audio_file)
         if not command:
             return jsonify({"error": "no speech detected"}), 400
-        phone_commands.put(command)
-        print(f'  Phone command queued: "{command}"')
+        turns.put(command, "phone")
+        mic = (request.form.get("mic") or "")[:60]     # which mic recorded it (AirPods vs. the phone's)
+        print(f'  Phone command queued: "{command}"' + (f"  [mic: {mic}]" if mic else ""))
         return jsonify({"command": command, "status": "processing"})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -494,7 +543,7 @@ def _phone_image():
     except Exception as e:
         print(f"  Phone photo rejected: {e}")
         return jsonify({"error": "couldn't read that image"}), 400
-    phone_commands.put({"text": question, "image": path})
+    turns.put(question, "phone", image=path)
     print(f'  Phone photo queued: {os.path.basename(path)} "{question}"')
     return jsonify({"command": question, "status": "processing"})
 

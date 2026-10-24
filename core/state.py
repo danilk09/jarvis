@@ -44,15 +44,24 @@ def push_state(state, transcript="", sample=""):
     if state == "idle" and listening.is_set():
         state = "activated"      # speech ending mid-listen mustn't show STANDBY while Jarvis listens
     with dash_lock:
+        changed = dash_state["state"] != state
         dash_state["state"] = state
         if transcript:
             dash_state["transcript"] = transcript
+    if changed:
+        for fn in on_state:
+            try:
+                fn(state)
+            except Exception as e:
+                print(f"  State hook error: {e}")
     if transcript:
         push_log("user", transcript, sample=sample)
 
 
 # Called with (role, text) for every logged line (memory.py keeps the conversation on disk)
 on_log: list = []
+# Called with the new state when it changes (turns.py streams it to the phone page)
+on_state: list = []
 
 
 def push_log(role, text, sample=""):

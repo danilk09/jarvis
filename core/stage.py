@@ -56,10 +56,12 @@ _extract_waits: dict = {}       # request id -> {"event", "result"}
 
 
 # ── Subscribers (SSE) ─────────────────────────────────────────────────────────
-def subscribe(desktop=False):
+def subscribe(desktop=False, phone=False):
+    """phone: the phone page's view of the Stage. It doesn't count as a window that shows
+    the Stage (has_clients), so the PC still opens one when Jarvis puts something there."""
     q = queue.Queue()
     with _lock:
-        _clients[q] = {"desktop": desktop}
+        _clients[q] = {"desktop": desktop, "phone": phone}
     return q
 
 
@@ -70,7 +72,7 @@ def unsubscribe(q):
 
 def has_clients(desktop_only=False):
     with _lock:
-        return any(c["desktop"] or not desktop_only for c in _clients.values())
+        return any(c["desktop"] or not (desktop_only or c["phone"]) for c in _clients.values())
 
 
 def _emit(event):

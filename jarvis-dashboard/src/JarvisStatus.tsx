@@ -19,6 +19,8 @@ export interface JarvisStatus {
   activate: () => Promise<boolean>;
 }
 
+const PHONE = window.location.pathname.startsWith('/phone');
+
 const StatusContext = createContext<JarvisStatus | null>(null);
 
 export function useJarvis() {
@@ -86,6 +88,7 @@ export function JarvisStatusProvider({ children }: { children: ReactNode }) {
 
     async function poll() {
       if (!alive) return;
+      inflight = true;
       try {
         const res  = await fetch(`/status?files=${fileCount.current}`, { signal: AbortSignal.timeout(1800) });
         const data = await res.json();
@@ -122,12 +125,25 @@ export function JarvisStatusProvider({ children }: { children: ReactNode }) {
       } catch {
         setServerOk(false);
       }
-      // Fast enough to pick up speech envelopes promptly; back off when the window is hidden
-      if (alive) setTimeout(poll, document.hidden ? 3000 : 150);
+      // Fast enough to pick up speech envelopes promptly; back off when the window is hidden.
+      // The phone page (mobile data) polls slowly and is poked by its event stream instead.
+      inflight = false;
+      if (again) { again = false; poll(); return; }
+      if (alive) timer = setTimeout(poll, document.hidden ? 3000 : PHONE ? 2000 : 150);
     }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let inflight = false, again = false;
+    const poke = () => {
+      if (inflight) { again = true; return; }
+      clearTimeout(timer);
+      poll();
+    };
+    window.addEventListener('jarvis:poke', poke);
     poll();
 
     return () => {
+      window.removeEventListener('jarvis:poke', poke);
+      clearTimeout(timer);
       alive = false;
       clearTimeout(demoTimer);
       stopDemo();

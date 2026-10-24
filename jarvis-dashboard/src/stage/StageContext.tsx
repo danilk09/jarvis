@@ -49,6 +49,8 @@ const EMPTY: StageState = { rev: 0, panels: [], layout: [], view: { mode: 'auto'
                             highlights: [], active: null, route: '/', undo: null };
 
 export const isDesktop = !!window.jarvisDesktop?.isDesktop;
+// The phone page (/phone) shows the Stage in its own tab and never gets moved to /stage
+export const isPhone = window.location.pathname.startsWith('/phone');
 
 // Page panels register a reader for Jarvis's "extract" requests (text of the live page)
 export const extractors = new Map<string, () => Promise<unknown>>();
@@ -85,6 +87,7 @@ export function StageProvider({ children }: { children: ReactNode }) {
 
   // Switching tabs yourself tells the server, so it remembers where you actually are
   useEffect(() => {
+    if (isPhone) return;
     const p = location.pathname === '/stage' ? '/stage' : location.pathname === '/' ? '/' : null;
     if (p && p !== serverRoute.current) {
       serverRoute.current = p;
@@ -94,8 +97,9 @@ export function StageProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     let first = true;
-    const es = new EventSource(`/api/stage/events?client=${isDesktop ? 'desktop' : 'web'}`);
+    const es = new EventSource(`/api/stage/events?client=${isDesktop ? 'desktop' : isPhone ? 'phone' : 'web'}`);
     const go = (to: string) => {
+      if (isPhone) return;
       serverRoute.current = to;
       if (to && to !== pathRef.current) navRef.current(to);
     };

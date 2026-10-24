@@ -141,7 +141,6 @@ VOICE_RULE_MIN     = 2
 WORKSPACES_FILE   = os.path.join(ROOT, "workspaces.json")
 VOSK_MODEL_DIR    = os.path.join(ROOT, "models", "vosk-model-small-en-us-0.15")
 DASH_BUILD        = os.path.join(ROOT, "jarvis-dashboard", "build")
-STATIC_DIR        = os.path.join(ROOT, "core", "static")
 JARVIS_INPUT_DIR  = os.path.join(ROOT, "jarvis_input")
 JARVIS_OUTPUT_DIR = os.path.join(ROOT, "jarvis_output")
 INPUT_ARCHIVE_DIR = os.path.join(JARVIS_INPUT_DIR, "archive")

@@ -52,6 +52,15 @@ if [ ! -f models/speaker/nemo_en_titanet_small.onnx ]; then
         https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/nemo_en_titanet_small.onnx
 fi
 
+echo "== Jarvis's voice (Piper: replies are spoken on the phone page)"
+mkdir -p models/tts
+if [ ! -d "models/tts/vits-piper-en_GB-northern_english_male-medium" ]; then
+    curl -L -o models/tts/voice.tar.bz2 \
+        https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/vits-piper-en_GB-northern_english_male-medium.tar.bz2
+    tar xjf models/tts/voice.tar.bz2 -C models/tts/
+    rm models/tts/voice.tar.bz2
+fi
+
 echo "== Folders"
 mkdir -p jarvis_input jarvis_output logs "$HOME/GitHub" "$HOME/jarvis_coding"
 

@@ -212,6 +212,11 @@ def ask_claude(command, workspaces, image=None):
         return {"mode": "none"}
 
     result = _parse(raw)
+    if result is None and raw and "{" not in raw:
+        # Plain text instead of JSON: it's still the answer, so say it rather than nothing
+        print("  AI replied with plain text - treating it as chat.")
+        result = {"mode": "chat", "reply": raw}
+        raw = json.dumps(result)
     if isinstance(result, dict):
         _ai_error_count = 0
         with _lock:

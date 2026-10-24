@@ -9,7 +9,8 @@ SAPI: one SpVoice lives on this thread for the whole session, so speech starts a
 immediately. It is also the fallback whenever the Piper voice is missing or fails.
 
 Headless (config.HEADLESS, the Pi brain) there are no speakers: lines are logged and shown on
-the dashboard and phone page, and nothing is played.
+the dashboard and phone page, and nothing is played here. The phone page plays them itself:
+render_wav() turns a line into Piper speech for GET /api/say/<id>.
 """
 
 import collections
@@ -239,8 +240,9 @@ def _load_piper():
             num_threads=4)))
         tts.generate("Ready.", sid=0)   # the first call is slower; do it now, not on the greeting
         _piper["tts"] = tts
-        _player(tts.sample_rate)        # open the output stream ahead of time too
-        threading.Thread(target=_watch_speakers, daemon=True, name="tts-speakers").start()
+        if not config.HEADLESS:         # the Pi only renders lines for the phone page
+            _player(tts.sample_rate)    # open the output stream ahead of time too
+            threading.Thread(target=_watch_speakers, daemon=True, name="tts-speakers").start()
     except Exception as e:
         print(f"  Piper voice failed to load ({e})" + (" — using the Windows voice" if config.WINDOWS else ""))
     finally:
@@ -460,6 +462,37 @@ def _speak_piper(text, update_state, lead=0.0):
         cancel.set()
 
 
+def render_wav(text):
+    """`text` spoken by the Piper voice, as WAV bytes (16-bit mono), with the same phrasing and
+    pauses as on the PC speakers. For the phone page. None without a Piper voice."""
+    if not (config.PIPER_VOICE and _piper_loaded.wait(15) and _piper["tts"]):
+        return None
+    import io
+    import wave
+    tts, parts = _piper["tts"], []
+    phrases = _phrases(_piper_text(text))
+    for n, (phrase, pause) in enumerate(phrases):
+        with _piper["lock"]:
+            audio = tts.generate(phrase.rstrip("—").strip(), sid=0, speed=config.PIPER_SPEED)
+        sr = audio.sample_rate
+        pcm = np.asarray(audio.samples, dtype=np.float32)
+        loud = np.flatnonzero(np.abs(pcm) > 0.01)
+        if len(loud):
+            pcm = pcm[max(0, loud[0] - int(0.02 * sr)):loud[-1] + int(0.03 * sr)]
+            after = pause / config.PIPER_SPEED if n + 1 < len(phrases) else 0.15
+            parts += [pcm, np.zeros(int(after * sr), np.float32)]
+    if not parts:
+        return None
+    pcm16 = (np.clip(np.concatenate(parts), -1, 1) * 32767).astype("<i2")
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(tts.sample_rate)
+        w.writeframes(pcm16.tobytes())
+    return buf.getvalue()
+
+
 def _headless_worker():
     """No speakers: each line is shown (speaking → idle) and its on_start runs, nothing plays."""
     _ready.set()
@@ -548,10 +581,10 @@ def _worker():
             _queue.task_done()
 
 
+threading.Thread(target=_load_piper, daemon=True, name="tts-load").start()
 if config.HEADLESS:
     threading.Thread(target=_headless_worker, daemon=True, name="tts").start()
 else:
-    threading.Thread(target=_load_piper, daemon=True, name="tts-load").start()
     threading.Thread(target=_worker, daemon=True, name="tts").start()
 _ready.wait(timeout=10)
 

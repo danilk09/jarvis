@@ -41,7 +41,7 @@ import signal
 import threading
 import time
 
-from core import actions, agenda, audio, brain, checkins, coding, desktop, files, memory, music, notify, power, router, server, stage, state, verbosity
+from core import actions, agenda, audio, brain, checkins, coding, desktop, files, memory, music, notify, power, router, server, stage, state, turns, verbosity
 from core import speech_data, voice, voice_id
 from core import tts
 from core.tts import speak, stop_tts, suppressed, wait_tts
@@ -204,9 +204,12 @@ def _next_command():
         if state.shutdown.is_set():   # the desktop window was closed
             return None, False
         try:
-            return server.phone_commands.get_nowait(), True
+            turn = turns.queue.get_nowait()
         except queue.Empty:
             pass
+        else:
+            turns.begin(turn["source"])
+            return ({"text": turn["text"], "image": turn["image"]} if turn.get("image") else turn["text"]), True
         # Something running in the background (Claude Code, a reminder) asked a question
         if not tts.busy() and _open_question(waiting_since):
             answer = _listen_for_answer(_open_question(waiting_since))
@@ -293,6 +296,7 @@ def main():
                 command, from_phone, followup = followup, False, None
                 followups += 1
             else:
+                turns.end()              # anything said from here on is Jarvis's own (reminders...)
                 print("Waiting for wake-word or phone command...")
                 command, from_phone = _next_command()
                 followups = 1 if isinstance(command, str) and command.startswith("(Answering your question") else 0
