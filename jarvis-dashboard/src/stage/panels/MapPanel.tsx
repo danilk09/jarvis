@@ -10,7 +10,10 @@ import type { PanelProps } from './types';
 
 const CESIUM_VERSION = '1.146.0';
 const BASE = `https://cdn.jsdelivr.net/npm/cesium@${CESIUM_VERSION}/Build/Cesium/`;
-const GREEN = '#3dff8f';
+// The theme's accent and background (green on the PC, blue on the phone page)
+const themeVar = (name: string, fallback: string) =>
+  getComputedStyle(document.querySelector('.phone') ?? document.documentElement).getPropertyValue(name).trim() || fallback;
+const accent = () => themeVar('--green', '#3dff8f');
 
 let cesiumPromise: Promise<any> | null = null;
 function loadCesium(): Promise<any> {
@@ -109,15 +112,15 @@ export default function MapPanel({ panel, highlight, hidden }: PanelProps) {
       labels.alpha = 0.85;
       const grid = layers.addImageryProvider(new Cesium.GridImageryProvider({
         cells: 4,
-        color: Cesium.Color.fromCssColorString(GREEN).withAlpha(0.22),
-        glowColor: Cesium.Color.fromCssColorString(GREEN).withAlpha(0.06),
+        color: Cesium.Color.fromCssColorString(accent()).withAlpha(0.22),
+        glowColor: Cesium.Color.fromCssColorString(accent()).withAlpha(0.06),
         backgroundColor: Cesium.Color.TRANSPARENT,
         glowWidth: 4,
       }));
       grid.alpha = 0.55;
 
       // Atmosphere and space
-      scene.backgroundColor = Cesium.Color.fromCssColorString('#020806');
+      scene.backgroundColor = Cesium.Color.fromCssColorString(themeVar('--bg', '#020806'));
       scene.globe.baseColor = Cesium.Color.fromCssColorString('#04120b');
       scene.skyAtmosphere.hueShift = -0.27;          // blue → green
       scene.skyAtmosphere.saturationShift = -0.1;
@@ -132,7 +135,7 @@ export default function MapPanel({ panel, highlight, hidden }: PanelProps) {
       if (token) {
         try {
           const buildings = await Cesium.createOsmBuildingsAsync();
-          buildings.style = new Cesium.Cesium3DTileStyle({ color: `color('${GREEN}', 0.42)` });
+          buildings.style = new Cesium.Cesium3DTileStyle({ color: `color('${accent()}', 0.42)` });
           scene.primitives.add(buildings);
         } catch (e) {
           console.warn('3-D buildings unavailable', e);
@@ -178,7 +181,7 @@ export default function MapPanel({ panel, highlight, hidden }: PanelProps) {
     const viewer = viewerRef.current, Cesium = window.Cesium;
     if (!ready || !viewer || !Cesium) return;
     viewer.entities.removeAll();
-    const green = Cesium.Color.fromCssColorString(GREEN);
+    const green = Cesium.Color.fromCssColorString(accent());
     places.forEach((p, i) => {
       const marked = i === markedIdx || (markedIdx < 0 && i === focus);
       const ground = Cesium.Cartesian3.fromDegrees(p.lon, p.lat, 0);
@@ -192,7 +195,7 @@ export default function MapPanel({ panel, highlight, hidden }: PanelProps) {
           font: `600 ${marked ? 15 : 13}px "Segoe UI", sans-serif`,
           fillColor: marked ? Cesium.Color.fromCssColorString('#02140a') : green,
           showBackground: true,
-          backgroundColor: marked ? green : Cesium.Color.fromCssColorString('#020806').withAlpha(0.78),
+          backgroundColor: marked ? green : Cesium.Color.fromCssColorString(themeVar('--bg', '#020806')).withAlpha(0.78),
           backgroundPadding: new Cesium.Cartesian2(8, 5),
           pixelOffset: new Cesium.Cartesian2(0, -22),
           disableDepthTestDistance: Number.POSITIVE_INFINITY,

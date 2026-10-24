@@ -1,6 +1,25 @@
 /* The phone page (/phone): one column, chat or Stage, composer at the bottom. */
 
+/* Each device gets its own colors: the PC dashboard is green, the phone is blue (the
+   original phone page's). Everything inside, Stage panels included, uses these. */
 .phone {
+  --green: #5c9ce6;
+  --green-dim: #2f5a8c;
+  --green-bright: #a9c9f2;
+  --green-glow: rgba(92,156,230,0.18);
+  --accent-rgb: 92,156,230;
+  --bg: #0a0a0f;
+  --bg-rgb: 10,10,15;
+  --surface: #0f1522;
+  --surface-2: #131c2e;
+  --surface-3: #1b2a44;
+  --panel: rgba(15,21,34,0.94);
+  --border: rgba(92,156,230,0.16);
+  --border-bright: rgba(92,156,230,0.36);
+  --text: #b8c4d6;
+  --text-dim: #6b7a90;
+  --text-bright: #e0e8f4;
+
   position: fixed; inset: 0;
   height: 100dvh;
   display: flex; flex-direction: column;
@@ -22,9 +41,9 @@
   font-family: var(--mono); font-size: 10px; letter-spacing: 0.15em; color: var(--state);
   border: 1px solid color-mix(in srgb, var(--state) 40%, transparent); border-radius: 999px; padding: 3px 8px;
 }
-.phState-activated { --state: #0ac8a8; }
+.phState-activated { --state: #7fd1f0; }
 .phState-thinking  { --state: #6c78f5; }
-.phState-speaking  { --state: var(--green); }
+.phState-speaking  { --state: var(--green-bright); }
 .phState-error     { --state: var(--danger); }
 .phDot { width: 6px; height: 6px; border-radius: 50%; background: var(--state); }
 .phState-thinking .phDot, .phState-speaking .phDot, .phState-activated .phDot { animation: phBlink 1s ease-in-out infinite; }
@@ -91,7 +110,7 @@
 }
 
 .phAnswer { padding: 8px 12px; border-top: 1px solid var(--border-bright); background: var(--surface); }
-.phAnswerQ { font-size: 14px; color: #0ac8a8; line-height: 1.35; }
+.phAnswerQ { font-size: 14px; color: var(--green-bright); line-height: 1.35; }
 .phQuick { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
 
 .phPill {
@@ -124,7 +143,7 @@
 }
 .phMic { background: var(--surface-3); color: var(--text-bright); border-color: var(--border-bright); }
 .phMicOn {
-  background: #3a0d0d; border-color: var(--danger); color: var(--danger);
+  background: #2a0d12; border-color: var(--danger); color: var(--danger);
   box-shadow: 0 0 0 calc(var(--lvl, 0) * 14px) rgba(255, 95, 95, 0.25);
   transition: box-shadow 80ms linear;
 }

@@ -191,6 +191,12 @@ export default function PhonePage() {
 
   useEffect(() => voice.onSpeaking(setSpeaking), []);
 
+  // The browser bar matches the phone's blue theme (the dashboard's is green)
+  useEffect(() => {
+    document.querySelector('meta[name="theme-color"]')?.setAttribute('content', '#0a0a0f');
+    document.body.style.background = '#0a0a0f';
+  }, []);
+
   // The first tap anywhere unlocks sound (iOS), and again after the page was in the background
   useEffect(() => {
     const unlock = () => { voice.unlock(); setTimeout(() => setVoiceReady(voice.ready()), 50); };
@@ -214,13 +220,14 @@ export default function PhonePage() {
   // Something new on the Stage: say so in the chat, one tap to see it
   const known = useRef<Set<string> | null>(null);
   useEffect(() => {
+    if (!stage.rev) return;              // not loaded yet: the first state is what was already there
     const ids = new Set(stage.panels.map(p => p.id));
     if (known.current) {
       const fresh = stage.panels.filter(p => !known.current!.has(p.id));
       if (fresh.length) setToast(fresh[fresh.length - 1]);
     }
     known.current = ids;
-  }, [stage.panels]);
+  }, [stage.panels, stage.rev]);
   useEffect(() => {
     if (!toast) return;
     const t = setTimeout(() => setToast(null), 9000);
