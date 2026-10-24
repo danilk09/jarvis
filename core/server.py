@@ -466,6 +466,49 @@ def _client_answer():
     return jsonify({"ok": True})
 
 
+@app.route("/api/client/say", methods=["POST"])
+def _client_say():
+    """A line a PC action said: {"id", "text", "spoken"} (core/pc.py)."""
+    from . import pc
+    b = _body()
+    return jsonify({"ok": pc.said(b.get("id"), (b.get("text") or "").strip(), bool(b.get("spoken")))})
+
+
+@app.route("/api/client/ask", methods=["POST"])
+def _client_ask():
+    """A PC action needs an answer from wherever the command came from (the phone): blocks
+    until it's given or the wait runs out. {"id"} → {"answer"}."""
+    from . import pc
+    return jsonify({"answer": pc.ask(_body().get("id")) or ""})
+
+
+@app.route("/api/client/result", methods=["POST"])
+def _client_result():
+    """A PC action finished: JSON {"id", "ok", "result", "chain"}, or multipart with that JSON
+    in "payload" and a screenshot in "image" (put on the Stage here)."""
+    from . import pc
+    if request.files.get("image"):
+        payload = json.loads(request.form.get("payload") or "{}")
+        folder = os.path.join(config.JARVIS_OUTPUT_DIR, "pc")
+        os.makedirs(folder, exist_ok=True)
+        path = os.path.join(folder, f"screenshot_{time.strftime('%Y%m%d_%H%M%S')}.png")
+        request.files["image"].save(path)
+    else:
+        payload, path = _body(), None
+    return jsonify({"ok": pc.result(payload.get("id"), payload, image=path)})
+
+
+@app.route("/api/client/index", methods=["POST"])
+def _client_index():
+    """The PC's workspaces ({"workspaces": {...}}), so the brain knows what "open 311" means."""
+    ws = _body().get("workspaces")
+    if isinstance(ws, dict) and ws != state.workspaces:
+        state.workspaces.clear()
+        state.workspaces.update(ws)
+        brain.rebuild_prompt(state.workspaces)
+    return jsonify({"ok": True})
+
+
 @app.route("/api/client/presence", methods=["POST"])
 def _client_presence():
     """The PC client's heartbeat (every 15 s): {"idle": seconds since keyboard/mouse input}."""

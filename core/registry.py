@@ -12,11 +12,11 @@ lines that teach Claude how to call it, so adding a command is one function:
 Handlers receive the action dict from Claude and a `chain` dict shared by all
 actions in one response (e.g. a screenshot's analysis feeding generate_file).
 
-pc_only=True: the action works on the PC itself (apps, music, the screen). The headless brain
-(config.HEADLESS, the Pi) leaves it out of Claude's prompt and answers that the PC is needed.
+pc_only=True: the action works on the PC itself (apps, music, the screen). On the headless brain
+(config.HEADLESS, the Pi) it's run on the PC client instead (core/pc.py), or queued while the
+PC is off.
 """
 
-from . import config
 
 ACTIONS: dict = {}     # type → handler(action, chain) -> str
 PC_ONLY: set  = set()  # types that need the PC
@@ -36,14 +36,9 @@ def action(name, schema=None, rules=(), pc_only=False):
     return register
 
 
-def available(name):
-    """False for a PC-only action on the headless brain."""
-    return not (config.HEADLESS and name in PC_ONLY)
-
-
 def schemas():
-    return [s for name, s in _SCHEMAS if available(name)]
+    return [s for _, s in _SCHEMAS]
 
 
 def rules():
-    return [r for name, r in _RULES if available(name)]
+    return [r for _, r in _RULES]

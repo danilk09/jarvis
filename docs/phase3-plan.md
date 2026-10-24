@@ -45,7 +45,9 @@ say, anywhere, goes to the Pi. One memory, agenda and history, so there is nothi
   is sent as `fresh` and ends that wait. The presence heartbeat is in too (`notify.away()` on the
   Pi). Still no client key (Tailscale is the boundary, as for `/phone`). The PC window still shows
   the PC's own dashboard (orb), not the Pi's: that's M7.
-- **Next:** M3 (PC actions + offline queue), M5 (history), M4.
+- **M3 is built** (`core/pc.py`): PC actions from any client run on the PC; what they say and ask
+  goes back to whoever gave the command; PC off → offer → `pc_queue.json` → run on reconnect.
+- **Next:** M5 (history), M4.
 
 ## How it fits together
 
@@ -129,7 +131,7 @@ Each is testable before the next starts.
 |---|---|---|
 | M1 ✓ | Pi: turn queue with sources, client endpoints, SSE events (key and presence move to M2) | `scripts/pi/fake_client.py` (text in, events printed) holds a conversation with the Pi, including a `listen` |
 | M2 ✓ | PC client voice loop (+ presence heartbeat) | "Jarvis, what time is it?" at the PC is answered by the Pi and spoken on the PC; the orb moves; answers to questions and interrupting work |
-| M3 | PC actions + offline queue | "Open Discord" from the PC and from the phone (PC on) opens it; with the PC off it offers, queues, and runs it on reconnect; screenshot lands on the Stage |
+| M3 ✓ | PC actions + offline queue | "Open Discord" from the PC and from the phone (PC on) opens it; with the PC off it offers, queues, and runs it on reconnect; screenshot lands on the Stage |
 | M4 | Reply routing + proactive messages | phone command spoken at the PC when you're active; reminders/check-ins at the PC or the phone depending on presence |
 | M5 | History | restart the Pi, yesterday's conversation is still on the dashboard; a day picker |
 | M6 | Coding on the Pi | task branch auto-pushed; new project → private repo after OK; "update my coding sessions" clones/pulls on the PC |

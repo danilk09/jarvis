@@ -527,6 +527,11 @@ def capture_followup():
 last_listen = [0.0]   # when the last listen started (so a question it answered isn't asked again)
 
 
+# Per thread: listen_redirect.fn() answers listen_for_command instead of the mic (client.py,
+# when an action runs here for a command that came from the phone)
+listen_redirect = threading.local()
+
+
 def listen_for_command(max_duration=8, silence_duration=0.8, onset_timeout=None) -> str:
     """Record one command (WebRTC VAD end-pointing) and transcribe it. With onset_timeout,
     give up if no speech starts within that many seconds.
@@ -536,6 +541,9 @@ def listen_for_command(max_duration=8, silence_duration=0.8, onset_timeout=None)
     clicking the orb) while Jarvis waits for an answer queues a second activation that only
     fires once this listen times out."""
     from . import state
+    hook = getattr(listen_redirect, "fn", None)
+    if hook:                     # the PC client running an action for a phone command: ask there
+        return hook()
     wake_was_on = _wake_on.is_set()
     disable_wake()
     state.listening.set()
@@ -612,9 +620,10 @@ _NUMBER_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
 
 def listen_for_selection():
     from .tts import speak, suppressed, wait_tts
-    speak("Let me know when you're ready to select")
-    activated.wait(timeout=60)
-    activated.clear()
+    if not getattr(listen_redirect, "fn", None):    # (answered remotely: no wake word needed)
+        speak("Let me know when you're ready to select")
+        activated.wait(timeout=60)
+        activated.clear()
     suppressed.clear()   # the wake word muted TTS; re-enable it for the prompts below
     speak("Which numbers?")
     wait_tts()

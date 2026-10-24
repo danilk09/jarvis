@@ -18,6 +18,7 @@ reads earlier lines from /status's log.
 """
 
 import collections
+import contextlib
 import itertools
 import queue as _queue
 import threading
@@ -34,6 +35,8 @@ _subs: list = []
 _lines = collections.OrderedDict()    # line id -> {"text", "source", "time"}, for /api/say
 _LINES_MAX = 60
 _listen = {"open": None}              # the open listen event, sent to clients that connect mid-wait
+_local = threading.local()            # per thread: speaking_as() source, echo() in progress
+on_pc_online: list = []               # called when the PC client connects (pc.py runs its queue)
 
 
 def put(text, source="phone", image=None, fresh=False):
@@ -87,18 +90,40 @@ def line(line_id):
         return _lines.get(line_id)
 
 
+@contextlib.contextmanager
+def speaking_as(source):
+    """Lines said by this thread belong to `source` (pc.py's queue, run outside any turn)."""
+    _local.source = source
+    try:
+        yield
+    finally:
+        _local.source = None
+
+
+def echo(text):
+    """Log a line the PC has already said aloud: shown everywhere, spoken by no one."""
+    _local.echo = True
+    try:
+        state.push_log("jarvis", text)
+    finally:
+        _local.echo = False
+
+
 def _on_log(role, text):
     now = time.time()
+    source = getattr(_local, "source", None) or current["source"]
     if role == "jarvis":
         lid = next(_ids)
-        entry = {"text": text, "source": current["source"], "time": now}
+        entry = {"text": text, "source": source, "time": now}
+        if getattr(_local, "echo", False):
+            entry["spoken"] = True
         with _lock:
             _lines[lid] = entry
             while len(_lines) > _LINES_MAX:
                 _lines.popitem(last=False)
         publish({"type": "line", "id": lid, **entry})
     else:
-        publish({"type": "user", "text": text, "source": current["source"], "time": now})
+        publish({"type": "user", "text": text, "source": source, "time": now})
 
 
 def _on_state(new_state):
@@ -110,7 +135,14 @@ pc = {"seen": 0.0, "idle": None}     # last heartbeat, and seconds since your la
 
 
 def presence(idle):
+    was = pc_online()
     pc.update(seen=time.time(), idle=idle)
+    if not was:
+        for fn in on_pc_online:
+            try:
+                fn()
+            except Exception as e:
+                print(f"  PC online hook error: {e}")
 
 
 def pc_online():

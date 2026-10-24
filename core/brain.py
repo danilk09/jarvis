@@ -25,17 +25,16 @@ BOOKMARKS searchable by keyword (use type "bookmark").
 FILES searchable by keyword (use type "find_files")."""
 _PC_EXAMPLE = ('"open Discord and play lofi" → {"mode":"action","actions":[{"type":"app","target":"Discord"},'
                '{"type":"music","command":"play","query":"lofi"}]}')
-# The headless brain (the Pi) can't touch the PC: say so instead of pretending
-_HEADLESS_NOTE = """WHERE YOU RUN: on the user's home server, not their PC. Messages arrive from their phone and are read there, not heard from speakers. Opening apps, workspaces, files or websites, playing music, screenshots and anything done on the PC itself → mode "chat": say briefly that it needs the PC. Everything else works as usual."""
-_HEADLESS_EXAMPLE = ('"remind me to call mom at 6 and look up the weather" → several actions in one list '
-                     '(agenda, then web_search)')
+# The headless brain (the Pi): PC actions are carried out on the PC client (core/pc.py)
+_HEADLESS_NOTE = """WHERE YOU RUN: on the user's home server. Messages come from their phone or their PC. Actions on the PC (apps, workspaces, files, websites, music, screenshots, agent) are carried out on their PC; if it's off, you'll offer to do them when it's back, so use those actions as usual."""
 
 
 def build_system_prompt(workspaces):
     actions = "\n".join(f'{{"mode":"action","actions":[{s}]}}' for s in registry.schemas())
     rules   = "\n".join(f"- {r}" for r in registry.rules())
-    where   = _HEADLESS_NOTE if config.HEADLESS else _PC_LOOKUPS.format(workspaces=json.dumps(list(workspaces.keys())))
-    example = _HEADLESS_EXAMPLE if config.HEADLESS else _PC_EXAMPLE
+    where   = _PC_LOOKUPS.format(workspaces=json.dumps(list(workspaces.keys())))
+    if config.HEADLESS:
+        where = _HEADLESS_NOTE + "\n" + where
     return f"""You are JARVIS: the user's long-time AI companion, with a warm, dry British wit. Not a help desk. Return ONLY a single JSON object, no explanation.
 
 PERSONALITY (for every chat reply and anything spoken):
@@ -52,7 +51,7 @@ ACTION TYPES (pick one; several actions may be chained in one "actions" list):
 {{"mode":"none"}}
 
 RULES:
-- Multi-part requests → several actions in one list, e.g. {example}
+- Multi-part requests → several actions in one list, e.g. {_PC_EXAMPLE}
 {rules}
 - Words like "open","find","search","launch","show" → ALWAYS mode "action"
 - Any question or request for information that doesn't need real-time data → mode "chat" with a spoken reply
@@ -63,6 +62,13 @@ RULES:
 - A command starting (Answering your question "...") is the user's reply to what you asked: act on it in that context.
 - MEMORY (below, when present) is what you know about the user: use it to understand and personalize, e.g. "text my sister" when MEMORY names her.
 """
+
+
+def rebuild_prompt(workspaces):
+    """The workspaces changed (the PC client sent its own): new prompt, same conversation."""
+    global _system_prompt
+    with _lock:
+        _system_prompt = build_system_prompt(workspaces)
 
 
 def init_chat_history(workspaces):

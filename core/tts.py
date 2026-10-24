@@ -589,10 +589,18 @@ else:
 _ready.wait(timeout=10)
 
 
+# Per thread: redirect.fn(text) gets every line this thread says (the PC client running an
+# action for the brain sends them there); it returns True if the line shouldn't play here.
+redirect = threading.local()
+
+
 def speak(text, update_state=True, on_start=None):
     """Queue text to be spoken. on_start runs the moment this sentence starts playing
     (the Stage uses it to highlight what Jarvis is talking about)."""
     if not text:
+        return
+    hook = getattr(redirect, "fn", None)
+    if hook and hook(str(text)):
         return
     if suppressed.is_set():
         print(f"  [muted] JARVIS: {text}")

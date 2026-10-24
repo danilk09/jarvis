@@ -12,7 +12,7 @@ import webbrowser
 from urllib.parse import quote_plus
 
 from . import agenda, agent, audio, brain, config, files, media, music, stage, state, tts
-from . import briefing, checkins, coding, delegate, knowledge, memory, notify, places, stage_actions  # noqa: F401  (register their actions)
+from . import briefing, checkins, coding, delegate, knowledge, memory, notify, pc, places, stage_actions  # noqa: F401  (register their actions; pc: the PC-off queue)
 from .generate import generate_file_content, summarize_for_speech
 from .registry import ACTIONS, PC_ONLY, action
 from .tts import speak
@@ -358,18 +358,16 @@ def handle_response(response):
         if not actions:
             speak("I'm not sure what to do with that.")
             return
-        chain, told = {}, False
+        chain = {}
         for a in actions:
             kind = a.get("type") or a.get("mode", "")
             handler = ACTIONS.get(kind)
             if handler is None:
                 print(f"  Unknown action: {kind}")
                 continue
-            if kind in PC_ONLY and config.HEADLESS:   # the router or the model asked for one anyway
-                if not told:
-                    speak("That one needs your PC, sir, and I can't reach it from here yet.")
-                    told = True
-                print(f"  Skipped (needs the PC): {kind}")
+            if kind in PC_ONLY and config.HEADLESS:   # the brain on the Pi: the PC client runs it
+                from . import pc
+                print(f"  Done: {pc.run(a, chain)}")
                 continue
             print(f"  Done: {handler(a, chain)}")
     elif mode == "chat":
