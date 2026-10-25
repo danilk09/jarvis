@@ -235,6 +235,7 @@
   box-shadow: 0 0 0 1px var(--danger), 0 0 0 calc(4px + var(--lvl, 0) * 22px) rgba(255, 95, 95, 0.22);
   transition: box-shadow 80ms linear;
 }
+.phBigMicStarting { transform: scale(0.94); filter: saturate(0.6) brightness(0.85); animation: phBlink 0.8s ease-in-out infinite; }
 .phStopSq { width: 26px; height: 26px; border-radius: 6px; background: currentColor; }
 .phMicLabel { font-family: var(--mono); font-size: 11px; letter-spacing: 0.12em; color: var(--text-dim); text-transform: uppercase; }
 .phDockRec .phMicLabel { color: var(--danger); }

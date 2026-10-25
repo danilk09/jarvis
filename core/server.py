@@ -610,7 +610,9 @@ def _phone_command():
             return jsonify({"error": "no speech detected"}), 400
         turns.put(command, "phone")
         mic = (request.form.get("mic") or "")[:60]     # which mic recorded it (AirPods vs. the phone's)
-        print(f'  Phone command queued: "{command}"' + (f"  [mic: {mic}]" if mic else ""))
+        took = (request.form.get("mic_ms") or "")[:6]   # how long it took to open after the tap
+        print(f'  Phone command queued: "{command}"' + (f"  [mic: {mic}" + (f", opened in {took} ms" if took else "") + "]"
+                                                       if mic else ""))
         return jsonify({"command": command, "status": "processing"})
     except Exception as e:
         return jsonify({"error": str(e)}), 500

@@ -225,7 +225,7 @@ export default function PhonePage() {
     }
   }, []);
 
-  const send = useCallback(async (opts: { text?: string; audio?: Blob; mic?: string }) => {
+  const send = useCallback(async (opts: { text?: string; audio?: Blob; mic?: string; micMs?: number }) => {
     voice.hush();
     history.open(null);                                     // back to now
     const form = new FormData();
@@ -233,6 +233,7 @@ export default function PhonePage() {
     if (typed) form.append('text', typed);
     if (opts.audio) form.append('audio', opts.audio, /mp4|m4a|aac/.test(opts.audio.type) ? 'command.mp4' : 'command.webm');
     if (opts.mic) form.append('mic', opts.mic);
+    if (opts.micMs) form.append('mic_ms', String(opts.micMs));   // how long the mic took to open (logged)
     if (photo) {
       form.append('image', photo.blob, 'photo.jpg');
       if (await post('/phone-image', form)) { URL.revokeObjectURL(photo.url); setPhoto(null); setText(''); }
@@ -242,7 +243,7 @@ export default function PhonePage() {
     if (await post('/phone-command', form)) setText('');
   }, [photo, post, history.open]);   // eslint-disable-line react-hooks/exhaustive-deps
 
-  const rec = useRecorder((audio, mic) => send({ audio, mic, text: photo ? text : '' }));
+  const rec = useRecorder((audio, mic, micMs) => send({ audio, mic, micMs, text: photo ? text : '' }));
 
   // Jarvis asked something here: once he's finished saying it, open the mic for the answer
   // (gives up after a few quiet seconds; the answer bar stays for tapping or typing)
@@ -259,6 +260,7 @@ export default function PhonePage() {
 
   const onMic = () => {
     if (rec.recording) { rec.stop(); return; }
+    if (rec.starting) return;
     voice.hush();
     rec.start();
   };
@@ -403,13 +405,13 @@ export default function PhonePage() {
           <button className="phSideBtn" aria-label="Photo" onClick={() => photoRef.current?.click()}>📷</button>
           <input ref={photoRef} type="file" accept="image/*" hidden onChange={onPick} />
           <div className="phMicWrap">
-            <button className={`phBigMic ${rec.recording ? 'phBigMicOn' : ''} ${listen && !rec.recording ? 'phBigMicAsk' : ''}`}
+            <button className={`phBigMic ${rec.recording ? 'phBigMicOn' : ''} ${rec.starting ? 'phBigMicStarting' : ''} ${listen && !rec.recording ? 'phBigMicAsk' : ''}`}
                     disabled={sending} onClick={onMic} aria-label={rec.recording ? 'Stop' : 'Talk to Jarvis'}
                     style={{ ['--lvl' as string]: rec.level.toFixed(2) }}>
               {rec.recording ? <span className="phStopSq" /> : <MicIcon />}
             </button>
             <div className="phMicLabel">
-              {rec.recording ? 'Listening… tap when done' : sending ? 'Sending…' : listen ? 'Tap to answer'
+              {rec.recording ? 'Listening… tap when done' : rec.starting ? 'Opening mic…' : sending ? 'Sending…' : listen ? 'Tap to answer'
                 : photo ? 'Tap to ask about the photo' : 'Tap to talk'}
             </div>
           </div>

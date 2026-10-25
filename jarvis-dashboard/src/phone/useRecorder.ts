@@ -13,6 +13,7 @@ import { context } from './phoneAudio';
 // within that many seconds.
 
 const KEY = 'jarvis.mic';
+const FOUND = 'jarvis.mic.found';   // the phone's own mic, once found: opened directly next time
 const MAX_S = 20;
 const SILENCE_S = 1.3;
 const HEADSET = /airpods|bluetooth|headset|beats|buds|hands-?free|hfp/i;
@@ -38,18 +39,29 @@ export async function listMics(): Promise<Mic[]> {
   }
 }
 
-/** The mic to use: your choice, else the phone's own (not a headset), else the default. */
-async function pick(): Promise<string | undefined> {
-  const mics = await listMics();
-  const choice = stored();
-  if (choice !== 'auto' && mics.some(m => m.id === choice)) return choice;
-  const builtIn = mics.find(m => m.label && !HEADSET.test(m.label) && BUILT_IN.test(m.label))
-               || mics.find(m => m.label && !HEADSET.test(m.label));
-  return builtIn?.id || undefined;
+function found(): string {
+  try { return localStorage.getItem(FOUND) || ''; } catch { return ''; }
 }
 
-export function useRecorder(onDone: (audio: Blob, mic: string) => void) {
+/** The phone's own mic among the visible ones (iOS shows names only once the page has used the mic). */
+async function builtIn(): Promise<string | undefined> {
+  const mics = await listMics();
+  const m = mics.find(x => x.label && !HEADSET.test(x.label) && BUILT_IN.test(x.label))
+         || mics.find(x => x.label && !HEADSET.test(x.label));
+  return m?.id || undefined;
+}
+
+/** The mic to open: your choice, else the phone's own mic remembered from last time. No device
+ *  list needed first: iOS hides it until the mic has been used, which used to mean opening the
+ *  default mic (the AirPods), then closing it and opening the right one: two slow opens. */
+function pick(): string | undefined {
+  const choice = stored();
+  return choice !== 'auto' ? choice : (found() || undefined);
+}
+
+export function useRecorder(onDone: (audio: Blob, mic: string, ms: number) => void) {
   const [recording, setRecording] = useState(false);
+  const [starting, setStarting] = useState(false);   // tapped, mic still opening
   const [level, setLevel] = useState(0);
   const [error, setError] = useState('');
   const rec = useRef<MediaRecorder | null>(null);
@@ -65,30 +77,39 @@ export function useRecorder(onDone: (audio: Blob, mic: string) => void) {
   const start = useCallback(async (opts: { onset?: number } = {}) => {
     if (rec.current && rec.current.state !== 'inactive') return;
     setError('');
+    setStarting(true);
     discard.current = false;
+    const tapped = performance.now();
     let stream: MediaStream;
     try {
-      const id = await pick();
+      const id = pick();
       const audio: MediaTrackConstraints = { channelCount: 1 };
       try {
         stream = await navigator.mediaDevices.getUserMedia({ audio: id ? { ...audio, deviceId: { exact: id } } : audio });
       } catch (e: any) {
-        if (!id || e?.name !== 'OverconstrainedError') throw e;
+        if (!id || (e?.name !== 'OverconstrainedError' && e?.name !== 'NotFoundError')) throw e;
+        try { localStorage.removeItem(FOUND); } catch { /* ignore */ }
         stream = await navigator.mediaDevices.getUserMedia({ audio });   // that mic is gone
       }
-      // The very first time, mic names are hidden until you allow access: now that they're
-      // visible, switch to the phone's own mic if the default was a headset
-      if (!id) {
-        const better = await pick();
-        if (better && better !== stream.getAudioTracks()[0]?.getSettings().deviceId) {
-          stream.getTracks().forEach(t => t.stop());
-          stream = await navigator.mediaDevices.getUserMedia({ audio: { ...audio, deviceId: { exact: better } } });
+      // Only ever once per phone: the default was a headset, and the phone's own mic is now
+      // visible. Remember it (opened directly from now on); switch to it if it's cheap to.
+      if (stored() === 'auto' && !found()) {
+        const own = await builtIn();
+        const now = stream.getAudioTracks()[0]?.getSettings().deviceId;
+        if (own) {
+          try { localStorage.setItem(FOUND, own); } catch { /* ignore */ }
+          if (own !== now) {
+            stream.getTracks().forEach(t => t.stop());
+            stream = await navigator.mediaDevices.getUserMedia({ audio: { ...audio, deviceId: { exact: own } } });
+          }
         }
       }
     } catch {
+      setStarting(false);
       if (!opts.onset) setError('Microphone access denied');   // (an automatic start may just not be allowed)
       return;
     }
+    const openMs = Math.round(performance.now() - tapped);
     const track = stream.getAudioTracks()[0];
     const micLabel = track?.label || '';
     const chunks: Blob[] = [];
@@ -102,9 +123,10 @@ export function useRecorder(onDone: (audio: Blob, mic: string) => void) {
       setLevel(0);
       rec.current = null;
       const blob = new Blob(chunks, { type: r.mimeType || 'audio/mp4' });
-      if (blob.size > 0 && !discard.current) done.current(blob, micLabel);
+      if (blob.size > 0 && !discard.current) done.current(blob, micLabel, openMs);
     };
     r.start();
+    setStarting(false);
     setRecording(true);
 
     // Auto-stop: after you've spoken, SILENCE_S of quiet ends it
@@ -147,5 +169,5 @@ export function useRecorder(onDone: (audio: Blob, mic: string) => void) {
 
   useEffect(() => () => stop(), [stop]);
 
-  return { recording, level, error, start, stop, cancel };
+  return { recording, starting, level, error, start, stop, cancel };
 }
