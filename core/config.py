@@ -217,9 +217,11 @@ REPO_DIRS            = [os.path.join(HOME, "OneDrive", "Desktop", "GitHub") if W
 GITHUB_USER          = "danilk09"
 GITHUB_TOKEN         = os.environ.get("GITHUB_TOKEN", "")
 CODE_MAX_PARALLEL    = 3       # Claude Code runs at once (one per project)
-# Each task in a git repo gets its own branch (jarvis/<task>); Claude Code commits there and
-# pushes that branch, never main (CODE_DENIED_TOOLS).
+# Work in a git repo goes on one branch per repo, CODE_BRANCH ("jarvis"), so continued work
+# doesn't pile up branches; "start a fresh branch" makes a jarvis-<task> one. Claude Code
+# commits there and pushes that branch, never main (CODE_DENIED_TOOLS). False = no branches.
 CODE_BRANCH_PER_TASK = True
+CODE_BRANCH          = "jarvis"
 # Phone notification when a run finishes (with Continue on phone / Allow buttons):
 # "away" = only when you're away from the PC, "always", or "never"
 CODE_NOTIFY          = "away"
@@ -252,7 +254,7 @@ CODE_ALLOWED_TOOLS += [f"mcp__github__{t}" for t in _GITHUB_READ_TOOLS]
 CODE_ALLOWED_TOOLS += ["mcp__context7", "mcp__playwright", "mcp__postgres"]
 # Blocked even with full permissions (deny rules beat every mode). Pushing to main/master
 # is never allowed, except the first push of a repo that has nothing on GitHub yet; work
-# goes to a jarvis/<task> branch instead. Deleting a GitHub repo comes back as a denial, and
+# goes to the jarvis branch instead. Deleting a GitHub repo comes back as a denial, and
 # Jarvis asks you ("allow it"). Rules match the command as Claude Code writes it, so they
 # stop the usual forms; GitHub branch protection on main is the hard guarantee.
 _MAIN_PUSHES = [f"git push {p}" for b in ("main", "master")

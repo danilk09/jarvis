@@ -12,7 +12,7 @@ import webbrowser
 from urllib.parse import quote_plus
 
 from . import agenda, agent, audio, brain, config, files, media, music, stage, state, tts
-from . import briefing, checkins, coding, delegate, knowledge, memory, notify, pc, places, stage_actions  # noqa: F401  (register their actions; pc: the PC-off queue)
+from . import briefing, checkins, coding, delegate, knowledge, memory, notify, pc, places, repos, stage_actions  # noqa: F401  (register their actions; pc: the PC-off queue)
 from .generate import generate_file_content, summarize_for_speech
 from .registry import ACTIONS, PC_ONLY, action
 from .tts import speak

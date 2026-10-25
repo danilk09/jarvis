@@ -125,7 +125,8 @@ def context():
     name, proj = current()
     lines = []
     if name:
-        lines.append(f'Current coding project: "{name}" ({proj["path"]})')
+        lines.append(f'Current coding project: "{name}" ({proj["path"]})'
+                     + (f', working on the branch "{proj["work_branch"]}" (the user chose it)' if proj.get("work_branch") else ""))
     for job in running():
         if job.get("service"):
             lines.append(f'A {job["label"]} task is running in the background (delegate "{job["service"]}"): '
@@ -236,7 +237,8 @@ def _env():
         env.pop("ANTHROPIC_API_KEY", None)
         env.pop("ANTHROPIC_AUTH_TOKEN", None)
     env.setdefault("MCP_DISCOVERY_CACHE", "1")    # reuse MCP tool lists from the last run: faster startup
-    return env
+    from . import repos
+    return repos.auth_env(env)                     # on the Pi: git pushes with GITHUB_TOKEN
 
 
 def _ps_args(args):
@@ -357,41 +359,185 @@ def _branch_slug(text):
     return "-".join(picked)[:40].strip("-")
 
 
-def _prepare_branch(name, path, request, fresh=False):
-    """Put the repo on a branch for this task. Follow-ups stay on the jarvis/ branch they're on;
-    otherwise a new jarvis/<task> branch is created from the current one. Uncommitted changes
-    are asked about first. Returns (go ahead?, note for Claude Code)."""
-    code, branch = _git(path, "rev-parse", "--abbrev-ref", "HEAD")
+def is_jarvis_branch(branch):
+    """jarvis, jarvis-<task> (a fresh one you asked for), or an old jarvis/<task>."""
+    base = config.CODE_BRANCH
+    return branch == base or branch.startswith((base + "-", base + "/"))
+
+
+def _identity():
+    """For the commits Jarvis itself makes (a merge, a first commit), where git has no name set."""
+    return ["-c", f"user.name={config.GITHUB_USER or 'Jarvis'}",
+            "-c", f"user.email={config.GITHUB_USER or 'jarvis'}@users.noreply.github.com"]
+
+
+def _free_branch_name(path):
+    """Git can't have a branch "jarvis" next to old "jarvis/<task>" ones: rename those (local)
+    to "jarvis-<task>", keeping their commits."""
+    base = config.CODE_BRANCH
+    _, old = _git(path, "branch", "--list", f"{base}/*", "--format=%(refname:short)")
+    for b in old.split():
+        new = base + "-" + b[len(base) + 1:].replace("/", "-")
+        code, out = _git(path, "branch", "-m", b, new)
+        print(f"  renamed {b} -> {new}" if code == 0 else f"  couldn't rename {b}: {out}")
+
+
+_KEEP = ("Commit your work there with clear messages, and when you're done push this branch "
+         "(git push -u origin <branch>) if the repo has a GitHub remote. Never push to main or master, "
+         "and don't switch branches or merge into main unless the user asks.")
+
+
+def _may_switch(name, path, current, target):
+    """Uncommitted changes would come along to the other branch: ask first."""
+    _, dirty = _git(path, "status", "--porcelain")
+    if dirty and current != target:
+        from .agent import confirm
+        if not confirm(f"{pretty(name)} has uncommitted changes on {current}. They'd come along to {target}"):
+            speak("Okay, I won't start it.")
+            return False
+    return True
+
+
+def _exists(path, branch):
+    """"local", "remote" (only origin/<branch>) or ""."""
+    if _git(path, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}")[0] == 0:
+        return "local"
+    if _git(path, "rev-parse", "--verify", "--quiet", f"refs/remotes/origin/{branch}")[0] == 0:
+        return "remote"
+    return ""
+
+
+def _chosen_branch(name, path, request, current, want, base, proj):
+    """The user picked the branch: work on `want` (an existing branch), or start a new one from
+    `base` (named `want`, else jarvis-<task>). It sticks for this project (proj["work_branch"])
+    until they pick another or say "the jarvis branch"."""
+    from . import repos
+    repos.git(path, "fetch", "origin", timeout=60)       # branches pushed from elsewhere
+    if base:
+        if not _exists(path, base):
+            speak(f"There's no branch called {base} in {pretty(name)}.")
+            return False, ""
+        target = want
+        if not target or _exists(path, target):
+            if target:                                    # it's already there: just use it
+                return _chosen_branch(name, path, request, current, target, "", proj)
+            taken = set(_git(path, "branch", "-a", "--format=%(refname:short)")[1].replace("origin/", "").split())
+            target = slug = f"{config.CODE_BRANCH}-{_branch_slug(request)}"
+            n = 2
+            while target in taken:
+                target, n = f"{slug}-{n}", n + 1
+        if not _may_switch(name, path, current, target):
+            return False, ""
+        start_at = base if _exists(path, base) == "local" else f"origin/{base}"
+        code, out = _git(path, "checkout", "-b", target, start_at)
+        made = f"Jarvis created the branch {target} from {base}, as the user asked."
+    else:
+        target = want
+        where = _exists(path, target)
+        if not where:
+            speak(f"There's no branch called {target} in {pretty(name)}.")
+            return False, ""
+        if current == target:
+            code, out = 0, ""
+        elif not _may_switch(name, path, current, target):
+            return False, ""
+        elif where == "local":
+            code, out = _git(path, "checkout", target)
+        else:
+            code, out = _git(path, "checkout", "-b", target, "--track", f"origin/{target}")
+        made = f"The user chose the branch {target} for this work."
+    if code != 0:
+        print(f"  switching to {target} failed: {out}")
+        speak(f"I couldn't switch {pretty(name)} to {target.replace('/', ' ')}, so I didn't start.")
+        return False, ""
+    with _lock:
+        proj["work_branch"] = target
+        _save()
+    print(f"  {name}: working on {target} (the user's choice)")
+    return True, f"{made} Stay on it. {_KEEP}"
+
+
+def _prepare_branch(name, path, request, fresh=False, branch="", base="", proj=None):
+    """Put the repo on the branch for this run.
+    - You named one: work on that existing branch (branch), or start a new one from it (base);
+      that choice sticks for the project (work_branch) until you pick another.
+    - Otherwise every run uses one branch, config.CODE_BRANCH ("jarvis"), so continued work
+      doesn't pile up branches; "start a fresh branch" makes a jarvis-<task> one (from the
+      chosen branch, if there is one). Already on a Jarvis branch → stay. Coming from another
+      branch (main) → back to jarvis, with that branch's new commits merged in.
+    Uncommitted changes are asked about first. Returns (go ahead?, note for Claude Code)."""
+    proj = proj if proj is not None else {}
+    code, current = _git(path, "rev-parse", "--abbrev-ref", "HEAD")
     if code != 0:              # no commits yet: nothing to branch from
         return True, ""
-    keep = ("Commit your work there with clear messages, and when you're done push this branch "
-            "(git push -u origin <branch>) if the repo has a GitHub remote. Never push to main or master, "
-            "merge, or switch branches unless the user asks.")
-    if branch.startswith("jarvis/") and not fresh:
-        return True, f"You're on the branch {branch}, made for earlier Jarvis work in this repo. {keep}"
-    _, dirty = _git(path, "status", "--porcelain")
-    if dirty:
-        from .agent import confirm
-        if not confirm(f"{pretty(name)} has uncommitted changes on {branch}. They'd come along to the new branch"):
-            speak("Okay, I won't start it.")
-            return False, ""
-    _, existing = _git(path, "branch", "--list", "jarvis/*", "--format=%(refname:short)")
-    taken = set(existing.split())
-    new = base = f"jarvis/{_branch_slug(request)}"
-    n = 2
-    while new in taken:
-        new, n = f"{base}-{n}", n + 1
-    code, out = _git(path, "checkout", "-b", new)
-    if code != 0:
-        print(f"  git checkout -b {new} failed: {out}")
-        speak(f"I couldn't create a branch in {pretty(name)}, so I didn't start.")
+    want = (branch or "").strip()
+    back = want.lower() == config.CODE_BRANCH             # "back to the jarvis branch"
+    if back:
+        with _lock:
+            proj.pop("work_branch", None)
+            _save()
+        want = ""
+    work = proj.get("work_branch")
+    if fresh and work and not base:
+        base = work                                       # a fresh branch off what you're working on
+    if want or base:
+        return _chosen_branch(name, path, request, current, want, (base or "").strip(), proj)
+    if work:
+        if not _exists(path, work):
+            with _lock:
+                proj.pop("work_branch", None)              # deleted since: back to the usual
+                _save()
+        else:
+            return _chosen_branch(name, path, request, current, work, "", proj)
+    branch, keep = current, _KEEP
+    if is_jarvis_branch(branch) and not fresh and not (back and branch != config.CODE_BRANCH):
+        return True, f"You're on the branch {branch}, where Jarvis's work in this repo goes. {keep}"
+    if not _may_switch(name, path, branch, config.CODE_BRANCH):
         return False, ""
-    print(f"  {name}: working on new branch {new} (from {branch})")
-    return True, f"Jarvis created the branch {new} from {branch} for this task. {keep}"
+    note = ""
+    if fresh:
+        _, existing = _git(path, "branch", "--list", f"{config.CODE_BRANCH}-*", "--format=%(refname:short)")
+        taken = set(existing.split())
+        target = base = f"{config.CODE_BRANCH}-{_branch_slug(request)}"
+        n = 2
+        while target in taken:
+            target, n = f"{base}-{n}", n + 1
+        code, out = _git(path, "checkout", "-b", target)
+        made = f"Jarvis created the branch {target} from {branch} for this task."
+    else:
+        target = config.CODE_BRANCH
+        _free_branch_name(path)
+        if _git(path, "rev-parse", "--verify", "--quiet", f"refs/heads/{target}")[0] == 0:
+            code, out = _git(path, "checkout", target)
+        elif _git(path, "rev-parse", "--verify", "--quiet", f"refs/remotes/origin/{target}")[0] == 0:
+            code, out = _git(path, "checkout", "-b", target, "--track", f"origin/{target}")
+        else:
+            # a new jarvis branch starts from main (not from an experiment branch you were on)
+            main = next((b for b in ("main", "master") if _exists(path, b)), "")
+            start_at = branch if not main or branch == main else (main if _exists(path, main) == "local"
+                                                                 else f"origin/{main}")
+            code, out = _git(path, "checkout", "-b", target, start_at)
+        made = f"You're on the branch {target}, where Jarvis's work in this repo goes."
+        # work done on main since: bring it in, so Claude Code builds on the latest (only from
+        # main/master: another branch may be one of your separate experiments)
+        if code == 0 and branch in ("main", "master")                 and _git(path, "merge-base", "--is-ancestor", branch, target)[0] != 0:
+            m, mout = _git(path, *_identity(), "merge", "--no-edit", branch)
+            if m != 0:
+                _git(path, "merge", "--abort")
+                note = (f" {branch} has commits that {target} doesn't, and merging them in hit conflicts: "
+                        f"merge {branch} into {target} first and resolve them.")
+            else:
+                print(f"  {name}: merged {branch} into {target}")
+    if code != 0:
+        print(f"  switching to {target} failed: {out}")
+        speak(f"I couldn't switch {pretty(name)} to Jarvis's branch, so I didn't start.")
+        return False, ""
+    print(f"  {name}: working on {target} (from {branch})")
+    return True, f"{made}{note} {keep}"
 
 
 def start(request, project=None, new=False, effort="", model="", plan=False, extra_allowed=(), quiet=False,
-          fresh_branch=False, question=False, service=None, on_done=None):
+          fresh_branch=False, question=False, service=None, on_done=None, branch="", base_branch=""):
     """Send a request to Claude Code in a project (in the background). Returns a status string.
     `service` (from delegate.spec) runs a delegated task instead: its own folder, MCP servers,
     allowed tools and instructions, and no git branch. `on_done(status, summary)` is called when
@@ -434,7 +580,8 @@ def start(request, project=None, new=False, effort="", model="", plan=False, ext
     if config.CODE_BRANCH_PER_TASK and not service and not new and not plan and not question \
             and _is_git(proj["path"]):
         task = proj.get("plan_request") if request.startswith("Implement the plan") else request
-        ok, branch_note = _prepare_branch(name, proj["path"], task or request, fresh=fresh_branch)
+        ok, branch_note = _prepare_branch(name, proj["path"], task or request, fresh=fresh_branch,
+                                          branch=branch, base=base_branch, proj=proj)
         if not ok:
             return "Cancelled"
     with _lock:
@@ -734,6 +881,27 @@ def _finish(job, result):
         more = f" and {len(denials) - 1} other command{'s' if len(denials) > 2 else ''}" if len(denials) > 1 else ""
         speak(f"In {who}, it also wanted to run {first}{more}, which needs your permission — the commands "
               "are on the stage. Should I let it?")
+    else:
+        _after_run(job, status)       # (a question about refused commands comes first)
+
+
+def _after_run(job, status):
+    """M6: push the run's Jarvis branch; a new project gets one offer to go on GitHub (said
+    after the summary, so it's the question Jarvis then listens for)."""
+    from . import repos
+    with _lock:
+        entry = _state["projects"].get(job["project"]) or {}
+        path = entry.get("path", "")
+        ask = (not job["plan"] and not entry.get("github_asked")
+               and os.path.normcase(os.path.abspath(path)).startswith(os.path.normcase(os.path.abspath(config.CODING_DIR))))
+    def later():
+        from .tts import wait_tts
+        wait_tts()
+        if repos.after_run(job["project"], path, status, ask, entry.get("work_branch", "")):
+            with _lock:
+                entry["github_asked"] = True
+                _save()
+    threading.Thread(target=later, daemon=True, name="after-run").start()
 
 
 def _result_markdown(job):
@@ -1048,9 +1216,9 @@ def repo_status():
         n = len([line for line in changes.splitlines() if line.strip()])
         if n:
             dirty.append(name)
-        if branch.startswith("jarvis/"):
+        if is_jarvis_branch(branch):
             jarvis.append(name)
-        if n or branch.startswith("jarvis/") or busy(name):
+        if n or is_jarvis_branch(branch) or busy(name):
             state = "working now" if busy(name) else f"{n} uncommitted change{'s' if n != 1 else ''}" if n else "clean"
             rows.append(f"| {name} | `{branch}` | {state} |")
     md = ("Repos with uncommitted changes, Jarvis branches or a run in progress. Everything else is clean.\n\n"
@@ -1073,7 +1241,7 @@ def repo_status():
 
 # ── Voice ─────────────────────────────────────────────────────────────────────
 @action("code",
-        schema='{"type":"code","command":"new|run|switch|list|clone|repos|status|stop|approve|phone|remember|show_prefs|open_vscode|open_terminal","request":"<the full coding request, in the user\'s words>","project":"<project or repo name, or empty for the current one>","effort":"<low|medium|high|xhigh|max, or empty>","model":"<opus|sonnet|fable|haiku, or empty>","plan_only":false,"question":false,"fresh_branch":false,"preference":"<for remember>"}',
+        schema='{"type":"code","command":"new|run|switch|list|clone|repos|status|stop|approve|github|phone|remember|show_prefs|open_vscode|open_terminal","request":"<the full coding request, in the user\'s words>","project":"<project or repo name, or empty for the current one>","effort":"<low|medium|high|xhigh|max, or empty>","model":"<opus|sonnet|fable|haiku, or empty>","plan_only":false,"question":false,"fresh_branch":false,"branch":"<an existing branch the user named to work on, or empty>","base_branch":"<a branch the user wants a new branch started from, or empty>","preference":"<for remember>"}',
         rules=['"code/build/make/write me a [app, script, game, project]", "start a new project for X" → code command "new"; "request" = the full description; "project" = a short name for it',
                'ANY change to the current coding project ("add dark mode", "fix the login bug", "write tests", "refactor X", "why does it crash") → code command "run" — it goes straight to Claude Code. Keep the user\'s wording in "request", including things like "use subagents" or "in parallel". This is for project code; files Jarvis wrote to the Stage use edit_file.',
                'Thinking depth: "think hard/harder" → effort "high"; "think really hard", "ultrathink", "max effort", "as thorough as possible" → "max"; "quick", "low effort" → "low". "use Opus/Sonnet/Haiku" → model. Leave both empty otherwise.',
@@ -1081,7 +1249,9 @@ def repo_status():
                '"switch to / work on [project or repo]" → code "switch" with project (any folder in Repos counts); a request naming another repo ("in murphys, add a footer") → code "run" with that project. "what projects/repos do I have" → "list"; "how\'s the coding going", "what is Claude Code doing" → "status"; "stop coding", "stop the murphys run" → "stop" (project if named)',
                'Questions about a repo that change nothing — "any new issues on hiclimb", "what PRs are open", "is CI passing", "how does the login work in X" → code "run" with question true, the project, and the question as request',
                '"clone my X repo", "get X from GitHub" → code "clone" with project; "status of my repos", "which repos have changes" → code "repos"',
-               'Work in a git repo happens on its own jarvis/ branch automatically, and follow-ups continue on it. "start a fresh branch", "new branch for this" → fresh_branch true. Pushing, merging into main and opening PRs are requests to Claude Code (code "run"); Jarvis asks before anything is pushed.',
+               'Work in a git repo happens on its "jarvis" branch automatically, and follow-ups continue on it. Only "start a fresh branch", "new branch for this", "on a separate branch" → fresh_branch true. Claude Code pushes that branch itself (never main); merging into main and opening PRs are requests to Claude Code (code "run").',
+               'A branch the user names: "work on the idea-a branch in X", "use my experiment branch" → branch = that name (Jarvis stays on it for that project until told otherwise; "go back to the jarvis branch" → branch "jarvis"); "make a new branch off idea-a", "branch off X" → base_branch = that name (branch = the new name, only if the user gives one). Without a request ("switch X to the idea-a branch") → code "switch" with project and branch/base_branch.',
+               '"put X on GitHub", "make a GitHub repo for X", or "yes" after Jarvis offered to put a project on GitHub → code command "github" (project if named)',
                '"allow it", "yes run it", "yes" (after Jarvis asked permission for a command) → code "approve"',
                'Coding preferences only — "remember I prefer X for coding", "always use X in my projects", "from now on use X when you code" → code "remember" with preference = the preference as a short sentence (anything else to remember is type "memory"); "show my coding preferences" → "show_prefs"',
                '"continue this on my phone", "put it on my phone", "let me keep going from my phone" → code "phone" (project if named) — opens the conversation in the Claude app with Remote Control',
@@ -1106,13 +1276,19 @@ def _code(a, chain):
         return start(request, project=a.get("project") or None, new=(cmd == "new"),
                      effort=(a.get("effort") or "").lower(), model=(a.get("model") or "").lower(),
                      plan=bool(a.get("plan_only")), fresh_branch=bool(a.get("fresh_branch")),
-                     question=bool(a.get("question")))
+                     question=bool(a.get("question")), branch=(a.get("branch") or "").strip(),
+                     base_branch=(a.get("base_branch") or "").strip())
     if cmd == "switch":
         hit = _find_project(a.get("project", ""))
         if not hit:
             speak(f"I couldn't find a project called {a.get('project', '')}.")
             return "Code: project not found"
-        _use(*hit)
+        proj = _use(*hit)
+        if (a.get("branch") or a.get("base_branch")) and _is_git(proj["path"]):
+            ok, _ = _prepare_branch(hit[0], proj["path"], request or "work", branch=a.get("branch", ""),
+                                    base=a.get("base_branch", ""), proj=proj)
+            if not ok:
+                return "Code: branch not switched"
         branch = _git(hit[1]["path"], "rev-parse", "--abbrev-ref", "HEAD")[1] if _is_git(hit[1]["path"]) else ""
         speak(f"Now working on {pretty(hit[0])}" + (f", on branch {branch.replace('/', ' ')}." if branch else "."))
         return f"Current project: {hit[0]}"
@@ -1129,6 +1305,14 @@ def _code(a, chain):
             parts.append("Projects I built: " + ", ".join(pretty(n) for n in mine[:8]) + ".")
         speak(" ".join(parts) or "You don't have any coding projects yet.")
         return "Code: listed"
+    if cmd == "github":
+        from . import repos
+        hit = _find_project(a.get("project")) if a.get("project") else None
+        name, proj = hit if hit else current()
+        if not name:
+            speak("Which project should go on GitHub?")
+            return "Code: github, no project"
+        return repos.publish(name, proj["path"])
     if cmd == "clone":
         name, msg = clone(a.get("project") or request)
         speak(msg)
