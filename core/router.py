@@ -93,6 +93,10 @@ def route(command):
                     r"( (of|for) (today|the day))?|brief me|(give me )?(a |my )?(daily|morning) (briefing|brief|breakdown)"
                     r"|what does (today|my day) look like", text):
         return {"mode": "action", "actions": [{"type": "briefing"}]}
+    if re.fullmatch(r"(update|sync|catch up on|refresh|pull) (all )?(my |the )?(coding sessions?|coding projects?|"
+                    r"repos|repositories|projects|code)( (on|to) (my |the )?(pc|laptop|computer))?"
+                    r"|catch me up on (my )?(coding|code|projects)", text):
+        return {"mode": "action", "actions": [{"type": "repo_sync"}]}
     if re.fullmatch(r"show (me )?my (agenda|schedule)", text):
         return {"mode": "action", "actions": [{"type": "agenda", "command": "show"}]}
     if re.fullmatch(r"what do you (remember|know) about me|show (me )?(my|your) memory", text):

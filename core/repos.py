@@ -114,6 +114,21 @@ def pending():
     return list(repos.values())
 
 
+def _coding_projects():
+    """Every project in jarvis_coding/ that's on GitHub, so the catch-up also gets ones that
+    reached GitHub without the ledger (made before it, or pushed by hand)."""
+    out = []
+    if not os.path.isdir(config.CODING_DIR):
+        return out
+    for n in sorted(os.listdir(config.CODING_DIR)):
+        path = os.path.join(config.CODING_DIR, n)
+        if os.path.isdir(os.path.join(path, ".git")):
+            repo = github_repo(path)
+            if repo:
+                out.append({"repo": repo, "name": n, "path": path, "branches": []})
+    return out
+
+
 def _synced(at):
     with _lock:
         data = _load()
@@ -208,6 +223,8 @@ def publish(name, path):
                '"get the new branches" → type "repo_sync" (clones/pulls on the PC what Claude Code did on the Pi)'])
 def _repo_sync(a, chain):
     todo = pending()
+    known = {r["repo"].lower() for r in todo}
+    todo += [r for r in _coding_projects() if r["repo"].lower() not in known]
     if not todo:
         speak("Nothing new since your last catch-up.")
         return "Repo sync: nothing new"

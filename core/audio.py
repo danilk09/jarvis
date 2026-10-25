@@ -392,6 +392,7 @@ def _record(max_duration, silence_duration, preroll=(), onset_deadline=None, ign
     recent = collections.deque(maxlen=silence_end)   # speech? for the last silence_duration
     last_voiced = 0                               # len(frames) after the last speech frame
     deadline = time.monotonic() + max_duration + 1.0
+    _noise["peak"] = 0.0
 
     while new < max_new and time.monotonic() < deadline:
         if onset_deadline and speech_start is None and time.monotonic() > onset_deadline:
@@ -402,6 +403,7 @@ def _record(max_duration, silence_duration, preroll=(), onset_deadline=None, ign
             continue
         frames.append(frame)
         new += 1
+        _noise["peak"] = max(_noise["peak"], _level(frame))
         if new <= ignore_first:
             continue
         speech = _is_speech(frame)
@@ -595,7 +597,9 @@ def _listen(max_duration, silence_duration, onset_timeout):
                      onset_deadline=time.monotonic() + onset_timeout if onset_timeout else None)
     if not frames:
         _keep([], "", "")
-        print("  No speech detected.")
+        # (room = the noise floor speech must beat; loudest = what the mic picked up meanwhile)
+        print(f"  No speech detected (room {_noise['floor']:.0f}, loudest {_noise.get('peak', 0):.0f}, "
+              f"mic: {mic.get('name', '?')[:30]}).")
         return ""
     print("  Processing speech...")
     t0 = time.monotonic()

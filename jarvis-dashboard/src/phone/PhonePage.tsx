@@ -309,7 +309,7 @@ export default function PhonePage() {
     <div className="phone">
       <header className="phHead">
         <span className="brandMark" />
-        <span className="phBrand">J.A.R.V.I.S</span>
+        <span className="phBrand">JARVIS</span>
         <span className={`phState phState-${shownState}`}><span className="phDot" />{connected && serverOk ? STATE_LABEL[shownState] || shownState : 'OFFLINE'}</span>
         <span className="phSpacer" />
         <button className={`phIconBtn ${speakOn ? 'phOn' : ''}`} aria-label="Speak replies" onClick={() => setSpeakOn(!speakOn)}>
@@ -379,7 +379,8 @@ export default function PhonePage() {
         </div>
       )}
 
-      <footer className={`phDock ${rec.recording ? 'phDockRec' : ''}`}>
+      {/* talking, photos and typing belong to the chat (the Stage gets the whole screen) */}
+      {tab === 'chat' && <footer className={`phDock ${rec.recording ? 'phDockRec' : ''}`}>
         {photo && (
           <div className="phPhoto">
             <img src={photo.url} alt="To send" />
@@ -414,7 +415,7 @@ export default function PhonePage() {
           </div>
           <button className={`phSideBtn ${typing ? 'phSideOn' : ''}`} aria-label="Type instead" onClick={() => setTyping(!typing)}>⌨</button>
         </div>
-      </footer>
+      </footer>}
 
       {daysOpen && <DaySheet days={history.days} onClose={() => setDaysOpen(false)}
                              onPick={d => { setDaysOpen(false); setTab('chat'); history.open(d); }} />}

@@ -57,6 +57,8 @@ def test_health_parsers():
                                   pihealth.disk_of("sda2")) == ("mmcblk0", "nvme0n1", "sda"))
     show = pihealth.parse_show("ActiveState=active\nMemoryCurrent=412356608\nCPUUsageNSec=[not set]\nNRestarts=2\n")
     check("systemctl show parsed", show["ActiveState"] == "active" and show["NRestarts"] == "2", show)
+    check("process memory parsed", pihealth.parse_rss_kb("Name:\tpython3\nVmPeak:\t 900000 kB\nVmRSS:\t  412356 kB\n")
+          == 412356 and pihealth.parse_rss_kb("Name:\tkthreadd\n") == 0)
 
 
 def test_sd():

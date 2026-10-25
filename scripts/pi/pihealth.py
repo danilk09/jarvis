@@ -180,6 +180,32 @@ def parse_show(text):
     return out
 
 
+def parse_rss_kb(status_text):
+    """/proc/<pid>/status -> resident memory in kB (VmRSS), or 0."""
+    for line in (status_text or "").splitlines():
+        if line.startswith("VmRSS:"):
+            parts = line.split()
+            return int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+    return 0
+
+
+def unit_rss_mb(unit, main_pid=None):
+    """Memory of every process in the unit (Jarvis and the Claude Code runs it starts), summed
+    from /proc. Raspberry Pi OS turns the kernel's memory cgroup off, so systemd's MemoryCurrent
+    is "[not set]" there; the unit's cgroup still lists its processes."""
+    pids = set()
+    base = f"/sys/fs/cgroup/system.slice/{unit}"
+    for root, _dirs, files in os.walk(base):
+        if "cgroup.procs" in files:
+            pids.update(p for p in (_read(os.path.join(root, "cgroup.procs")) or "").split() if p.isdigit())
+    if not pids and main_pid:
+        pids = {str(main_pid)}
+    if not pids:
+        return None
+    kb = sum(parse_rss_kb(_read(f"/proc/{p}/status")) for p in pids)
+    return round(kb * 1024 / 1e6, 1) if kb else None
+
+
 def service(unit="jarvis.service"):
     """{'state', 'since', 'mem_mb', 'cpu_s', 'restarts', 'pid'} from systemd (whole unit,
     child processes such as Claude Code runs included)."""
@@ -194,9 +220,12 @@ def service(unit="jarvis.service"):
         return int(v) if v.isdigit() else None
 
     mem, cpu = num("MemoryCurrent"), num("CPUUsageNSec")
+    mem_mb = round(mem / 1e6, 1) if mem is not None and mem < 1 << 60 else None
+    if mem_mb is None and p.get("ActiveState") == "active":
+        mem_mb = unit_rss_mb(unit, num("MainPID"))      # no memory cgroup (Raspberry Pi OS)
     return {"state": p.get("ActiveState") if p.get("LoadState") != "not-found" else "not installed",
             "since": p.get("ActiveEnterTimestamp") or None,
-            "mem_mb": round(mem / 1e6, 1) if mem is not None and mem < 1 << 60 else None,
+            "mem_mb": mem_mb,
             "cpu_s": round(cpu / 1e9, 1) if cpu is not None and cpu < 1 << 62 else None,
             "restarts": num("NRestarts"), "pid": num("MainPID") or None}
 

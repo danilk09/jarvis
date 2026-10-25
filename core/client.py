@@ -51,13 +51,20 @@ def _url(path):
     return config.CLIENT_OF + path
 
 
+_failing = set()     # calls that failed: logged once (an older brain lacks some of them)
+
+
 def _post(path, body, timeout=10):
     try:
         r = requests.post(_url(path), json=body, timeout=timeout)
         r.raise_for_status()
+        _failing.discard(path)
         return True
     except requests.RequestException as e:
-        print(f"  [client] {path} failed: {e}")
+        if path not in _failing:
+            _failing.add(path)
+            hint = " (the brain's code is older than this PC's: git pull on the Pi)" if "405" in str(e) else ""
+            print(f"  [client] {path} failed: {e}{hint}")
         return False
 
 

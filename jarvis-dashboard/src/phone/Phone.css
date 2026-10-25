@@ -30,15 +30,17 @@
 }
 
 .phHead {
-  display: flex; align-items: center; gap: 8px;
-  padding: 10px 12px; border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; gap: 6px;
+  padding: 8px 12px; border-bottom: 1px solid var(--border);
 }
-.phBrand { font-family: var(--mono); font-size: 13px; letter-spacing: 0.25em; color: var(--green); }
-.phSpacer { flex: 1; }
+.phHead .brandMark { flex-shrink: 0; }
+.phBrand { font-family: var(--mono); font-size: 13px; letter-spacing: 0.2em; color: var(--green); flex-shrink: 0; }
+.phSpacer { flex: 1; min-width: 4px; }
 .phState {
   --state: var(--green-dim);
-  display: inline-flex; align-items: center; gap: 6px; margin-left: 4px;
-  font-family: var(--mono); font-size: 10px; letter-spacing: 0.15em; color: var(--state);
+  display: inline-flex; align-items: center; gap: 5px; margin-left: 2px; flex-shrink: 1; min-width: 0;
+  overflow: hidden; white-space: nowrap;
+  font-family: var(--mono); font-size: 9px; letter-spacing: 0.12em; color: var(--state);
   border: 1px solid color-mix(in srgb, var(--state) 40%, transparent); border-radius: 999px; padding: 3px 8px;
 }
 .phState-activated { --state: #7fd1f0; }
@@ -50,7 +52,7 @@
 @keyframes phBlink { 50% { opacity: 0.3; } }
 
 .phIconBtn {
-  min-width: 36px; height: 36px; border-radius: 10px; border: 1px solid var(--border);
+  width: 34px; min-width: 34px; height: 34px; padding: 0; border-radius: 10px; border: 1px solid var(--border);
   background: var(--surface); color: var(--text-bright); font-size: 16px;
   display: inline-flex; align-items: center; justify-content: center; text-decoration: none; cursor: pointer;
   flex-shrink: 0;
@@ -192,7 +194,7 @@
    bring up Safari's toolbar instead; photo and typing are the small buttons beside it. */
 .phDock {
   flex-shrink: 0; border-top: 1px solid var(--border); background: var(--surface);
-  padding: 8px 12px calc(30px + env(safe-area-inset-bottom));
+  padding: 6px 12px calc(10px + env(safe-area-inset-bottom));
 }
 .phPhoto { display: flex; align-items: center; gap: 10px; padding: 2px 0 8px; font-size: 13px; color: var(--text-dim); }
 .phPhoto img { width: 44px; height: 44px; object-fit: cover; border-radius: 8px; border: 1px solid var(--border); }
@@ -209,13 +211,13 @@
   border: 1px solid var(--green); background: var(--green); color: var(--bg);
 }
 .phSend:disabled { opacity: 0.4; }
-.phDockRow { display: flex; align-items: center; justify-content: center; gap: 34px; padding-top: 4px; }
+.phDockRow { display: flex; align-items: center; justify-content: center; gap: 34px; padding-top: 2px; }
 .phSideBtn {
   width: 50px; height: 50px; border-radius: 50%; flex-shrink: 0; cursor: pointer; font-size: 19px;
   border: 1px solid var(--border-bright); background: var(--surface-2); color: var(--text-bright);
 }
 .phSideOn { background: var(--surface-3); border-color: var(--green); }
-.phMicWrap { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+.phMicWrap { display: flex; flex-direction: column; align-items: center; gap: 5px; }
 .phBigMic {
   width: 88px; height: 88px; border-radius: 50%; cursor: pointer; border: none;
   display: flex; align-items: center; justify-content: center;
