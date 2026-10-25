@@ -98,8 +98,10 @@ def _startup():
     if restored:
         print(f"  Stage: restored {restored} panel{'s' if restored != 1 else ''} from last time")
     coding.init()                                     # Claude Code projects + preferences file
-    if not config.HEADLESS:   # Stage content with no window open (the Pi has no screen: it waits)
+    if not config.HEADLESS:   # Stage content with no window open
         stage.open_dashboard = lambda: desktop.open_dashboard(dash_url)
+    else:                     # the Pi has no screen: the PC client opens its window (if it's on)
+        stage.open_dashboard = lambda: turns.publish({"type": "open_window"}) if turns.pc_online() else None
     server.start()
     desktop.on_closed.append(_window_closed)
     if config.OPEN_WINDOW:
@@ -287,11 +289,13 @@ def _stop_signal(signum, frame):
 
 
 def _client_startup():
-    """--client: only the PC's part — mic, wake word, voice ID, speakers, the local dashboard
-    for the orb. The brain (router, Claude, memory, agenda, Claude Code) is on the Pi."""
-    dash_url = f"http://localhost:{config.PORT}"
-    state.dash_url = dash_url
+    """--client: only the PC's part — mic, wake word, voice ID, speakers. The window shows the
+    brain's dashboard and Stage (the Pi's); the local server is there for the Jarvis shortcut
+    (POST /api/window). The brain (router, Claude, memory, agenda, Claude Code) is on the Pi."""
+    dash_url = config.CLIENT_OF
+    state.dash_url = f"http://localhost:{config.PORT}"
     server.start()
+    stage.open_dashboard = lambda: desktop.open_dashboard(dash_url)
     desktop.on_closed.append(_window_closed)
     if config.OPEN_WINDOW:
         time.sleep(0.6)

@@ -54,7 +54,13 @@ say, anywhere, goes to the Pi. One memory, agenda and history, so there is nothi
   (Activity tab) and the phone (🕘) opens any earlier day. Lines now record phone/PC.
 - **M6 is built** (`core/repos.py`): one `jarvis` branch per repo (user's choice, 2026-10-24; `jarvis-<task>` only when asked), pushed after each run, one GitHub offer per
   new project (private repo), a ledger, and "update my coding sessions" on the PC.
-- **Next:** M7 (launcher + Electron → Pi).
+- **M7 is built**: the PC's window shows the Pi's dashboard and Stage, the Pi's orb follows the
+  PC's voice and a click on it opens the PC's mic, the Pi opens the PC's window for new Stage
+  content, and the PC offers to start Jarvis on the Pi through the power page. `JARVIS_BRAIN` +
+  `JARVIS_POWER_KEY` in the PC's `.env`; push/pull scripts are backups.
+- **Phase 3 is done.** Still open: a client key if the tailnet ever has untrusted devices; the PC's
+  voice-label ✎/✓ in the Pi's dashboard (recordings stay on the PC); files that only exist on the
+  PC on the Pi's Stage.
 
 ## How it fits together
 
@@ -142,7 +148,7 @@ Each is testable before the next starts.
 | M4 ✓ | Reply routing + proactive messages | phone command spoken at the PC when you're active; reminders/check-ins at the PC or the phone depending on presence |
 | M5 ✓ | History | restart the Pi, yesterday's conversation is still on the dashboard; a day picker |
 | M6 ✓ | Coding on the Pi | task branch auto-pushed; new project → private repo after OK; "update my coding sessions" clones/pulls on the PC |
-| M7 | Launcher + Electron → Pi, power start, docs | the Desktop shortcut gives the full experience; `push_to_pi.ps1`/`pull_from_pi.ps1` kept only as backups |
+| M7 ✓ | Launcher + Electron → Pi, power start, docs | the Desktop shortcut gives the full experience; `push_to_pi.ps1`/`pull_from_pi.ps1` kept only as backups |
 
 ## Open details (decide during the milestones)
 

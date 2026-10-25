@@ -62,6 +62,17 @@ def push_state(state, transcript="", sample=""):
 on_log: list = []
 # Called with the new state when it changes (turns.py streams it to the phone page)
 on_state: list = []
+# Called with ("start", start, frame_ms, envelope) / ("end",) as speech plays (client.py
+# reports the PC's speech to the brain, so the orb in the Pi's dashboard moves with it)
+on_speech: list = []
+
+
+def _speech_hooks(*args):
+    for fn in on_speech:
+        try:
+            fn(*args)
+        except Exception as e:
+            print(f"  Speech hook error: {e}")
 
 
 def push_log(role, text, sample=""):
@@ -123,9 +134,11 @@ def start_speech(start, frame_ms, envelope):
             del speech_envelopes[old]
         dash_state["speech"] = {"id": _speech_id, "start": int(start * 1000), "end": None,
                                 "frame_ms": frame_ms, "frames": len(envelope["level"])}
+    _speech_hooks("start", start, frame_ms, envelope)
 
 
 def end_speech():
     with dash_lock:
         if dash_state["speech"] and dash_state["speech"]["end"] is None:
             dash_state["speech"] = {**dash_state["speech"], "end": int(time.time() * 1000)}
+    _speech_hooks("end")

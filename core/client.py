@@ -73,6 +73,11 @@ def _handle(ev):
         speak(ev["text"])        # our own replies, a phone command's while you're here, reminders...
     elif t == "do":
         threading.Thread(target=_do, args=(ev,), daemon=True, name="client-do").start()
+    elif t == "activate":                      # the orb was clicked on the brain's dashboard
+        audio.trigger_wake()
+    elif t == "open_window":                   # something went on the Stage and no window shows it
+        from . import desktop
+        desktop.open_dashboard(config.CLIENT_OF)
     elif t in ("listen", "hello") and _for_pc(ev if t == "listen" else ev.get("listen") or {}):
         q = ev if t == "listen" else ev["listen"]
         _listen.update(question=q.get("question") or "", since=time.time())
@@ -110,6 +115,54 @@ def _events():
                 told = True
             _online.clear()
         time.sleep(3)
+
+
+# ── Mirroring the PC's voice on the brain's dashboard (its orb) ──────────────
+def _on_speech(kind, *args):
+    body = {"end": True} if kind == "end" else {"start": args[0], "frame_ms": args[1], "envelope": args[2]}
+    threading.Thread(target=_post, args=("/api/client/speech", body, 5), daemon=True).start()
+
+
+def _on_state(new_state):
+    if new_state in ("activated", "speaking", "idle") and _online.is_set():
+        threading.Thread(target=_post, args=("/api/client/state", {"state": new_state}, 5), daemon=True).start()
+
+
+# ── The Pi's power switch ─────────────────────────────────────────────────────
+def _power(path, method="GET"):
+    """The Pi's power page API (scripts/pi/control.py). (status, json) or (0, {}) unreachable."""
+    if not config.POWER_URL:
+        return 0, {}
+    try:
+        r = requests.request(method, config.POWER_URL + path, headers={"X-Key": config.POWER_KEY}, timeout=6)
+        return r.status_code, (r.json() if r.content else {})
+    except (requests.RequestException, ValueError):
+        return 0, {}
+
+
+def _offer_start():
+    """The brain didn't answer. Pi up but Jarvis off → offer to start him; Pi down → say so."""
+    from .agent import _NO, _YES
+    code, _ = _power("/api/status")
+    if code == 0:
+        speak("I can't reach the Pi, sir. Is it switched on?")
+        return False
+    if code == 403:
+        speak("Jarvis is off on the Pi. I can't start him from here without the power key: add "
+              "JARVIS_POWER_KEY to the .env file.")
+        return False
+    speak("Jarvis is off on the Pi. Shall I start him?")
+    wait_tts()
+    answer = audio.listen_for_command(onset_timeout=config.ANSWER_WINDOW)
+    if not (_YES.search(answer or "") and not _NO.search(answer or "")):
+        speak("Alright. I'll wait here.")
+        return False
+    code, r = _power("/api/start", "POST")
+    if code != 200 or not r.get("ok"):
+        speak("The Pi wouldn't start him. " + str(r.get("message") or ""))
+        return False
+    speak("Starting him up. This takes about half a minute.")
+    return _online.wait(120)
 
 
 def _connected():
@@ -257,10 +310,12 @@ def run(greeting):
     """Start the PC side and loop forever (Ctrl+C or closing the window ends it)."""
     threading.Thread(target=_events, daemon=True, name="client-events").start()
     threading.Thread(target=_presence, daemon=True, name="client-presence").start()
-    if _online.wait(8):
+    state.on_speech.append(_on_speech)
+    state.on_state.append(_on_state)
+    if _online.wait(8) or _offer_start():
         speak(greeting())
     else:
-        speak(_UNREACHABLE + " I'll keep trying.")
+        print("  [client] the brain isn't answering; still trying in the background")
     print(f"\n  Say 'Jarvis' — commands go to the brain at {config.CLIENT_OF}\n")
     while not state.shutdown.is_set():
         audio.enable_wake()

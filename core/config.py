@@ -4,6 +4,7 @@ Settings and shared constants. Everything user-tunable lives here.
 
 import os
 import platform
+import re
 import sys
 
 import anthropic
@@ -35,6 +36,10 @@ if "--client" in sys.argv:
         CLIENT_OF = sys.argv[_i + 1]
 CLIENT_OF = CLIENT_OF.rstrip("/")
 CLIENT = bool(CLIENT_OF) and not HEADLESS
+# The Pi's power switch (scripts/pi/control.py, port 5152): when Jarvis is off on the Pi, the PC
+# offers to start him. JARVIS_POWER_KEY in .env = the key from `python3 scripts/pi/control.py link`.
+POWER_URL = re.sub(r":\d+$", "", CLIENT_OF) + ":5152" if CLIENT_OF else ""
+POWER_KEY = os.environ.get("JARVIS_POWER_KEY", "")
 # Headless, Jarvis's questions ("Should I go ahead?") are answered from the phone, which takes
 # longer than saying it: seconds to wait for that answer.
 HEADLESS_ANSWER_WAIT = 90

@@ -4,8 +4,19 @@ Jarvis runs on the Pi at home; you talk to him from the `/phone` page (and the d
 Tailscale. A power page with Start / Stop buttons decides when he runs, he's stopped every night
 at 11 PM in case you forget, and a heat guard stops him if the Pi ever runs hot.
 
-Until the PC becomes a client of the Pi (Mobile Jarvis Phase 3), run **one Jarvis at a time**:
-either the PC or the Pi. `push_to_pi.ps1` / `pull_from_pi.ps1` move his memory between them.
+The Pi is the only brain. The PC is its client: wake word, mic, Jarvis's voice on the PC
+speakers, PC actions, and a window showing the Pi's dashboard and Stage. Set it up once on the PC:
+
+```
+# .env on the PC
+JARVIS_BRAIN=https://<pi>.<tailnet>.ts.net:5151
+JARVIS_POWER_KEY=<the key from: python3 scripts/pi/control.py link>
+```
+
+Then the Desktop shortcut (or `python jarvis.py`) starts the client. If Jarvis is off on the Pi,
+the PC asks "Shall I start him?" and uses the power page; if the Pi doesn't answer, it says so.
+Remove `JARVIS_BRAIN` to make the PC its own brain again. `push_to_pi.ps1` / `pull_from_pi.ps1`
+are only backups now (moving his memory by hand).
 
 ## Setup day
 
@@ -96,9 +107,10 @@ ends (or fails), so you can read why. A day later:
 | `report` | Everything above in `results/report.md` | |
 | `selftest` | Offline check of the parsers, summaries and the power switch (any OS) | all PASS |
 
-## Moving Jarvis back to the PC
+## Moving Jarvis back to the PC (backup)
 
-Run this on the PC: it stops Jarvis on the Pi and brings his memory back (the PC's copy is
+Only if you want the PC to be the brain again (then delete `JARVIS_BRAIN` from the PC's
+`.env`). Run this on the PC: it stops Jarvis on the Pi and brings his memory back (the PC's copy is
 backed up to `%USERPROFILE%\jarvis_backups\` first).
 
 ```powershell
@@ -113,5 +125,5 @@ powershell -ExecutionPolicy Bypass -File scripts\pi\pull_from_pi.ps1 <user>@<pi>
 | `install_service.sh` | `jarvis.service`, `jarvis-control.service`, `jarvis-nightly.timer`, the sudoers rule; `remove` undoes all |
 | `control.py` | The power switch: page, Start/Stop, heat guard, 11 PM stop, boot state (`jarvis_memory/control.json`) |
 | `diagnose.py`, `diag`, `pihealth.py` | Health checks; `pihealth.py` has the readings shared with `control.py` |
-| `push_to_pi.ps1`, `pull_from_pi.ps1` | Move Jarvis's data PC → Pi and back (run on the PC) |
+| `push_to_pi.ps1`, `pull_from_pi.ps1` | Backups: move Jarvis's data PC → Pi and back by hand (run on the PC) |
 | `diag_selftest.py` | Offline tests for all of the above |

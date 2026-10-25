@@ -302,6 +302,12 @@ def _window():
 
 @app.route("/api/activate", methods=["POST"])
 def _activate():
+    """The orb was clicked. On the brain (no mic) that's the PC client's mic, if it's there."""
+    if config.HEADLESS:
+        if not turns.pc_online():
+            return jsonify({"ok": False})
+        turns.publish({"type": "activate"})
+        return jsonify({"ok": True})
     return jsonify({"ok": audio.trigger_wake()})
 
 
@@ -519,6 +525,30 @@ def _client_index():
         state.workspaces.clear()
         state.workspaces.update(ws)
         brain.rebuild_prompt(state.workspaces)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/client/speech", methods=["POST"])
+def _client_speech():
+    """The PC client is speaking: {"start", "frame_ms", "envelope"} or {"end": true}, so this
+    dashboard's orb moves with the voice coming out of the PC."""
+    b = _body()
+    if b.get("end"):
+        state.end_speech()
+    elif isinstance(b.get("envelope"), dict):
+        state.start_speech(float(b.get("start") or time.time()), int(b.get("frame_ms") or 20), b["envelope"])
+    return jsonify({"ok": True})
+
+
+@app.route("/api/client/state", methods=["POST"])
+def _client_state():
+    """What the PC is doing with its mic and speakers (activated = listening, speaking, idle)."""
+    st = _body().get("state")
+    with state.dash_lock:
+        now = state.dash_state["state"]
+    # "idle" only ends what the PC itself started: it mustn't hide the brain thinking (a phone command)
+    if st in ("activated", "speaking") or (st == "idle" and now in ("activated", "speaking")):
+        state.push_state(st)
     return jsonify({"ok": True})
 
 
